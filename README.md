@@ -14,6 +14,7 @@ After that, update from inside the app: **Settings → Check for updates**.
 
 | Version | Phase | What's in it |
 |---|---|---|
+| 0.3.0 | 1 | Your real photos and videos: timeline with pinch zoom (2 to 7 columns, month view), albums, full-screen viewer with deep zoom, video player, share, favourite, delete to trash, details, multi-select |
 | 0.2.0 | 0 | In-app updater (GitHub Releases, SHA-256 checked), permanent signing key |
 | 0.1.0 | 0 | App shell, 3 switchable designs, local crash logs (Settings → Diagnostics) |
 

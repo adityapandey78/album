@@ -4,8 +4,11 @@ import android.app.Application
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.os.StrictMode
+import coil3.ImageLoader
+import coil3.PlatformContext
+import coil3.SingletonImageLoader
 
-class AlbumApp : Application() {
+class AlbumApp : Application(), SingletonImageLoader.Factory {
     override fun onCreate() {
         super.onCreate()
         CrashLog.install(this)
@@ -16,6 +19,13 @@ class AlbumApp : Application() {
             StrictMode.setVmPolicy(StrictMode.VmPolicy.Builder().detectAll().penaltyLog().build())
         }
     }
+
+    override fun newImageLoader(context: PlatformContext) = ImageLoader.Builder(context)
+        .components {
+            add(ThumbFetcher.Factory())
+            add(ThumbKeyer())
+        }
+        .build()
 }
 
 fun Context.isDebuggable() = applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
