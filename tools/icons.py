@@ -28,7 +28,7 @@ beach_access cake directions_car home celebration sports_soccer receipt_long qr_
 light_mode contrast play_circle stop skip_next skip_previous replay sd_card phone_android filter_list done_all
 radio_button_unchecked more_horiz cancel help flag auto_delete hourglass_empty bolt burst_mode panorama gif today
 date_range view_module dashboard timer speed map forest nightlight local_florist directions_walk shopping_bag
-menu_book music_note brush groups label_off new_label photo_frame
+menu_book music_note brush groups label_off new_label photo_frame mail
 """.split()
 
 

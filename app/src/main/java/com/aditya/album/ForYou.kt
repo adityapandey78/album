@@ -1,6 +1,10 @@
 package com.aditya.album
 
+import android.content.Context
 import android.text.format.Formatter
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -15,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -28,6 +33,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -36,7 +42,11 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.core.content.edit
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -45,9 +55,9 @@ import java.time.MonthDay
 import java.time.YearMonth
 import java.time.format.DateTimeFormatter
 
-// The For you tab: memories made on this phone from the Library (on this day, this week last year, trips, month and year
-// recaps), photos to clean up or protect, and where the storage goes. Worked out from the photo list and the smart index's
-// towns and text; nothing is uploaded.
+// The For you tab, in two sections. Memories: made on this phone from the Library (on this day, this week last year,
+// trips, month and year recaps), and photos to protect. Clean up: where the storage goes and what can go. Worked out from
+// the photo list and the smart index's towns and text; nothing is uploaded.
 
 /** A memory card: a line in meta above its title, and its photos oldest first, the order it plays in. */
 class Memory<T>(val eyebrow: String, val title: String, val items: List<T>)
@@ -107,6 +117,20 @@ fun <T> yearRecap(photos: List<T>, today: LocalDate, dayOf: (T) -> Long): Memory
     val items = photos.filter { dayOf(it) in days }.asReversed()
     if (items.isEmpty()) return null
     return Memory(if (year == today.year) "So far this year" else "Year recap", "$year", items)
+}
+
+// After the hero, a few memories at most: the section is a calm look back, not the whole archive
+private const val MORE_MEMORIES = 4
+
+/**
+ * What Memories shows, the hero first: on this day, else the newest trip, else the latest recap. Then, at most
+ * [MORE_MEMORIES] of the others in a set order: the newest trip, the month recap, this week, the year recap, older trips.
+ */
+fun <T> memoriesOf(onThisDay: Memory<T>?, trips: List<Memory<T>>, month: Memory<T>?, week: Memory<T>?, year: Memory<T>?): List<Memory<T>> {
+    // This week never leads: its photos are from before this month, so whenever it's there the month recap is too
+    val hero = onThisDay ?: trips.firstOrNull() ?: month ?: year ?: return emptyList()
+    val others = listOfNotNull(trips.firstOrNull(), month, week, year) + trips.drop(1)
+    return listOf(hero) + others.filter { it !== hero }.take(MORE_MEMORIES)
 }
 
 // Words that find a candidate in the text index, at least one per kind of card; looksLikeIdCard then reads the whole text.
@@ -187,38 +211,58 @@ fun <T> storageOf(items: List<T>, kind: (T) -> StorageKind, size: (T) -> Long): 
     return StorageKind.entries.map { it to bytes[it.ordinal] }.filter { it.second > 0 }
 }
 
-private class ForYou(
-    val onThisDay: Memory<Media>?,
-    /** The smaller memories, two to a row: the newest trip and the recaps first, then older trips. */
-    val memories: List<Memory<Media>>,
-    val storage: List<Pair<StorageKind, Long>>,
-)
+/** For you's two sections, switched by the chips under its title. */
+enum class ForYouSection(val label: String) { Memories("Memories"), Cleanup("Clean up") }
 
-private fun forYouOf(media: List<Media>, today: LocalDate, places: List<Group<Place, Media>>?): ForYou {
+/** The section For you opens on: the one picked last time ([saved], as the "settings" prefs keep it), else Memories. */
+fun forYouSection(saved: String?) = ForYouSection.entries.find { it.name == saved } ?: ForYouSection.Memories
+
+/** A clean-up pass with at least this many photos to go says so, instead of showing counts that move while it runs. */
+const val STILL_CHECKING_MIN = 100
+
+/**
+ * How many photos Clean up is still checking, or null when its counts can show: from the start of a pass with at least
+ * [STILL_CHECKING_MIN] to go until it ends, so they never move while you read them. A few new photos are done in a moment.
+ * [shown] is the last answer; [scan] is the clean-up pass's progress, null when none runs.
+ */
+fun stillChecking(shown: Int?, scan: IndexProgress?): Int? {
+    val left = scan?.let { it.total - it.done } ?: return null
+    return left.takeIf { shown != null || it >= STILL_CHECKING_MIN }
+}
+
+/** Memories in [media] (newest first) on [today], the hero first. See [memoriesOf]. */
+private fun memoriesIn(media: List<Media>, today: LocalDate, places: List<Group<Place, Media>>?): List<Memory<Media>> {
     // Memories play as photo stories; videos would need their own length
     val photos = media.filter { !it.isVideo }
     val placeOf = placesById(places.orEmpty())
-    val trips = trips(photos, Media::day) { placeOf[it.id] }
-    return ForYou(
-        onThisDay(photos, today, Media::day),
-        listOfNotNull(
-            trips.firstOrNull(), monthRecap(photos, today, Media::day), weekLastYear(photos, today, Media::day),
-            yearRecap(photos, today, Media::day),
-        ) + trips.drop(1),
-        storageOf(media, { storageKind(it.isVideo, it.path, it.bucketName, it.name) }, Media::size),
+    return memoriesOf(
+        onThisDay(photos, today, Media::day), trips(photos, Media::day) { placeOf[it.id] }, monthRecap(photos, today, Media::day),
+        weekLastYear(photos, today, Media::day), yearRecap(photos, today, Media::day),
     )
 }
 
-// Card heights from the design: the big memory gets more of the screen than the two beside each other
+// The clean-up pass's name in IndexStatus, as Cleanup reports it
+private const val CLEANUP_JOB = "Clean-up"
+
+// The "settings" prefs key that remembers the section For you was left on
+private const val SECTION_KEY = "for_you_section"
+
+// Card heights from the design: the hero gets more of the screen than the memories under it
 private val BigMemoryHeight = 300.dp
 private val MemoryHeight = 190.dp
+private val RowHeight = 56.dp // as tall as a menu row
 private val StorageBarHeight = 10.dp
+private val StorageBarGap = 2.dp
 private val LegendDot = 8.dp
+private val Hairline = 1.dp
 
 /**
- * The For you tab. [contentPadding] already clears the status bar and the floating bottom bar. [onPlay] opens a memory
- * as a story with its title, eyebrow and up to [STORY_LENGTH] photos. [cleanupCount] is how many photos swipe to clean
- * has to review; [onProtect] gets the photos that look like ID cards, for the Private safe.
+ * The For you tab: its title, a chip per section, and the section picked, which For you opens on next time too. Memories
+ * is a hero memory, a few more under it and, quietly, photos that look like ID cards; Clean up is where the storage goes,
+ * swipe to clean and a row per clean-up category. [contentPadding] already clears the status bar and the floating bottom
+ * bar. [onPlay] opens a memory as a story with its title, eyebrow and up to [STORY_LENGTH] photos. [cleanupCount] is how
+ * many photos swipe to clean has to review; [onCleanupCategory] opens Clean up on one category (a [CleanupKind] name);
+ * [onProtect] gets the photos that look like ID cards, for the Private safe.
  */
 @Composable
 fun ForYouScreen(
@@ -230,7 +274,14 @@ fun ForYouScreen(
     onCleanup: () -> Unit,
     onStorage: () -> Unit,
     onProtect: (List<Media>) -> Unit,
+    onCleanupCategory: (String) -> Unit,
 ) {
+    val prefs = LocalContext.current.getSharedPreferences("settings", Context.MODE_PRIVATE)
+    var section by rememberSaveable { mutableStateOf(forYouSection(prefs.getString(SECTION_KEY, null))) }
+    fun pick(s: ForYouSection) {
+        section = s
+        prefs.edit { putString(SECTION_KEY, s.name) }
+    }
     // The app can stay open overnight; "on this day" moves on when it comes back
     var today by remember { mutableStateOf(LocalDate.now()) }
     LifecycleResumeEffect(Unit) {
@@ -239,9 +290,16 @@ fun ForYouScreen(
     }
     // Towns per photo, shared with Collections and re-read at most every few seconds while the index runs
     val places by Explore.places.collectAsState()
-    // A pass over the whole Library (20k photos on a big phone) stays off the main thread, so switching tabs never stutters
-    val model by produceState<ForYou?>(null, photos, today, places) {
-        value = withContext(Dispatchers.Default) { forYouOf(photos, today, places) }
+    // Passes over the whole Library (20k photos on a big phone) stay off the main thread, so switching tabs never stutters.
+    // Both sections are worked out here, so switching between them shows each at once.
+    val memories by produceState<List<Memory<Media>>?>(null, photos, today, places) {
+        value = withContext(Dispatchers.Default) { memoriesIn(photos, today, places) }
+    }
+    // Storage counts every item, as the storage screen it opens does: WhatsApp may live in folders hidden from the Library
+    val all = Gallery.media.collectAsState().value
+    val storage by produceState<List<Pair<StorageKind, Long>>?>(null, all) {
+        if (all == null) return@produceState // not loaded yet
+        value = withContext(Dispatchers.Default) { storageOf(all, { storageKind(it.isVideo, it.path, it.bucketName, it.name) }, Media::size) }
     }
     // Text is read as the index runs, so ID cards are looked for again whenever a pass ends. Only photos still in the
     // Library count: ones just moved to the Private safe drop out at once, before the index forgets them.
@@ -251,45 +309,114 @@ fun ForYouScreen(
         value = withContext(Dispatchers.IO) { runCatching { idCardIds() }.onFailure { CrashLog.note("id cards: $it") }.getOrDefault(emptySet()) }
     }
     val idCards = remember(photos, idCardIds) { if (idCardIds.isEmpty()) emptyList() else photos.filter { it.id in idCardIds } }
+    val still = AlbumTheme.spec.still
     LazyColumn(Modifier.fillMaxSize(), state, contentPadding) {
         item(key = "title") { LargeTopBar("For you", subtitle = "Made on this phone, from your photos") }
-        val m = model ?: return@LazyColumn
-        fun card(key: String, content: @Composable () -> Unit) = item(key = key) {
-            Box(Modifier.padding(start = Space.s4, end = Space.s4, bottom = Space.s3)) { content() }
-        }
-        fun play(memory: Memory<Media>) = onPlay(memory.title, memory.eyebrow, spread(memory.items, STORY_LENGTH))
-        val rows = m.memories.chunked(2)
-        fun row(i: Int) = card("memories $i") {
-            Row(horizontalArrangement = Arrangement.spacedBy(Space.s3)) {
-                rows[i].forEach { MemoryCard(it, big = false, onClick = { play(it) }, Modifier.weight(1f)) }
-            }
-        }
-
-        m.onThisDay?.let { card("on this day") { MemoryCard(it, big = true, onClick = { play(it) }, Modifier.fillMaxWidth()) } }
-        if (rows.isNotEmpty()) row(0)
-        if (m.onThisDay == null && rows.isEmpty()) {
-            card("empty") {
-                EmptyState(Sym.Favorite, "No memories yet", "Photos from this day in earlier years, trips and recaps show up here.")
-            }
-        }
-        // What needs doing comes after the first memories, before older trips push it off the screen
-        if (cleanupCount > 0) {
-            card("cleanup") {
-                InfoCard(Sym.CleaningServices, counted(cleanupCount, "photo to review", "photos to review"), "Similar shots, blurry photos and old screenshots") {
-                    AlbumButton("Start swipe to clean", onCleanup, Modifier.fillMaxWidth(), ButtonVariant.Primary, Sym.Swipe)
+        item(key = "sections") {
+            // Wraps rather than clips when the phone's font size is large
+            FlowRow(
+                Modifier.padding(start = Space.s4, end = Space.s4, bottom = Space.s4),
+                horizontalArrangement = Arrangement.spacedBy(Space.s2),
+                verticalArrangement = Arrangement.spacedBy(Space.s2),
+            ) {
+                ForYouSection.entries.forEach { s ->
+                    val on = s == section
+                    // A button that says it's selected: tapping the picked one again changes nothing, so it isn't a toggle
+                    Chip(s.label, { pick(s) }, Modifier.semantics { selected = on }, selected = on, toggle = false)
                 }
             }
+        }
+        // A section is a handful of cards, so it's one item, which lets the two crossfade
+        item(key = "section") {
+            Crossfade(section, animationSpec = if (still) snap() else tween(220), label = "section") { s ->
+                when (s) {
+                    ForYouSection.Memories -> MemoriesSection(memories, idCards, onPlay, onProtect)
+                    ForYouSection.Cleanup -> CleanupSection(storage, cleanupCount, onCleanup, onStorage, onCleanupCategory)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The hero memory, the others under it all the same size, then the ID card guard: only when there are photos that look
+ * like ID cards, and quiet. Every card plays or opens when tapped. [memories] is null while they're worked out.
+ */
+@Composable
+private fun MemoriesSection(
+    memories: List<Memory<Media>>?,
+    idCards: List<Media>,
+    onPlay: (title: String, eyebrow: String, items: List<Media>) -> Unit,
+    onProtect: (List<Media>) -> Unit,
+) {
+    if (memories == null) return // a moment; an empty state now would only flash
+    Column(Modifier.padding(horizontal = Space.s4), verticalArrangement = Arrangement.spacedBy(Space.s3)) {
+        if (memories.isEmpty()) {
+            EmptyState(Sym.Favorite, "No memories yet", "Photos from this day in earlier years, trips and recaps show up here.")
+        }
+        memories.forEachIndexed { i, m ->
+            MemoryCard(m, big = i == 0, onClick = { onPlay(m.title, m.eyebrow, spread(m.items, STORY_LENGTH)) }, Modifier.fillMaxWidth())
         }
         if (idCards.isNotEmpty()) {
-            val title = if (idCards.size == 1) "1 photo looks like an ID card" else "${"%,d".format(idCards.size)} photos look like ID cards"
-            card("id cards") {
-                InfoCard(Sym.IdCard, title, "Aadhaar, PAN or bank cards found in your Library") {
-                    AlbumButton("Review and protect", { onProtect(idCards) }, Modifier.fillMaxWidth(), icon = Sym.Lock)
-                }
-            }
+            LinkRow(
+                Sym.IdCard,
+                counted(idCards.size, "photo looks like an ID card", "photos look like ID cards"),
+                caption = "Keep Aadhaar, PAN and bank cards in the Private safe",
+                count = null,
+                onClickLabel = "Review and protect",
+                onClick = { onProtect(idCards) },
+                modifier = Modifier.padding(top = Space.s3).border(Hairline, AlbumTheme.colors.line, RoundedCornerShape(Space.radiusMd)),
+            )
         }
-        for (i in 1 until rows.size) row(i)
-        if (m.storage.isNotEmpty()) card("storage") { StorageCard(m.storage, onStorage) }
+    }
+}
+
+/**
+ * Where the storage goes, then swipe to clean and a row per clean-up category with something in it, each opening Clean up
+ * on that category. While a longer clean-up pass runs its counts would keep moving, so the rows leave them out and a line
+ * under the heading says how many photos are left to check instead. [storage] is null while it's worked out.
+ */
+@Composable
+private fun CleanupSection(
+    storage: List<Pair<StorageKind, Long>>?,
+    toReview: Int,
+    onCleanup: () -> Unit,
+    onStorage: () -> Unit,
+    onCategory: (String) -> Unit,
+) {
+    if (storage == null) return // a moment; without it the rest would jump down when it comes
+    val context = LocalContext.current
+    val summary by Cleanup.summary.collectAsState()
+    val left = produceState<Int?>(null) { IndexStatus.running.collect { value = stillChecking(value, it[CLEANUP_JOB]) } }.value
+    fun size(bytes: Long) = Formatter.formatShortFileSize(context, bytes) // KB, MB or GB as fits, in the phone's locale
+    // Straight from the categories and their own labels and icons, so a new or renamed one shows up here as it is
+    val kinds = CleanupKind.entries.mapNotNull { kind -> summary?.kinds?.get(kind)?.takeIf { it.count > 0 }?.let { kind to it } }
+    val caption = when {
+        left != null -> "Still checking ${counted(left, "photo", "photos")}"
+        toReview > 0 -> counted(toReview, "photo to review", "photos to review")
+        summary != null && kinds.isEmpty() -> "Nothing to clean up right now"
+        else -> null // not looked at yet: a moment after the Library loads
+    }
+    Column {
+        if (storage.isNotEmpty()) StorageCard(storage, onStorage, Modifier.padding(horizontal = Space.s4))
+        if (caption != null || kinds.isNotEmpty()) SectionHead("Free up space")
+        caption?.let { Note(it) }
+        if (toReview > 0) {
+            AlbumButton(
+                "Start swipe to clean", onCleanup, Modifier.padding(start = Space.s4, end = Space.s4, bottom = Space.s2).fillMaxWidth(),
+                ButtonVariant.Primary, Sym.Swipe,
+            )
+        }
+        kinds.forEach { (kind, n) ->
+            LinkRow(
+                kind.sym, kind.label,
+                caption = if (left == null) "Frees ${size(n.bytes)}" else null,
+                count = n.count.takeIf { left == null },
+                onClickLabel = "Review",
+                onClick = { onCategory(kind.name) },
+                modifier = Modifier.padding(horizontal = Space.s1),
+            )
+        }
     }
 }
 
@@ -314,34 +441,47 @@ private fun MemoryCard(memory: Memory<Media>, big: Boolean, onClick: () -> Unit,
     }
 }
 
-/** A card on surface: an icon in a flash-soft disc beside its title and caption, then [content]. */
+/**
+ * A row that opens something: [icon], [label] over an optional [caption], an optional [count] in meta, and a chevron.
+ * [onClickLabel] is what TalkBack says a double tap does.
+ */
 @Composable
-private fun InfoCard(icon: Sym, title: String, caption: String, content: @Composable () -> Unit) {
+private fun LinkRow(
+    icon: Sym,
+    label: String,
+    caption: String?,
+    count: Int?,
+    onClickLabel: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val c = AlbumTheme.colors
     val type = AlbumTheme.type
-    val shape = RoundedCornerShape(Space.radiusLg)
-    Column(
-        Modifier.fillMaxWidth().clip(shape).background(c.surface).border(1.dp, c.line, shape).padding(Space.s4),
-        verticalArrangement = Arrangement.spacedBy(Space.s4),
+    Row(
+        modifier.fillMaxWidth().heightIn(min = RowHeight).clip(RoundedCornerShape(Space.radiusMd))
+            .clickable(role = Role.Button, onClickLabel = onClickLabel, onClick = onClick)
+            .padding(horizontal = Space.s3, vertical = Space.s2),
+        horizontalArrangement = Arrangement.spacedBy(Space.s4),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(Space.s3)) {
-            Box(Modifier.size(Space.target).background(c.flashSoft, CircleShape), contentAlignment = Alignment.Center) {
-                Icon(icon, null, tint = c.flashInk)
-            }
-            Column {
-                Text(title, style = type.titleMd, color = c.ink)
-                Text(caption, style = type.caption, color = c.inkMuted)
-            }
+        Icon(icon, null, tint = c.inkMuted)
+        Column(Modifier.weight(1f)) {
+            Text(label, style = type.body, color = c.ink)
+            caption?.let { Text(it, style = type.caption, color = c.inkMuted) }
         }
-        content()
+        // On screen the label says what's counted; TalkBack hears the unit
+        count?.let { Text("%,d".format(it), Modifier.semantics { contentDescription = itemCount(it) }, style = type.meta, color = c.inkMuted) }
+        Icon(Sym.ChevronRight, null, tint = c.inkMuted)
     }
 }
 
-/** How much space photos and videos take: a segmented bar and a legend with each part's size. */
+/** How much space photos and videos take: the total, a bar split by kind, its legend, and a quiet way to the details. */
 @Composable
-private fun StorageCard(parts: List<Pair<StorageKind, Long>>, onStorage: () -> Unit) {
+private fun StorageCard(parts: List<Pair<StorageKind, Long>>, onStorage: () -> Unit, modifier: Modifier = Modifier) {
     val c = AlbumTheme.colors
+    val type = AlbumTheme.type
     val context = LocalContext.current
+    val shape = RoundedCornerShape(Space.radiusLg)
     fun colorOf(kind: StorageKind) = when (kind) {
         StorageKind.Photos -> c.ink
         StorageKind.Videos -> c.flashInk
@@ -349,19 +489,29 @@ private fun StorageCard(parts: List<Pair<StorageKind, Long>>, onStorage: () -> U
         StorageKind.Screenshots -> c.line
     }
     fun size(bytes: Long) = Formatter.formatShortFileSize(context, bytes) // KB, MB or GB as fits, in the phone's locale
-    InfoCard(Sym.Storage, "Storage", "${size(parts.sumOf { it.second })} used by photos and videos") {
+    Column(
+        modifier.fillMaxWidth().clip(shape).background(c.surface).border(Hairline, c.line, shape).padding(Space.s4),
+        verticalArrangement = Arrangement.spacedBy(Space.s3),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(size(parts.sumOf { it.second }), style = type.titleLg, color = c.ink)
+                Text("Used by photos and videos", style = type.caption, color = c.inkMuted)
+            }
+            // Its touch area reaches into the card's padding, so its words line up with the bar's end
+            AlbumButton("See storage", onStorage, Modifier.offset(x = Space.s3), ButtonVariant.Quiet)
+        }
         // The legend below says the same in words, so the bar itself needs nothing for TalkBack
-        Row(Modifier.fillMaxWidth().height(StorageBarHeight).clip(CircleShape), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(Modifier.fillMaxWidth().height(StorageBarHeight).clip(CircleShape), horizontalArrangement = Arrangement.spacedBy(StorageBarGap)) {
             parts.forEach { (kind, bytes) -> Box(Modifier.weight(bytes.toFloat()).fillMaxHeight().background(colorOf(kind))) }
         }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.s4), verticalArrangement = Arrangement.spacedBy(Space.s1)) {
             parts.forEach { (kind, bytes) ->
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Space.s2)) {
                     Box(Modifier.size(LegendDot).background(colorOf(kind), CircleShape))
-                    Text("${kind.label} ${size(bytes)}", style = AlbumTheme.type.caption, color = c.inkMuted)
+                    Text("${kind.label} ${size(bytes)}", style = type.caption, color = c.inkMuted)
                 }
             }
         }
-        AlbumButton("See storage", onStorage, Modifier.fillMaxWidth())
     }
 }

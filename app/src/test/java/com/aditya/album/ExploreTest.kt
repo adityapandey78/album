@@ -73,4 +73,34 @@ class ExploreTest {
         assertEquals("Aurangabad, Bihar", names[aurangabadBr])
         assertEquals("Aurangabad", placeNames(listOf(aurangabadBr))[aurangabadBr])
     }
+
+    @Test fun placesGoInStateSectionsHomeCountryFirst() {
+        val calangute = Place("Calangute", "Goa", "IN", "India")
+        val mysuru = Place("Mysuru", "Karnataka", "IN", "India")
+        val singapore = Place("Singapore", "", "SG", "Singapore")
+        val sections = placeSections(
+            listOf(
+                Group(bengaluru, List(5) { it }),
+                Group(paris, List(4) { it }),
+                Group(calangute, List(3) { it }),
+                Group(mysuru, List(2) { it }),
+                Group(singapore, List(1) { it }),
+            ),
+        )
+        // India has 10 photos, so it's home: its states go by name, biggest first; France's carries its country
+        assertEquals(listOf("Karnataka", "Goa", "Île-de-France, France", "Singapore"), sections.map { it.title })
+        assertEquals(listOf(bengaluru, mysuru), sections[0].places.map { it.key })
+    }
+
+    @Test fun aPlaceWithoutAStateJoinsTheStateNamedLikeItsCountry() {
+        // Djibouti: Guelile has no state, Djibouti City is in the state "Djibouti". One section, so lazy keys never repeat.
+        val guelile = Place("Guelile", "", "DJ", "Djibouti")
+        val djibouti = Place("Djibouti", "Djibouti", "DJ", "Djibouti")
+        val sections = placeSections(listOf(Group(djibouti, List(3) { it }), Group(guelile, List(1) { it })))
+        assertEquals(listOf("Djibouti"), sections.map { it.title })
+        assertEquals(listOf(djibouti, guelile), sections[0].places.map { it.key })
+        val keys = placeSections(listOf(Group(djibouti, List(3) { it }), Group(guelile, List(1) { it }), Group(bengaluru, List(9) { it })))
+            .map { "section ${it.countryCode}/${it.title}" }
+        assertEquals(keys.size, keys.toSet().size)
+    }
 }

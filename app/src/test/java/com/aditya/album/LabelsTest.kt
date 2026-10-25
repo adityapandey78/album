@@ -1,6 +1,7 @@
 package com.aditya.album
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LabelsTest {
@@ -43,11 +44,55 @@ class LabelsTest {
         assertEquals(0f, brightnessOf(IntArray(0)), 0f)
     }
 
-    @Test fun textIsReadOnlyWhereItLikelyIs() {
-        assertEquals(true, mayHaveText(listOf("Receipt" to 0.8f), screenshot = false))
-        assertEquals(true, mayHaveText(listOf("Mobile phone" to 0.6f), screenshot = false)) // a photo of a screen
-        assertEquals(true, mayHaveText(emptyList(), screenshot = true))
-        assertEquals(false, mayHaveText(listOf("Dog" to 0.9f, "Beach" to 0.8f), screenshot = false))
+    @Test fun textIsReadWhereItLikelyIs() {
+        assertEquals(TextChance.Sure, textChance(emptyList(), screenshot = true, edges = 0f))
+        assertEquals(TextChance.Sure, textChance(listOf("Receipt" to 0.8f), screenshot = false, edges = 0f))
+        assertEquals(TextChance.Sure, textChance(listOf("Mobile phone" to 0.6f), screenshot = false, edges = 0f)) // a photo of a screen
+        assertEquals(TextChance.Maybe, textChance(listOf("Receipt" to 0.35f), screenshot = false, edges = 0f)) // ML Kit isn't sure
+        assertEquals(TextChance.Maybe, textChance(listOf("Product" to 0.7f), screenshot = false, edges = 0f)) // packaging
+        assertEquals(TextChance.Maybe, textChance(listOf("Dog" to 0.9f), screenshot = false, edges = 0.2f)) // a sign behind the dog, maybe
+        assertEquals(TextChance.None, textChance(listOf("Dog" to 0.9f, "Beach" to 0.8f), screenshot = false, edges = 0.02f))
+    }
+
+    @Test fun edgesAreDenseInTextAndRareInSkies() {
+        val w = 120
+        val h = 60
+        val white = 0xFFFFFFFF.toInt()
+        val black = 0xFF000000.toInt()
+        assertEquals(0f, edgeDensity(IntArray(w * h) { white }, w), 0f)
+        // A sky: a smooth gradient never jumps
+        assertEquals(0f, edgeDensity(IntArray(w * h) { i -> grey(i / w * 255 / h) }, w), 0f)
+        // Lines of "print": 2 px strokes 2 px apart, 4 px tall lines with 4 px of paper between
+        val page = IntArray(w * h) { i -> if ((i / w) % 8 < 4 && (i % w) % 4 < 2) black else white }
+        assertTrue(edgeDensity(page, w) > 0.2f)
+        // Gentle noise, like a wall or skin: small steps don't count
+        val noise = java.util.Random(1)
+        assertEquals(0f, edgeDensity(IntArray(w * h) { grey(120 + noise.nextInt(20)) }, w), 0f)
+        assertEquals(0f, edgeDensity(IntArray(3) { white }, 2), 0f) // too small to measure
+    }
+
+    private fun grey(v: Int) = (0xFF shl 24) or (v shl 16) or (v shl 8) or v
+
+    @Test fun countingEdgesIsCheap() {
+        val thumb = IntArray(256 * 192) { i -> grey((i * 7919) % 256) } // the indexer's size, every pixel a step
+        repeat(20) { edgeDensity(thumb, 256) } // warm up the JIT
+        val started = System.nanoTime()
+        repeat(100) { edgeDensity(thumb, 256) }
+        val ms = (System.nanoTime() - started) / 1_000_000.0 / 100
+        assertTrue("took $ms ms", ms < 5) // next to labelling (tens of ms), nothing
+    }
+
+    @Test fun aQuickReadOnlyCountsRealText() {
+        assertEquals(true, looksLikeText("TAX INVOICE 2024"))
+        assertEquals(true, looksLikeText("Welcome to Goa"))
+        assertEquals(false, looksLikeText("ll"))
+        assertEquals(false, looksLikeText("1111 1111")) // digits from a texture, no word
+        assertEquals(false, looksLikeText(null))
+    }
+
+    @Test fun categoriesKnowTheirLabels() {
+        assertTrue(labelsOf(Category.Pets).containsAll(listOf("Dog", "Cat")))
+        assertTrue(labelsOf(Category.Other).isEmpty())
     }
 
     @Test fun screenshotsByFolderOrName() {

@@ -16,6 +16,7 @@ import com.aditya.album.Category.Sports
 import com.aditya.album.Category.Sunsets
 import com.aditya.album.Category.Vehicles
 import java.util.EnumMap
+import kotlin.math.abs
 
 /**
  * What Explore shows under Things. A subject (food, a pet, a face) is what the photo is about; a scene is where it was taken.
@@ -116,6 +117,9 @@ fun categoryOf(labels: List<Pair<String, Float>>, brightness: Float): Category {
     }
 }
 
+/** The ML Kit labels a category is made from, so search can rank a category's photos by how sure ML Kit was. */
+fun labelsOf(category: Category): List<String> = categoryOfLabel.filterValues { it == category }.keys.toList()
+
 /** Mean perceived brightness (0 to 1) of ARGB pixels, from a tiny downscale of the thumbnail. */
 fun brightnessOf(pixels: IntArray): Float {
     if (pixels.isEmpty()) return 0f
@@ -124,15 +128,68 @@ fun brightnessOf(pixels: IntArray): Float {
     return (sum / pixels.size / 255).toFloat()
 }
 
-// Photos of screens often show text too; documents are already covered by their category's labels.
-private val screenLabels = setOf("Computer", "Mobile phone", "Television")
+/** How likely a photo is to hold text worth reading. */
+enum class TextChance { Sure, Maybe, None }
+
+// Photos of screens often show text too; documents are covered by their category's labels
+private val screenLabels = setOf("Computer", "Mobile phone", "Television", "Icon")
+
+// Packaging, signs and book covers: often text, often not
+private val textishLabels = setOf("Product", "Flag", "Clock", "Fiction", "Superhero", "Event", "Class", "School")
+
+// A document or screen label this sure means text; ML Kit's own default bar
+private const val SURE_LABEL = 0.5f
+
+// ponytail: share of pixels with a sharp step to the next one (EDGE_STEP of 255 in brightness) above which a photo may
+// hold text. On macOS's wallpaper photos (landscapes, at the indexer's 256 px) the median is 0.02 and about one in five
+// pass 0.06; rendered documents, receipts, slides and chats score 0.18 to 0.35. Busy scenes pass too, which is why a
+// Maybe only gets a quick look at the thumbnail first. Tune from the phone's breadcrumb ("looked at", "with some").
+private const val EDGE_STEP = 40
+private const val EDGE_MIN = 0.06f
 
 /**
- * Whether text recognition is worth running on a photo: a screenshot, or labels that suggest a document or a screen.
- * Text recognition is several times slower than labelling, so the rest (most photos) skip it.
+ * Whether text recognition is worth running on a photo. Sure: a screenshot, or a confident document or screen label
+ * (read at full size). Maybe: a weaker such label, a label that often has text, or many sharp edges ([edges], see
+ * [edgeDensity]): worth a quick look at the thumbnail. Text recognition is several times slower than labelling, so most
+ * photos skip it.
  */
-fun mayHaveText(labels: List<Pair<String, Float>>, screenshot: Boolean) =
-    screenshot || labels.any { (label, _) -> categoryOfLabel[label] == Documents || label in screenLabels }
+fun textChance(labels: List<Pair<String, Float>>, screenshot: Boolean, edges: Float): TextChance {
+    fun texty(label: String) = categoryOfLabel[label] == Documents || label in screenLabels
+    return when {
+        screenshot || labels.any { (label, confidence) -> texty(label) && confidence >= SURE_LABEL } -> TextChance.Sure
+        labels.any { (label, _) -> texty(label) || label in textishLabels } || edges >= EDGE_MIN -> TextChance.Maybe
+        else -> TextChance.None
+    }
+}
+
+/**
+ * Share (0 to 1) of pixels whose brightness jumps by more than [EDGE_STEP] to the pixel on the right or below, in
+ * [width] wide ARGB [pixels]. Printed and handwritten text is dense in these steps.
+ */
+fun edgeDensity(pixels: IntArray, width: Int): Float {
+    if (width < 2 || pixels.size < width * 2) return 0f
+    val height = pixels.size / width
+    val luma = IntArray(width * height) { i ->
+        val p = pixels[i]
+        (299 * (p shr 16 and 0xFF) + 587 * (p shr 8 and 0xFF) + 114 * (p and 0xFF)) / 1000
+    }
+    var edges = 0
+    for (y in 0 until height - 1) {
+        for (x in 0 until width - 1) {
+            val i = y * width + x
+            if (abs(luma[i + 1] - luma[i]) > EDGE_STEP || abs(luma[i + width] - luma[i]) > EDGE_STEP) edges++
+        }
+    }
+    return edges.toFloat() / ((width - 1) * (height - 1))
+}
+
+/**
+ * Whether a quick read of a thumbnail found real text, not the odd letter ML Kit sees in a brick wall or leaves: a few
+ * words' worth of letters and digits, with at least one word of three letters.
+ */
+fun looksLikeText(text: String?): Boolean = text != null && text.count { it.isLetterOrDigit() } >= 8 && word.containsMatchIn(text)
+
+private val word = Regex("\\p{L}{3,}")
 
 /** Android saves screenshots in a Screenshots folder (DCIM or Pictures) and names them Screenshot_... */
 fun isScreenshot(relativePath: String, name: String) =

@@ -1,8 +1,9 @@
 # Album
 
 A fast, offline gallery app for Android, inspired by the OPPO and vivo galleries.
-Built with Kotlin and Jetpack Compose. Your photos never leave the phone: the only network use is
-Settings → Check for updates, which talks to this GitHub repo's Releases.
+Built with Kotlin and Jetpack Compose. Your photos never leave the phone: the only network uses are
+Settings → Updates, which talks to this GitHub repo's Releases, and the one-time describe-it search download
+(Settings → Search), which fetches its model from the same Releases when you ask.
 
 ## Download
 
@@ -14,6 +15,7 @@ After that, update from inside the app: **Settings → Check for updates → Upd
 
 | Version | Phase | What's in it |
 |---|---|---|
+| 0.10.0 | 3 | People rebuilt: new on-phone face models (YuNet, EdgeFace-S) keep look-alike family members apart, "Same person?" suggestions instead of automatic merges, change a person's cover photo, a tidy row of five faces · Search finds more: labels down to 30% confidence, text read from any photo that has it, places at every level (area, city, district, state), places estimated for photos without GPS, WhatsApp dates from file names, "Top matches" first, and optional describe-it search (a one-time download, runs on the phone) · Clean up: exact copies and copies across the whole library (PDQ), similar shots without chaining, better blur and too dark or bright checks · For you split into Memories and Clean up · Settings: Updates, Diagnostics and About on pages of their own · new app icon (a stack of prints) whose sun follows your accent |
 | 0.9.1 | 3 | Organising a big library keeps going after you leave Album (a quiet "Organising your photos" notification) instead of a slice per visit; the progress card shows overall progress, so a resumed pass no longer looks like a restart |
 | 0.9.0 | 3 | Clean up: duplicates, similar shots with a best-shot pick, blurry photos, old screenshots, WhatsApp, big videos, swipe to clean, storage dashboard · Private safe: encrypted on the phone, opens with fingerprint or screen lock, originals removed only after a verified copy · trips and year recaps in For you, ID-card privacy guard, Memories home-screen widget · viewer: two-finger lossless rotate with Undo, Lens-style text selection, Edit with the app you choose · People and Places more accurate, a progress card while organising · Collections: top albums with See all, Recently deleted and Private safe at the bottom, no file paths |
 | 0.7.1 | 2 | New design: Album design system (greyscale with one accent, Bricolage Grotesque, Figtree, Geist Mono, Material Symbols) · Library, Collections and For you tabs with a floating bar and search at the bottom · Appearance settings: Light, Dark (true black) or Dim, six accents, three looks, Grid, Justified or Mosaic · tab transitions (Depth by default) · Jump to a date sheet with heatmap · story-style memories (On this day, recaps) and a storage card · Edit opens Google Photos · copy text from a photo · Recently deleted at the bottom of Collections, with a switch to hide it · new app icon |
@@ -73,7 +75,9 @@ of interpreting it on the first scrolls) and commit `app/src/release/generated/b
 On an emulator, compare before and after on the same setup only: run it headless (`emulator -no-window`), since macOS
 slows down a hidden emulator window, and give it 4 cores and the host GPU (`hw.cpu.ncore=4`, `-gpu host`).
 
-Fonts (Inter, Outfit, Plus Jakarta Sans) are under the SIL Open Font License, see `licenses/`.
+Fonts (Bricolage Grotesque, Figtree, Geist Mono) are under the SIL Open Font License, see `licenses/`.
 ML Kit telemetry is stripped by R8, so the "nothing leaves the phone" guarantee applies to release builds (the APKs in Releases), not debug builds.
 Place names come from [GeoNames](https://www.geonames.org) under CC BY 4.0, see `licenses/geonames-CC-BY-4.0.txt`.
-People uses the SFace face recognition model from [OpenCV Zoo](https://github.com/opencv/opencv_zoo) under Apache 2.0, see `licenses/sface-Apache-2.0.txt`.
+People finds faces with YuNet from [OpenCV Zoo](https://github.com/opencv/opencv_zoo) (MIT, see `licenses/yunet-MIT.txt`) and recognises them with EdgeFace-S by the [Idiap Research Institute](https://huggingface.co/Idiap/EdgeFace-S-GAMMA) under CC BY-NC-SA 4.0 (see `licenses/edgeface-CC-BY-NC-SA-4.0.txt`), so Album stays non-commercial while it ships this model.
+Describe-it search downloads Meta's [Perception Encoder](https://github.com/facebookresearch/perception_models) PE-Core-S16-384 under Apache 2.0 (see `licenses/perception-encoder-Apache-2.0.txt`), converted by `tools/describe_convert.py`; its tokenizer vocabulary is OpenAI CLIP's, MIT (see `licenses/clip-bpe-vocabulary-MIT.txt`).
+Clean up hashes photos with PDQ from Meta's [ThreatExchange](https://github.com/facebook/ThreatExchange/tree/main/pdq) under the BSD licence, see `licenses/pdq-BSD.txt`.

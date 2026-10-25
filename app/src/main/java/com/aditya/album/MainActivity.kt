@@ -79,6 +79,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.runtime.snapshotFlow
@@ -132,6 +133,12 @@ class MainActivity : ComponentActivity() {
             AlbumTheme(appearance) { AlbumShell() }
         }
     }
+
+    override fun onStop() {
+        super.onStop()
+        // The home-screen icon's sun follows the accent; switching it closes this task, so only once Album is out of sight
+        if (!isChangingConfigurations) LauncherIcon.sync(this, AppearancePrefs.appearance.value.accent)
+    }
 }
 
 private enum class Tab(val sym: Sym, val label: String) {
@@ -152,14 +159,23 @@ private sealed class Route(val key: String) {
     /** Clean up, on one category (a CleanupKind name) or the suggested ones. */
     data class Clean(val category: String?) : Route("cleanup:${category.orEmpty()}")
     data object People : Route("people")
+    data object PeopleReview : Route("people-review")
     data object Trash : Route("trash")
     data object Search : Route("search")
     data object Settings : Route("settings")
 
+    // Pages pushed from Settings
+    data object Describe : Route("describe")
+    data object Updates : Route("updates")
+    data object Diagnostics : Route("diagnostics")
+    data object About : Route("about")
+    data object Licences : Route("licences")
+
     companion object {
         fun of(key: String): Route? = key.removePrefix("open:").toLongOrNull()?.takeIf { key.startsWith("open:") }?.let(::Open)
             ?: key.removePrefix("cleanup:").takeIf { key.startsWith("cleanup:") }?.let { Clean(it.ifEmpty { null }) }
-            ?: listOf(Albums, Places, People, Trash, Search, Settings, Storage, PrivateSafe).find { it.key == key }
+            ?: listOf(Albums, Places, People, PeopleReview, Trash, Search, Settings, Storage, PrivateSafe, Describe, Updates, Diagnostics, About, Licences)
+                .find { it.key == key }
     }
 }
 
@@ -231,6 +247,8 @@ private fun AlbumShell() {
         stack.removeLastOrNull()
         Unit
     }
+    // Each screen keeps its saved state (where it was scrolled, say) while deeper ones cover it, so Back lands where it was
+    val routeStates = rememberSaveableStateHolder()
     // Recently deleted opens as its own screen wherever its id comes from
     val openId = { id: Long -> push(if (id == Special.Trash.id) Route.Trash else Route.Open(id)) }
 
@@ -395,6 +413,7 @@ private fun AlbumShell() {
                         onAllAlbums = { push(Route.Albums) },
                         onAllPlaces = { push(Route.Places) },
                         onAllPeople = { push(Route.People) },
+                        onReviewPeople = { push(Route.PeopleReview) },
                         onOpenSafe = { push(Route.PrivateSafe) },
                         onAction = albumActions::onAlbum,
                         onNewAlbum = albumActions::newAlbum,
@@ -411,6 +430,7 @@ private fun AlbumShell() {
                         onStorage = { push(Route.Storage) },
                         // A false positive must not leave the Library on one tap: confirm with what will move
                         onProtect = { items -> protecting = items },
+                        onCleanupCategory = { push(Route.Clean(it)) },
                     )
                 }
             }
@@ -451,6 +471,11 @@ private fun AlbumShell() {
                 }
             }
             if (route == null) return@AnimatedContent // the tabs underneath show through
+            // A closed screen opens fresh next time: its state goes once it has left, not while it slides out (Back and
+            // forward again inside the slide brings back this same composition, which must keep saving)
+            DisposableEffect(route.key) {
+                onDispose { if (stack.none { it.key == route.key }) routeStates.removeState(route.key) }
+            }
             Box(
                 Modifier.fillMaxSize()
                     .background(c.canvas)
@@ -460,36 +485,47 @@ private fun AlbumShell() {
                         if (dim > 0f) drawRect(c.scrim, alpha = dim)
                     },
             ) {
-                when (route) {
-                    is Route.Open -> AlbumPage(
-                        route, media, albums, collections, loaded != null, albumColumns,
-                        albumGrids.getOrPut(route.key) { LazyGridState() }, selected, open, select,
-                        tabPadding, gridPosition,
-                        onBack = pop,
-                        onOpenPerson = { id -> stack[stack.lastIndex] = Route.Open(id) }, // merging leaves you on the merged person
-                        selectMode = selectMode,
-                        onStartSelecting = startSelecting,
-                        report = { page = it },
-                    )
-                    Route.Albums -> AllAlbumsScreen(
-                        albums, collections, albumsGrid, onBack = pop, onOpen = openId,
-                        onAction = albumActions::onAlbum, onNewAlbum = albumActions::newAlbum,
-                    )
-                    Route.Places -> PlacesScreen(placesGrid, onBack = pop, onOpen = openId)
-                    // Clean up and Storage get every item: WhatsApp may live in folders hidden from the Library
-                    is Route.Clean -> CleanupScreen(media, onBack = pop, onOpen = open, category = route.category)
-                    Route.Storage -> StorageScreen(media, onBack = pop, onOpenCategory = { push(Route.Clean(it)) }, onOpen = open)
-                    Route.PrivateSafe -> SafeScreen(onBack = pop)
-                    Route.People -> PeopleScreen(peopleGrid, onBack = pop, onOpenPerson = openId)
-                    Route.Trash -> TrashScreen(trash, onBack = pop)
-                    Route.Settings -> SettingsScreen(onBack = pop, columns = photosColumns, onOpenTrash = { push(Route.Trash) })
-                    Route.Search -> {
-                        val s = rememberSearch(photos, collections)
-                        DisposableEffect(s) {
-                            searchState = s
-                            onDispose { if (searchState === s) searchState = null }
+                routeStates.SaveableStateProvider(route.key) {
+                    when (route) {
+                        is Route.Open -> AlbumPage(
+                            route, media, albums, collections, loaded != null, albumColumns,
+                            albumGrids.getOrPut(route.key) { LazyGridState() }, selected, open, select,
+                            tabPadding, gridPosition,
+                            onBack = pop,
+                            onOpenPerson = { id -> stack[stack.lastIndex] = Route.Open(id) }, // merging leaves you on the merged person
+                            selectMode = selectMode,
+                            onStartSelecting = startSelecting,
+                            report = { page = it },
+                        )
+                        Route.Albums -> AllAlbumsScreen(
+                            albums, collections, albumsGrid, onBack = pop, onOpen = openId,
+                            onAction = albumActions::onAlbum, onNewAlbum = albumActions::newAlbum,
+                        )
+                        Route.Places -> PlacesScreen(placesGrid, onBack = pop, onOpen = openId)
+                        // Clean up and Storage get every item: WhatsApp may live in folders hidden from the Library
+                        is Route.Clean -> CleanupScreen(media, onBack = pop, onOpen = open, category = route.category)
+                        Route.Storage -> StorageScreen(media, onBack = pop, onOpenCategory = { push(Route.Clean(it)) }, onOpen = open)
+                        Route.PrivateSafe -> SafeScreen(onBack = pop)
+                        Route.People -> PeopleScreen(peopleGrid, onBack = pop, onOpenPerson = openId, onReviewPeople = { push(Route.PeopleReview) })
+                        Route.PeopleReview -> PeopleReviewScreen(onBack = pop)
+                        Route.Trash -> TrashScreen(trash, onBack = pop)
+                        Route.Settings -> SettingsScreen(
+                            onBack = pop, columns = photosColumns, onOpenTrash = { push(Route.Trash) }, onDescribe = { push(Route.Describe) },
+                            onUpdates = { push(Route.Updates) }, onDiagnostics = { push(Route.Diagnostics) }, onAbout = { push(Route.About) },
+                        )
+                        Route.Describe -> DescribeScreen(onBack = pop)
+                        Route.Updates -> UpdatesScreen(onBack = pop)
+                        Route.Diagnostics -> DiagnosticsScreen(onBack = pop)
+                        Route.About -> AboutScreen(onBack = pop, onLicences = { push(Route.Licences) })
+                        Route.Licences -> LicencesScreen(onBack = pop)
+                        Route.Search -> {
+                            val s = rememberSearch(photos, collections)
+                            DisposableEffect(s) {
+                                searchState = s
+                                onDispose { if (searchState === s) searchState = null }
+                            }
+                            SearchPage(s, searchColumns, searchGrid, selected, open, select, selecting, onBack = pop, gridPosition)
                         }
-                        SearchPage(s, searchColumns, searchGrid, selected, open, select, selecting, onBack = pop, gridPosition)
                     }
                 }
             }

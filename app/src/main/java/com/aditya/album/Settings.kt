@@ -6,12 +6,14 @@ import android.provider.MediaStore
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -36,6 +38,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableIntState
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -63,32 +66,32 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-// Settings: Appearance, Privacy, Behaviour, Motion, Updates, Diagnostics and About. Every choice applies the moment it's
-// made (AppearancePrefs.update saves it too), so there is no Save button.
+// Settings: Appearance, Privacy, Behaviour and Motion, then rows that open Updates, Diagnostics and About as pages of
+// their own. Every choice applies the moment it's made (AppearancePrefs.update saves it too), so there is no Save button.
 
 private val Columns = listOf(3, 4, 5, 7)
 
 /**
  * The Settings page, pushed over the tabs with its own top bar and insets. [columns] is the Library grid's live column
- * count. [onOpenTrash] opens Recently deleted, which stays reachable here even when Collections hides it.
+ * count. [onOpenTrash] opens Recently deleted, which stays reachable here even when Collections hides it. Updates,
+ * Diagnostics and About open pages of their own, so this one stays a page of choices.
  */
 @Composable
-fun SettingsScreen(onBack: () -> Unit, columns: MutableIntState, onOpenTrash: () -> Unit) {
+fun SettingsScreen(
+    onBack: () -> Unit,
+    columns: MutableIntState,
+    onOpenTrash: () -> Unit,
+    onDescribe: () -> Unit,
+    onUpdates: () -> Unit,
+    onDiagnostics: () -> Unit,
+    onAbout: () -> Unit,
+) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     val c = AlbumTheme.colors
     val type = AlbumTheme.type
     val a = AlbumTheme.spec.appearance
-    val scroll = rememberScrollState() // above the log viewer's early return, so closing a log comes back to the same place
-    var logs by remember { mutableStateOf(emptyList<Pair<File, Long>>()) }
-    var openLog by remember { mutableStateOf<File?>(null) }
-    LaunchedEffect(Unit) { logs = withContext(Dispatchers.IO) { CrashLog.files().map { it to it.length() } } }
-
-    openLog?.let {
-        LogViewer(it, onBack = { openLog = null })
-        return
-    }
-    BackHandler(onBack = onBack)
+    val logs by produceState<Int?>(null) { value = withContext(Dispatchers.IO) { CrashLog.files().size } }
+    val describe by Embeddings.state.collectAsState()
 
     @Composable
     fun Title(text: String, top: Dp = Space.s8) = Text(text, Modifier.padding(top = top), style = type.titleLg, color = c.ink)
@@ -96,141 +99,101 @@ fun SettingsScreen(onBack: () -> Unit, columns: MutableIntState, onOpenTrash: ()
     @Composable
     fun Subhead(text: String) = SectionHead(text, Modifier.bleed(Space.s4))
 
-    Column(Modifier.fillMaxSize().background(c.canvas).systemBarsPadding()) {
-        CollapsedTopBar("Settings", onBack = onBack)
-        Column(
-            Modifier.verticalScroll(scroll).padding(horizontal = Space.s4),
-            verticalArrangement = Arrangement.spacedBy(Space.s2),
-        ) {
-            Title("Appearance", top = Space.s4)
-            Subhead("Theme")
-            ChoiceGroup(
-                ThemeMode.entries.map { mode ->
-                    Choice(mode, mode.label) {
-                        if (mode == ThemeMode.System) {
-                            // Half light, half dark: System follows the phone
-                            Box {
-                                StyleSwatch(theme = ThemeMode.Light)
-                                StyleSwatch(Modifier.drawWithContent { clipRect(left = size.width / 2) { this@drawWithContent.drawContent() } }, theme = ThemeMode.Dark)
-                            }
-                        } else StyleSwatch(theme = mode)
-                    }
-                },
-                a.theme,
-            ) { v -> AppearancePrefs.update { it.copy(theme = v) } }
-            Subhead("Accent")
-            AccentPicker(a.accent) { v -> AppearancePrefs.update { it.copy(accent = v) } }
-            Subhead("Look")
-            ChoiceGroup(Look.entries.map { Choice(it, it.label, it.blurb) { StyleSwatch(look = it) } }, a.look) { v ->
-                AppearancePrefs.update { it.copy(look = v) }
-            }
-            Subhead("Gallery style")
-            ChoiceGroup(GalleryStyle.entries.map { Choice(it, it.label, it.blurb) { StyleSwatch(layout = it) } }, a.gallery) { v ->
-                AppearancePrefs.update { it.copy(gallery = v) }
-            }
-            Subhead("Columns")
-            Row(horizontalArrangement = Arrangement.spacedBy(Space.s2)) {
-                Columns.forEach { n -> Chip("$n", { columns.intValue = n }, selected = columns.intValue == n) }
-            }
-            Text("Or pinch the grid.", style = type.caption, color = c.inkMuted)
-
-            Title("Privacy")
-            SwitchRow(
-                "Hide Recently deleted", "Leaves Recently deleted out of Collections. Open it from here.", a.hidePrivate,
-                { v -> AppearancePrefs.update { it.copy(hidePrivate = v) } }, icon = Sym.VisibilityOff,
-            )
-            MenuRow(Sym.RestoreFromTrash, "Recently deleted", onOpenTrash, Modifier.bleed(Space.s1))
-
-            Title("Behaviour")
-            MediaManagementRow()
-            EditingAppRow(Modifier.bleed(Space.s1))
-            SwitchRow(
-                "Haptic feedback", "Ticks on select, pinch and swipe.", a.haptics,
-                { v -> AppearancePrefs.update { it.copy(haptics = v) } }, icon = Sym.Vibration,
-            )
-
-            Title("Motion")
-            SwitchRow(
-                "Remove animations",
-                "Screens swap with a quick fade; nothing slides, zooms or bounces. " +
-                    if (a.still == null) "Following your phone's setting." else "Set here, overriding your phone.",
-                AlbumTheme.spec.still, // what's in effect, the phone's setting included
-                { v -> AppearancePrefs.update { it.copy(still = v) } },
-                icon = Sym.MotionPhotosOn,
-            )
-            if (a.still != null) {
-                AlbumButton(
-                    "Follow the phone again", { AppearancePrefs.update { it.copy(still = null) } },
-                    Modifier.offset(x = -Space.s3), variant = ButtonVariant.Quiet, // the label lines up with the text above
-                )
-            }
-            Subhead("Tab transition")
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.s2), verticalArrangement = Arrangement.spacedBy(Space.s2)) {
-                TabMotion.entries.forEach { m -> Chip(m.label, { AppearancePrefs.update { it.copy(tabMotion = m) } }, selected = a.tabMotion == m) }
-            }
-
-            Title("Updates")
-            UpdateSection()
-
-            Title("Diagnostics")
-            Text(
-                when (logs.size) {
-                    0 -> "No crash logs on this phone."
-                    1 -> "1 crash log on this phone"
-                    else -> "${logs.size} crash logs on this phone (newest first)"
-                },
-                style = type.body,
-                color = c.inkMuted,
-            )
-            logs.forEach { (file, size) ->
-                MenuRow(Sym.BugReport, file.name, { openLog = file }, Modifier.bleed(Space.s1), sub = "${(size + 1023) / 1024} KB")
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(Space.s2)) {
-                AlbumButton("Export to Downloads", {
-                    scope.launch {
-                        val name = withContext(Dispatchers.IO) { CrashLog.exportToDownloads(context) }
-                        Toast.makeText(context, name?.let { "Saved to Downloads/$it" } ?: "No logs to export", Toast.LENGTH_SHORT).show()
-                    }
-                }, icon = Sym.Download)
-                AlbumButton("Clear logs", {
-                    scope.launch {
-                        withContext(Dispatchers.IO) { CrashLog.clear() }
-                        logs = emptyList()
-                    }
-                })
-            }
-            if (context.isDebuggable()) {
-                AlbumButton("Test crash (debug builds only)", { error("Test crash from Settings") }, Modifier.offset(x = -Space.s3), variant = ButtonVariant.Quiet)
-            }
-
-            Title("About")
-            Row(horizontalArrangement = Arrangement.spacedBy(Space.s3), verticalAlignment = Alignment.CenterVertically) {
-                LogoMark()
-                Column {
-                    Text("Album", style = type.titleLg, color = c.ink)
-                    Text("Version ${remember { Updater.currentVersion(context) }}", style = type.meta, color = c.inkMuted)
+    SettingsPage("Settings", onBack) {
+        Title("Appearance", top = 0.dp)
+        Subhead("Theme")
+        ChoiceGroup(
+            ThemeMode.entries.map { mode ->
+                Choice(mode, mode.label) {
+                    if (mode == ThemeMode.System) {
+                        // Half light, half dark: System follows the phone
+                        Box {
+                            StyleSwatch(theme = ThemeMode.Light)
+                            StyleSwatch(Modifier.drawWithContent { clipRect(left = size.width / 2) { this@drawWithContent.drawContent() } }, theme = ThemeMode.Dark)
+                        }
+                    } else StyleSwatch(theme = mode)
                 }
-            }
-            Text(
-                "Everything runs on this phone. Nothing is uploaded; the network is used only to check for updates.",
-                style = type.body,
-                color = c.inkMuted,
-            )
-            Subhead("Open-source licences")
-            // GeoNames' CC BY 4.0 licence asks for credit people can see, not only in the repo
-            listOf(
-                "Bricolage Grotesque, Figtree and Geist Mono fonts" to "SIL Open Font License 1.1",
-                "Material Symbols icons" to "Apache License 2.0",
-                "SFace face recognition model, from OpenCV Zoo" to "Apache License 2.0",
-                "Place names from GeoNames (geonames.org)" to "CC BY 4.0",
-            ).forEach { (what, licence) ->
-                Column {
-                    Text(what, style = type.body, color = c.ink)
-                    Text(licence, style = type.caption, color = c.inkMuted)
-                }
-            }
-            Spacer(Modifier.height(Space.s8))
+            },
+            a.theme,
+        ) { v -> AppearancePrefs.update { it.copy(theme = v) } }
+        Subhead("Accent")
+        AccentPicker(a.accent) { v -> AppearancePrefs.update { it.copy(accent = v) } }
+        Subhead("Look")
+        ChoiceGroup(Look.entries.map { Choice(it, it.label, it.blurb) { StyleSwatch(look = it) } }, a.look) { v ->
+            AppearancePrefs.update { it.copy(look = v) }
         }
+        Subhead("Gallery style")
+        ChoiceGroup(GalleryStyle.entries.map { Choice(it, it.label, it.blurb) { StyleSwatch(layout = it) } }, a.gallery) { v ->
+            AppearancePrefs.update { it.copy(gallery = v) }
+        }
+        Subhead("Columns")
+        Row(horizontalArrangement = Arrangement.spacedBy(Space.s2)) {
+            Columns.forEach { n -> Chip("$n", { columns.intValue = n }, selected = columns.intValue == n) }
+        }
+        Text("Or pinch the grid.", style = type.caption, color = c.inkMuted)
+
+        Title("Privacy")
+        SwitchRow(
+            "Hide Recently deleted", "Leaves Recently deleted out of Collections. Open it from here.", a.hidePrivate,
+            { v -> AppearancePrefs.update { it.copy(hidePrivate = v) } }, icon = Sym.VisibilityOff,
+        )
+        MenuRow(Sym.RestoreFromTrash, "Recently deleted", onOpenTrash, Modifier.bleed(Space.s1))
+
+        Title("Behaviour")
+        MediaManagementRow()
+        EditingAppRow(Modifier.bleed(Space.s1))
+        SwitchRow(
+            "Haptic feedback", "Ticks on select, pinch and swipe.", a.haptics,
+            { v -> AppearancePrefs.update { it.copy(haptics = v) } }, icon = Sym.Vibration,
+        )
+
+        Title("Search")
+        MenuRow(Sym.Search, "Describe-it search", onDescribe, Modifier.bleed(Space.s1), sub = describeSummary(describe))
+
+        Title("Motion")
+        SwitchRow(
+            "Remove animations",
+            "Screens swap with a quick fade; nothing slides, zooms or bounces. " +
+                if (a.still == null) "Following your phone's setting." else "Set here, overriding your phone.",
+            AlbumTheme.spec.still, // what's in effect, the phone's setting included
+            { v -> AppearancePrefs.update { it.copy(still = v) } },
+            icon = Sym.MotionPhotosOn,
+        )
+        if (a.still != null) {
+            AlbumButton(
+                "Follow the phone again", { AppearancePrefs.update { it.copy(still = null) } },
+                Modifier.offset(x = -Space.s3), variant = ButtonVariant.Quiet, // the label lines up with the text above
+            )
+        }
+        Subhead("Tab transition")
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.s2), verticalArrangement = Arrangement.spacedBy(Space.s2)) {
+            TabMotion.entries.forEach { m -> Chip(m.label, { AppearancePrefs.update { it.copy(tabMotion = m) } }, selected = a.tabMotion == m) }
+        }
+
+        // A section's gap without a title: these rows are pages, not choices
+        Spacer(Modifier.height(Space.s4))
+        MenuRow(Sym.SystemUpdate, "Updates", onUpdates, Modifier.bleed(Space.s1), sub = "Version ${remember { Updater.currentVersion(context) }}")
+        MenuRow(Sym.BugReport, "Diagnostics", onDiagnostics, Modifier.bleed(Space.s1), sub = logs?.let(::crashLogs))
+        MenuRow(Sym.Info, "About", onAbout, Modifier.bleed(Space.s1), sub = "Developer and open-source licences")
+    }
+}
+
+/** A page of Settings, or one pushed from it: the collapsed top bar over a scrolling column at the screen's margin. */
+@Composable
+private fun SettingsPage(
+    title: String,
+    onBack: () -> Unit,
+    scroll: ScrollState = rememberScrollState(),
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    BackHandler(onBack = onBack)
+    Column(Modifier.fillMaxSize().background(AlbumTheme.colors.canvas).systemBarsPadding()) {
+        CollapsedTopBar(title, onBack = onBack)
+        Column(
+            Modifier.verticalScroll(scroll).padding(start = Space.s4, end = Space.s4, top = Space.s4, bottom = Space.s8),
+            verticalArrangement = Arrangement.spacedBy(Space.s2),
+            content = content,
+        )
     }
 }
 
@@ -400,7 +363,25 @@ private fun MediaManagementRow() {
     )
 }
 
+// ---------- Search ----------
+
+private fun describeSummary(state: DescribeState) = when (state) {
+    DescribeState.NotInstalled -> "Find photos by describing them. One-time download"
+    is DescribeState.Downloading -> "Downloading, ${(state.fraction * 100).toInt()}%"
+    is DescribeState.Indexing -> "Getting your photos ready"
+    DescribeState.Ready -> "On"
+    is DescribeState.Failed -> "The download didn't finish"
+}
+
+/** Describe-it search, pushed from Settings: what it does, the one-time download and its progress, or Remove. */
+@Composable
+fun DescribeScreen(onBack: () -> Unit) = SettingsPage("Describe-it search", onBack) { DescribeSearchRow() }
+
 // ---------- Updates ----------
+
+/** Updates, pushed from Settings: the installed version and the check for a newer one. */
+@Composable
+fun UpdatesScreen(onBack: () -> Unit) = SettingsPage("Updates", onBack) { UpdateSection() }
 
 @Composable
 private fun UpdateSection() {
@@ -486,17 +467,140 @@ private fun UpdateSection() {
     }
 }
 
+// ---------- About ----------
+
+private const val LINKEDIN = "adityapandey78"
+private const val EMAIL = "adityapandey.2402@gmail.com"
+
+/** About, pushed from Settings: the version, what Album promises, who made it and how to reach them, and the licences. */
+@Composable
+fun AboutScreen(onBack: () -> Unit, onLicences: () -> Unit) {
+    val context = LocalContext.current
+    val c = AlbumTheme.colors
+    val type = AlbumTheme.type
+    SettingsPage("About", onBack) {
+        Row(horizontalArrangement = Arrangement.spacedBy(Space.s3), verticalAlignment = Alignment.CenterVertically) {
+            LogoMark(size = Space.s12)
+            Column {
+                Text("Album", style = type.titleLg, color = c.ink)
+                Text("Version ${remember { Updater.currentVersion(context) }}", style = type.meta, color = c.inkMuted)
+            }
+        }
+        Text(
+            "Everything runs on this phone. Nothing is uploaded; the network is used only to check for updates and, when you " +
+                "ask, to download describe-it search.",
+            style = type.body,
+            color = c.inkMuted,
+        )
+        SectionHead("Developed by Aditya Pandey", Modifier.bleed(Space.s4))
+        // Both open another app (browser, mail); Album itself still goes online only for updates
+        MenuRow(
+            Sym.Link, "LinkedIn", { context.startSafely(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.linkedin.com/in/$LINKEDIN"))) },
+            Modifier.bleed(Space.s1), sub = LINKEDIN, trailing = Sym.OpenInNew,
+        )
+        MenuRow(
+            Sym.Mail, "Email", { context.startSafely(Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:$EMAIL"))) },
+            Modifier.bleed(Space.s1), sub = EMAIL, trailing = Sym.OpenInNew,
+        )
+        Spacer(Modifier.height(Space.s4))
+        MenuRow(Sym.Description, "Open-source licences", onLicences, Modifier.bleed(Space.s1))
+    }
+}
+
+private class Licence(val what: String, val from: String, val licence: String, val file: String, val icon: Sym)
+
+// What Album ships or downloads, who made it, under which licence, and that licence's text (licenses/ in the repo, in the
+// app's assets). GeoNames' CC BY 4.0 licence asks for credit people can see, not only in the repo.
+private val Licences = listOf(
+    Licence("Bricolage Grotesque font", "Bricolage Grotesque Project Authors", "SIL Open Font License 1.1", "bricolage-grotesque-OFL.txt", Sym.TextFields),
+    Licence("Figtree font", "Figtree Project Authors", "SIL Open Font License 1.1", "figtree-OFL.txt", Sym.TextFields),
+    Licence("Geist Mono font", "Geist Project Authors", "SIL Open Font License 1.1", "geist-mono-OFL.txt", Sym.TextFields),
+    Licence("Material Symbols icons", "Google", "Apache License 2.0", "material-symbols-Apache-2.0.txt", Sym.Category),
+    Licence("Face detection (YuNet)", "OpenCV Zoo", "MIT License", "yunet-MIT.txt", Sym.Face),
+    Licence("Face recognition (EdgeFace-S)", "Idiap Research Institute", "CC BY-NC-SA 4.0, non-commercial", "edgeface-CC-BY-NC-SA-4.0.txt", Sym.Face),
+    Licence("Place names", "GeoNames, geonames.org", "CC BY 4.0", "geonames-CC-BY-4.0.txt", Sym.LocationOn),
+    Licence("Photo hashing (PDQ)", "Meta ThreatExchange", "BSD License", "pdq-BSD.txt", Sym.ContentCopy),
+    Licence("Describe-it search model", "Meta Perception Encoder, downloaded on request", "Apache License 2.0", "perception-encoder-Apache-2.0.txt", Sym.Search),
+    Licence("Describe-it search vocabulary", "OpenAI CLIP", "MIT License", "clip-bpe-vocabulary-MIT.txt", Sym.MenuBook),
+)
+
+/** The open-source licences, pushed from About. Each opens its full text. */
+@Composable
+fun LicencesScreen(onBack: () -> Unit) {
+    val context = LocalContext.current
+    var open by remember { mutableStateOf<Licence?>(null) }
+    open?.let { l ->
+        TextPage(l.what, onBack = { open = null }) { context.assets.open(l.file).bufferedReader().use { it.readText() } }
+        return
+    }
+    SettingsPage("Open-source licences", onBack) {
+        Licences.forEach { l -> MenuRow(l.icon, l.what, { open = l }, Modifier.bleed(Space.s1), sub = "${l.from} · ${l.licence}") }
+    }
+}
+
 // ---------- Diagnostics ----------
 
+private fun crashLogs(count: Int) = when (count) {
+    0 -> "No crash logs"
+    1 -> "1 crash log"
+    else -> "$count crash logs"
+}
+
+/** Diagnostics, pushed from Settings: the crash logs kept on this phone, to read, export or clear. */
 @Composable
-private fun LogViewer(file: File, onBack: () -> Unit) {
-    BackHandler(onBack = onBack)
+fun DiagnosticsScreen(onBack: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val c = AlbumTheme.colors
-    val text by produceState("Loading…", file) { value = withContext(Dispatchers.IO) { file.readText() } }
-    Column(Modifier.fillMaxSize().background(c.canvas).systemBarsPadding()) {
-        CollapsedTopBar(file.name, onBack = onBack)
-        SelectionContainer(Modifier.verticalScroll(rememberScrollState()).padding(Space.s4)) {
-            Text(text, style = AlbumTheme.type.meta, color = c.ink)
+    val scroll = rememberScrollState() // above the log viewer's early return, so closing a log comes back to the same place
+    var logs by remember { mutableStateOf<List<Pair<File, Long>>?>(null) } // null until read, so "No crash logs" never flashes
+    var openLog by remember { mutableStateOf<File?>(null) }
+    LaunchedEffect(Unit) { logs = withContext(Dispatchers.IO) { CrashLog.files().map { it to it.length() } } }
+
+    openLog?.let { file ->
+        TextPage(file.name, onBack = { openLog = null }) { file.readText() }
+        return
+    }
+    SettingsPage("Diagnostics", onBack, scroll) {
+        logs?.let { list ->
+            Text(
+                crashLogs(list.size) + " on this phone" + if (list.size > 1) ", newest first" else "",
+                style = AlbumTheme.type.body,
+                color = c.inkMuted,
+            )
+            list.forEach { (file, size) ->
+                MenuRow(Sym.BugReport, file.name, { openLog = file }, Modifier.bleed(Space.s1), sub = "${(size + 1023) / 1024} KB")
+            }
+            if (list.isNotEmpty()) {
+                Row(horizontalArrangement = Arrangement.spacedBy(Space.s2)) {
+                    AlbumButton("Export to Downloads", {
+                        scope.launch {
+                            val name = withContext(Dispatchers.IO) { CrashLog.exportToDownloads(context) }
+                            Toast.makeText(context, name?.let { "Saved to Downloads/$it" } ?: "No logs to export", Toast.LENGTH_SHORT).show()
+                        }
+                    }, icon = Sym.Download)
+                    AlbumButton("Clear logs", {
+                        scope.launch {
+                            withContext(Dispatchers.IO) { CrashLog.clear() }
+                            logs = emptyList()
+                        }
+                    })
+                }
+            }
         }
+        if (context.isDebuggable()) {
+            AlbumButton("Test crash (debug builds only)", { error("Test crash from Settings") }, Modifier.offset(x = -Space.s3), variant = ButtonVariant.Quiet)
+        }
+    }
+}
+
+/** A page of plain, selectable text: a crash log or a licence. [read] runs off the main thread. */
+@Composable
+private fun TextPage(title: String, onBack: () -> Unit, read: () -> String) {
+    val text by produceState("Loading…", title) {
+        value = withContext(Dispatchers.IO) { runCatching(read).getOrElse { "Couldn't read this: ${it.message}" } }
+    }
+    SettingsPage(title, onBack) {
+        SelectionContainer { Text(text, style = AlbumTheme.type.meta, color = AlbumTheme.colors.ink) }
     }
 }

@@ -3,6 +3,7 @@ package com.aditya.album
 import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -41,9 +42,43 @@ class IndexDbTest {
     @Test fun lookupsBySearchNames() = runBlocking {
         val goa = Place("Panaji", "Goa", "IN", "India")
         dao.save(listOf(item(1, Category.Food, goa), item(2, Category.Pets)), listOf(ItemLabel(2, "Dog", 0.9f)), emptyList())
-        assertEquals(listOf(1L), dao.idsIn(Category.Food))
-        assertEquals(listOf(2L), dao.idsWith("Dog"))
+        assertEquals(listOf(1L), dao.scoredIn(Category.Food, labelsOf(Category.Food)).map { it.id })
+        assertEquals(listOf(Scored(2, 0.9f)), dao.scoredWith("Dog"))
         assertEquals(listOf(1L), dao.idsAt("Goa"))
         assertEquals(listOf(1L), dao.idsAt("India"))
+    }
+
+    @Test fun searchesEveryPlaceLevelAndRanksLabels() = runBlocking {
+        val baga = Place("Calangute", "Goa", "IN", "India", locality = "Baga", district = "North Goa")
+        dao.save(
+            listOf(item(1, Category.Pets, baga), item(2, Category.Pets)),
+            listOf(ItemLabel(1, "Dog", 0.9f), ItemLabel(2, "Dog", 0.4f), ItemLabel(2, "Cat", 0.8f)),
+            emptyList(),
+        )
+        assertEquals(listOf(1L), dao.idsAt("Baga"))
+        assertEquals(listOf(1L), dao.idsAt("North Goa"))
+        assertEquals(setOf("Baga", "Calangute", "North Goa", "Goa", "India"), dao.placeNames().first().toSet())
+        assertEquals(mapOf(1L to 0.9f, 2L to 0.4f), dao.scoredWith("Dog").associate { it.id to it.score })
+        assertEquals(mapOf(1L to 0.9f, 2L to 0.8f), dao.scoredIn(Category.Pets, labelsOf(Category.Pets)).associate { it.id to it.score })
+        // The Places page counts the city once, however its photos spread over localities
+        assertEquals(listOf(Place("Calangute", "Goa", "IN", "India")), dao.places().first().map { it.place })
+    }
+
+    @Test fun estimatedPlacesAreMarkedAndTakenBack() = runBlocking {
+        val goa = Place("Calangute", "Goa", "IN", "India", district = "North Goa")
+        dao.save(listOf(item(1), item(2)), emptyList(), emptyList())
+        dao.setPlaces(mapOf(2L to goa), estimated = true)
+        assertEquals(listOf(2L), dao.estimated().first())
+        assertEquals(ItemPlace(2, gps = false, estimated = true, place = goa), dao.place(2))
+        dao.setPlaces(mapOf(2L to null), estimated = true)
+        assertEquals(ItemPlace(2, gps = false, estimated = false, place = null), dao.place(2))
+    }
+
+    @Test fun textSplitsAtPunctuationAndKeepsLettersLikeØ() = runBlocking {
+        dao.save(listOf(item(1)), emptyList(), listOf(ItemText(1, "E-ticket 15/08/2024 Tromsø")))
+        assertEquals(listOf(1L), dao.idsWithText("\"e tick*\"")) // what idsWithTokens sends for "e-tick"
+        assertEquals(listOf(1L), dao.idsWithText("\"15 08 2024\"")) // idsWithPhrase for "15/08/2024"
+        assertEquals(listOf(1L), dao.idsWithText("\"tromsø*\""))
+        assertEquals(emptyList<Long>(), dao.idsWithText("tromso*")) // why search mustn't fold ø for text
     }
 }

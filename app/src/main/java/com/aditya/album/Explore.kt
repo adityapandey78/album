@@ -64,6 +64,26 @@ fun <K, T> groupsOf(ids: Map<K, Set<Long>>, media: List<T>, idOf: (T) -> Long): 
 fun <T> byCountry(places: List<Group<Place, T>>): List<List<Group<Place, T>>> =
     places.groupBy { it.key.countryCode }.values.sortedByDescending { country -> country.sumOf { it.items.size } }
 
+/** One state's cities on the Places page, under [title]. */
+class PlaceSection<T>(val title: String, val countryCode: String, val places: List<Group<Place, T>>)
+
+/**
+ * The Places page's sections: a state each, with its cities. Countries with most photos come first, then within each its
+ * states with most photos, each keeping its cities' order (biggest first). The country with most photos is home, so its
+ * states go by their names alone ("Goa"); others add their country ("Île-de-France, France"). A place GeoNames gives no
+ * state goes under its country's name, together with a state of the same name (Djibouti's), so titles never repeat
+ * within a country.
+ */
+fun <T> placeSections(places: List<Group<Place, T>>): List<PlaceSection<T>> = byCountry(places).flatMapIndexed { i, country ->
+    fun titleOf(p: Place) = when {
+        p.admin1.isEmpty() || p.admin1 == p.country -> p.country
+        i == 0 -> p.admin1
+        else -> "${p.admin1}, ${p.country}"
+    }
+    country.groupBy { titleOf(it.key) }.entries.sortedByDescending { (_, state) -> state.sumOf { it.items.size } }
+        .map { (title, state) -> PlaceSection(title, state[0].key.countryCode, state) }
+}
+
 /** What Album calls each place: its town, plus the state when another place has a town of the same name (Aurangabad). */
 fun placeNames(places: List<Place>): Map<Place, String> {
     val towns = places.groupingBy { it.city }.eachCount()
@@ -89,7 +109,7 @@ object Explore {
             SmartIndex.mediaIdsFor(it)
         }
 
-    /** Towns, biggest first. */
+    /** Cities (the city level of each place), biggest first. */
     val places: StateFlow<List<Group<Place, Media>>?> =
         joined(SmartIndex.places().distinctUntilChanged().map { counts -> counts.map { it.place } }) { SmartIndex.mediaIdsFor(it) }
 
@@ -128,19 +148,19 @@ fun rememberSmartAlbum(id: Long): SmartAlbum? {
     }
 }
 
-/** Every place, grouped by country with the country holding most photos first: Collections' "See all", pushed over the tabs. */
+/** Every city, in a section per state (see placeSections): Collections' "See all", pushed over the tabs. */
 @Composable
 fun PlacesScreen(state: LazyGridState, onBack: () -> Unit, onOpen: (Long) -> Unit) {
     val places = Explore.places.collectAsState().value
-    val countries = remember(places) { byCountry(places.orEmpty()) }
+    val sections = remember(places) { placeSections(places.orEmpty()) }
     val names = remember(places) { placeNames(places.orEmpty().map { it.key }) }
-    val subtitle = places?.let { "${counted(it.size, "place", "places")} · ${counted(countries.size, "country", "countries")}" }
+    val countries = remember(sections) { sections.distinctBy { it.countryCode }.size }
+    val subtitle = places?.let { "${counted(it.size, "place", "places")} · ${counted(countries, "country", "countries")}" }
     PushedGridPage("Places", subtitle, state, onBack) {
         if (places?.isEmpty() == true) fullRow("empty") { EmptyState(Sym.LocationOn, "No places yet", "Places appear for photos with a location.") }
-        countries.forEach { country ->
-            val first = country.first().key
-            fullRow("country ${first.countryCode}") { SectionHead(first.country) }
-            items(country, key = { placeKey(it.key) }) {
+        sections.forEach { section ->
+            fullRow("section ${section.countryCode}/${section.title}") { SectionHead(section.title) } // titles are one per country
+            items(section.places, key = { placeKey(it.key) }) {
                 PlaceCard(it, names.getValue(it.key), Modifier.padding(bottom = Space.s4)) { openPlace(it.key, onOpen) }
             }
         }

@@ -59,7 +59,7 @@ private fun organising(context: Context): ForegroundInfo {
     )
     val open = PendingIntent.getActivity(context, 0, Intent(context, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
     val notification = NotificationCompat.Builder(context, CHANNEL)
-        .setSmallIcon(R.drawable.ic_launcher_monochrome)
+        .setSmallIcon(R.drawable.ic_notification)
         .setContentTitle("Organising your photos")
         .setContentText("Finding people, places and things on this phone")
         .setProgress(0, 0, true)

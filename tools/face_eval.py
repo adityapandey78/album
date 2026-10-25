@@ -14,6 +14,11 @@ Never commit them. A file's name says who is in it (see truthOf in FaceEvalTest)
     adb install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
     adb shell am instrument -w -e class com.aditya.album.FaceEvalTest com.aditya.album.eval.test/androidx.test.runner.AndroidJUnitRunner
     adb shell cat /sdcard/Android/data/com.aditya.album.eval/files/face-eval.txt
+
+To check Album's face pipeline against the original models on the same photos (tools/face_reference.py):
+
+    adb pull /sdcard/Android/data/com.aditya.album.eval/files/faces.tsv
+    python3 -I tools/face_reference.py edgeface_s_gamma_05.pt face_detection_yunet_2026may.onnx OUT_DIR faces.tsv
 """
 import os
 import shutil

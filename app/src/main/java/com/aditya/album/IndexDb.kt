@@ -1,5 +1,6 @@
 package com.aditya.album
 
+import androidx.room.AutoMigration
 import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Database
@@ -15,6 +16,9 @@ import androidx.room.Query
 import androidx.room.RoomDatabase
 import androidx.room.Transaction
 import androidx.room.Upsert
+import androidx.room.migration.AutoMigrationSpec
+import androidx.sqlite.SQLiteConnection
+import androidx.sqlite.execSQL
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -33,6 +37,9 @@ data class IndexedItem(
     val lng: Double?,
     val located: Boolean, // GPS was looked for (needs ACCESS_MEDIA_LOCATION); false rows are redone once it's granted
     @Embedded val place: Place?,
+    // The place came from photos with GPS taken around the same time (estimatePlaces), not from this file's own GPS.
+    // Only ever stored here: nothing is written to the file.
+    @ColumnInfo(defaultValue = "0") val estimated: Boolean = false,
 )
 
 /** ML Kit label with its confidence (0 to 1). Kept for search; [IndexedItem.category] is derived from these. */
@@ -55,11 +62,18 @@ data class ItemText(@PrimaryKey @ColumnInfo(name = "rowid") val mediaId: Long, v
 /** Where an item was taken, for naming its place again. */
 data class ItemGps(val id: Long, val lat: Double, val lng: Double)
 
+/** An item's place as the index has it: from its own GPS ([gps]) or [estimated] from other photos, or neither. */
+data class ItemPlace(val id: Long, val gps: Boolean, val estimated: Boolean, @Embedded val place: Place?)
+
+/** A photo a search reading found, and how sure the index is of it (an ML Kit confidence, 0 to 1). */
+data class Scored(val id: Long, val score: Float?)
+
 /** The columns that decide whether an item needs analysing again. */
 data class IndexStamp(val id: Long, val modified: Long, val size: Long, val version: Int, val located: Boolean)
 
 data class CategoryCount(val category: Category, val count: Int)
 
+/** A city-level place ([Place.locality] and [Place.district] empty, so it's the same key however its photos spread) and its photo count. */
 data class PlaceCount(@Embedded val place: Place, val count: Int)
 
 @Dao
@@ -107,22 +121,27 @@ interface IndexDao {
     @Query("SELECT id, lat, lng FROM items WHERE lat IS NOT NULL AND lng IS NOT NULL")
     suspend fun located(): List<ItemGps>
 
-    @Query("UPDATE items SET city = :city, admin1 = :admin1, countryCode = :countryCode, country = :country WHERE id = :id")
-    suspend fun setPlace(id: Long, city: String?, admin1: String?, countryCode: String?, country: String?)
+    @Query("SELECT id, lat IS NOT NULL AS gps, estimated, city, admin1, countryCode, country, locality, district FROM items")
+    suspend fun itemPlaces(): List<ItemPlace>
 
+    @Query(
+        "UPDATE items SET city = :city, admin1 = :admin1, countryCode = :countryCode, country = :country, locality = :locality, " +
+            "district = :district, estimated = :estimated WHERE id = :id",
+    )
+    suspend fun setPlace(id: Long, city: String?, admin1: String?, countryCode: String?, country: String?, locality: String?, district: String?, estimated: Boolean)
+
+    /** Names the places of [places] (null: no place), all from their own GPS, or all [estimated]. */
     @Transaction
-    suspend fun setPlaces(places: Map<Long, Place?>) = places.forEach { (id, p) -> setPlace(id, p?.city, p?.admin1, p?.countryCode, p?.country) }
-
-    /** Makes the next pass look for these items' location again (see planIndex). */
-    @Query("UPDATE items SET located = 0 WHERE id IN (:ids)")
-    suspend fun unlocate(ids: List<Long>)
+    suspend fun setPlaces(places: Map<Long, Place?>, estimated: Boolean = false) = places.forEach { (id, p) ->
+        setPlace(id, p?.city, p?.admin1, p?.countryCode, p?.country, p?.locality, p?.district, estimated && p != null)
+    }
 
     @Query("SELECT category, COUNT(*) AS count FROM items WHERE category IS NOT NULL GROUP BY category ORDER BY count DESC")
     fun categories(): Flow<List<CategoryCount>>
 
     @Query(
-        "SELECT city, admin1, countryCode, country, COUNT(*) AS count FROM items WHERE city IS NOT NULL " +
-            "GROUP BY city, admin1, countryCode ORDER BY count DESC",
+        "SELECT city, admin1, countryCode, country, '' AS locality, '' AS district, COUNT(*) AS count FROM items " +
+            "WHERE city IS NOT NULL GROUP BY city, admin1, countryCode ORDER BY count DESC",
     )
     fun places(): Flow<List<PlaceCount>>
 
@@ -132,22 +151,40 @@ interface IndexDao {
     @Query("SELECT id FROM items WHERE city = :city AND admin1 = :admin1 AND countryCode = :countryCode")
     fun ids(city: String, admin1: String, countryCode: String): Flow<List<Long>>
 
+    @Query("SELECT id FROM items WHERE estimated = 1")
+    fun estimated(): Flow<List<Long>>
+
+    @Query("SELECT id, lat IS NOT NULL AS gps, estimated, city, admin1, countryCode, country, locality, district FROM items WHERE id = :id")
+    fun place(id: Long): ItemPlace?
+
     // Search: the names it can match, then blocking lookups for the ones it did (called off the main thread).
 
     @Query("SELECT DISTINCT label FROM labels")
     fun labels(): Flow<List<String>>
 
-    @Query("SELECT id FROM items WHERE category = :category")
-    fun idsIn(category: Category): List<Long>
+    /** Every place name at every level: localities, cities, districts, states and countries. */
+    @Query(
+        "SELECT locality FROM items WHERE locality != '' UNION SELECT city FROM items WHERE city != '' " +
+            "UNION SELECT district FROM items WHERE district != '' UNION SELECT admin1 FROM items WHERE admin1 != '' " +
+            "UNION SELECT country FROM items WHERE country != ''",
+    )
+    fun placeNames(): Flow<List<String>>
 
-    @Query("SELECT mediaId FROM labels WHERE label = :label")
-    fun idsWith(label: String): List<Long>
+    /** A category's photos, each with its strongest label of [labels] (the ones the category is made from), or null. */
+    @Query(
+        "SELECT items.id AS id, MAX(labels.confidence) AS score FROM items " +
+            "LEFT JOIN labels ON labels.mediaId = items.id AND labels.label IN (:labels) WHERE items.category = :category GROUP BY items.id",
+    )
+    fun scoredIn(category: Category, labels: List<String>): List<Scored>
 
-    /** By town, state or country name. */
-    @Query("SELECT id FROM items WHERE city = :name OR admin1 = :name OR country = :name")
+    @Query("SELECT mediaId AS id, confidence AS score FROM labels WHERE label = :label")
+    fun scoredWith(label: String): List<Scored>
+
+    /** By locality, city, district, state or country name. */
+    @Query("SELECT id FROM items WHERE locality = :name OR city = :name OR district = :name OR admin1 = :name OR country = :name")
     fun idsAt(name: String): List<Long>
 
-    /** [query] is FTS syntax, like `invoice*` for words starting with "invoice". */
+    /** [query] is FTS syntax, like `invoice*` for words starting with "invoice" or `"tax invoice"` for those words in a row. */
     @Query("SELECT rowid FROM texts WHERE texts MATCH :query")
     fun idsWithText(query: String): List<Long>
 
@@ -156,9 +193,24 @@ interface IndexDao {
     fun text(id: Long): String?
 }
 
-// Schemas are exported to app/schemas so new tables can ship as Room auto-migrations instead of a full re-index.
-// Version 2 added texts without one: existing photos need text read anyway, so the index is dropped and rebuilt.
-@Database(entities = [IndexedItem::class, ItemLabel::class, ItemText::class], version = 2)
+// Schemas are exported to app/schemas so new tables and columns ship as Room auto-migrations instead of a full re-index.
+// Version 2 added texts without one: existing photos needed text read anyway, so that index was dropped and rebuilt.
+// Version 3 adds place levels (locality, district) and estimated places as columns, keeping every row.
+@Database(
+    entities = [IndexedItem::class, ItemLabel::class, ItemText::class],
+    version = 3,
+    autoMigrations = [AutoMigration(from = 2, to = 3, spec = IndexDb.PlaceLevels::class)],
+)
 abstract class IndexDb : RoomDatabase() {
     abstract fun dao(): IndexDao
+
+    /**
+     * Saved places get empty levels rather than none, so every row's place is either all there or all null (Room can't
+     * read half a place). The next indexing pass names them again with their levels.
+     */
+    class PlaceLevels : AutoMigrationSpec {
+        override fun onPostMigrate(connection: SQLiteConnection) {
+            connection.execSQL("UPDATE items SET locality = '', district = '' WHERE city IS NOT NULL")
+        }
+    }
 }

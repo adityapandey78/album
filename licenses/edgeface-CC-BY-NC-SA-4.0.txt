@@ -1,0 +1,58 @@
+Face recognition model: EdgeFace-S (gamma 0.5), Idiap Research Institute (https://huggingface.co/Idiap/EdgeFace-S-GAMMA)
+
+app/src/main/assets/faces/edgeface_s.tflite (sha256 5f073e7dcd68957bb7f136cc16a34125bd3a671de0ff0a84e34055d98f972088)
+is converted from edgeface_s_gamma_05.pt (sha256 dc59abda2e8580399fd115a1eeb07e1f21156196db604b884407bcf0f17efb07,
+Idiap's MD5 b5bfe661b3575110b108d72aa66b8923), Hugging Face Idiap/EdgeFace-S-GAMMA revision
+a1c171036159e94bd4c766088370a37d0899d31f; the same file is in the authors' repository, https://github.com/otroshi/edgeface,
+commit ce86851cfc37979a9cd2558598d0e9bc592cbba3.
+
+Copyright (c) 2024, Anjith George, Christophe Ecabert, Hatef Otroshi Shahreza, Ketan Kotwal, Sebastien Marcel, Idiap
+Research Institute, Martigny 1920, Switzerland. Paper: "EdgeFace: Efficient Face Recognition Model for Edge Devices",
+IEEE Transactions on Biometrics, Behavior, and Identity Science, 2024.
+
+The model is licensed under the Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License:
+https://creativecommons.org/licenses/by-nc-sa/4.0/ (legal code: https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode).
+In short: give credit (this file), no commercial use, and changed versions stay under the same licence. The converted
+file above is such a changed version and is licensed under CC BY-NC-SA 4.0 too. Album is free and non-commercial; a
+paid or commercial Album could not ship this model.
+
+Changes made by tools/edgeface_to_tflite.py: converted from PyTorch to TensorFlow Lite (litert-torch), input taken as
+height x width x channels, weights stored as 16-bit floats (embeddings within cosine 0.9999 of the original's).
+
+The model is provided "as is", without warranty of any kind.
+
+---
+
+tools/edgeface_to_tflite.py rebuilds the network the way the authors' code does (backbones/ in
+https://github.com/otroshi/edgeface), which is under the BSD 3-Clause License that follows.
+
+BSD 3-Clause License
+
+Copyright (c) 2024, Anjith George, Christophe Ecabert, Hatef Otroshi Shahreza,
+Ketan Kotwal, Sébastien Marcel
+Idiap Research Institute, Martigny 1920, Switzerland.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

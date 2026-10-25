@@ -100,7 +100,7 @@ fun StorageScreen(media: List<Media>, onBack: () -> Unit, onOpenCategory: (Strin
             item(key = "free") { SectionHead("Free up space") }
             val kinds = CleanupKind.entries.mapNotNull { kind -> summary?.kinds?.get(kind)?.takeIf { it.count > 0 }?.let { kind to it } }
             when {
-                summary == null -> item(key = "looking") { Note("Looking for duplicates, similar shots and blurry photos. This stays on this phone.") }
+                summary == null -> item(key = "looking") { Note("Looking for copies, similar shots and blurry photos. This stays on this phone.") }
                 kinds.isEmpty() -> item(key = "clean") { Note("Nothing to clean up right now.") }
                 else -> items(kinds, key = { "kind:${it.first}" }) { (kind, n) ->
                     MenuRow(kind.sym, kind.label, { onOpenCategory(kind.name) }, Modifier.padding(horizontal = Space.s3), sub = "${itemCount(n.count)} · frees ${size(n.bytes)}")

@@ -73,6 +73,36 @@ class ForYouTest {
         assertEquals("Recap · 2025", m.eyebrow)
     }
 
+    @Test fun heroIsOnThisDayElseTheNewestTripElseTheLatestRecap() {
+        fun m(title: String) = Memory("", title, emptyList<Int>())
+        val day = m("day")
+        val trips = listOf(m("newTrip"), m("oldTrip"))
+        val month = m("month")
+        val week = m("week")
+        val year = m("year")
+        fun titles(memories: List<Memory<Int>>) = memories.map { it.title }
+        // Four after the hero at most: the older trip waits
+        assertEquals(listOf("day", "newTrip", "month", "week", "year"), titles(memoriesOf(day, trips, month, week, year)))
+        assertEquals(listOf("newTrip", "month", "week", "year", "oldTrip"), titles(memoriesOf(null, trips, month, week, year)))
+        assertEquals(listOf("month", "week", "year"), titles(memoriesOf(null, emptyList(), month, week, year)))
+        assertEquals(listOf("year"), titles(memoriesOf(null, emptyList(), null, null, year))) // a Library that starts this month
+        assertEquals(emptyList<String>(), titles(memoriesOf<Int>(null, emptyList(), null, null, null)))
+    }
+
+    @Test fun opensOnTheSectionPickedLastTime() {
+        assertEquals(ForYouSection.Memories, forYouSection(null)) // first launch
+        assertEquals(ForYouSection.Cleanup, forYouSection("Cleanup"))
+        assertEquals(ForYouSection.Memories, forYouSection("Trips")) // a section that's gone
+    }
+
+    @Test fun stillCheckingOnlyForALongerPassAndUntilItEnds() {
+        val long = IndexProgress(0, STILL_CHECKING_MIN)
+        assertEquals(STILL_CHECKING_MIN, stillChecking(null, long))
+        assertNull(stillChecking(null, IndexProgress(1, STILL_CHECKING_MIN))) // a few new photos: the counts stay
+        assertEquals(1, stillChecking(2, IndexProgress(STILL_CHECKING_MIN - 1, STILL_CHECKING_MIN))) // says so to the end
+        assertNull(stillChecking(1, null)) // done
+    }
+
     @Test fun dayRangesReadLikeTheRestOfAlbum() {
         assertEquals("24 Oct", dayRange(day(2025, 10, 24), day(2025, 10, 24)))
         assertEquals("20 to 26 Oct", dayRange(day(2025, 10, 20), day(2025, 10, 26)))

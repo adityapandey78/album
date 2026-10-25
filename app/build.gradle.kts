@@ -13,8 +13,8 @@ android {
         applicationId = "com.aditya.album"
         minSdk = 33 // Android 13+: READ_MEDIA_* permissions and AGSL shaders, no legacy branches
         targetSdk = 37 // Android 17
-        versionCode = 11
-        versionName = "0.9.1"
+        versionCode = 12
+        versionName = "0.10.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // 64-bit ARM only: the phone and the emulator. Each extra ABI would add another 11 MB ML Kit library.
         ndk { abiFilters += "arm64-v8a" }
@@ -46,6 +46,8 @@ android {
     // ML Kit and LiteRT native libraries are ~35 MB uncompressed. Compressed, every update download is much smaller;
     // Android unpacks them once at install (a little more storage), with no cost at runtime.
     packaging { jniLibs { useLegacyPackaging = true } }
+    // The licence texts in licenses/ go in the app too: Apache 2.0 and BSD ask for a copy with every binary
+    sourceSets["main"].assets.srcDir("../licenses")
 }
 
 // Smart index schemas, kept in git so later tables (faces, text, embeddings) can ship as Room auto-migrations.
@@ -69,9 +71,10 @@ dependencies {
     implementation("com.google.mlkit:image-labeling:17.0.9")
     // On-device text in screenshots and documents, for search; Latin model bundled. Pinned for the same proguard reason.
     implementation("com.google.mlkit:text-recognition:16.0.1")
-    // People: on-device face finding with landmarks; bundled like the labeller. Pinned for the same proguard rule reason.
+    // Clean up: eyes open and smiles for the best shot; bundled like the labeller. Pinned for the same proguard rule reason.
     implementation("com.google.mlkit:face-detection:16.1.7")
-    // People: runs the bundled SFace face-embedding model (assets/faces) on the CPU. No Play services, nothing downloaded.
+    // People: runs the bundled YuNet and EdgeFace-S models (assets/faces) on the CPU; describe-it search runs its
+    // downloaded model the same way. No Play services.
     implementation("com.google.ai.edge.litert:litert:1.4.2")
     debugImplementation("androidx.compose.ui:ui-tooling")
     // Profile generator; Compose already brings androidx.profileinstaller, which installs the profile on sideloaded APKs

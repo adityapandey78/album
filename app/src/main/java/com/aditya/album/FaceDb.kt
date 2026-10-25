@@ -23,7 +23,10 @@ data class ScannedPhoto(
     val version: Int, // FACE_INDEX_VERSION it was scanned with; other versions are redone
 )
 
-/** One face in a photo. [cluster] is the person or automatic group it's in (see cluster()), 0 until clustered. */
+/**
+ * One face in a photo. [cluster] is the person or automatic group it's in (see cluster()): 0 until clustered, UNSURE
+ * when it belongs to nobody yet. [quality] picks covers (see faceQuality); a [weak] face never starts a person.
+ */
 @Entity(
     tableName = "faces",
     foreignKeys = [ForeignKey(ScannedPhoto::class, ["id"], ["mediaId"], onDelete = ForeignKey.CASCADE)],
@@ -34,14 +37,16 @@ class IndexedFace(
     val mediaId: Long,
     @Embedded val box: FaceBox,
     val quality: Float,
-    val embedding: ByteArray, // FACE_MODEL embedding, unit length, little-endian floats
+    val weak: Boolean,
+    val embedding: ByteArray, // EdgeFace-S embedding, unit length, little-endian floats
     val cluster: Long = 0,
+    val fit: Float = 0f, // see FaceVector.fit
 )
 
 /** What the People screens need of a face: no embedding, so loading every face stays cheap. */
-data class FaceTile(val id: Long, val mediaId: Long, val cluster: Long, val quality: Float, @Embedded val box: FaceBox)
+data class FaceTile(val id: Long, val mediaId: Long, val cluster: Long, val quality: Float, val fit: Float, @Embedded val box: FaceBox)
 
-class FaceRow(val id: Long, val mediaId: Long, @Embedded val box: FaceBox, val embedding: ByteArray, val cluster: Long)
+class FaceRow(val id: Long, val mediaId: Long, @Embedded val box: FaceBox, val embedding: ByteArray, val cluster: Long, val weak: Boolean, val fit: Float)
 
 data class FaceSpot(val mediaId: Long, @Embedded val box: FaceBox)
 
@@ -71,10 +76,10 @@ interface FaceDao {
     @Query("DELETE FROM scanned WHERE id IN (:ids)")
     suspend fun delete(ids: List<Long>)
 
-    @Query("SELECT id, mediaId, `left`, top, `right`, bottom, embedding, cluster FROM faces")
+    @Query("SELECT id, mediaId, `left`, top, `right`, bottom, embedding, cluster, weak, fit FROM faces")
     suspend fun rows(): List<FaceRow>
 
-    @Query("SELECT id, mediaId, cluster, quality, `left`, top, `right`, bottom FROM faces WHERE cluster != 0")
+    @Query("SELECT id, mediaId, cluster, quality, fit, `left`, top, `right`, bottom FROM faces WHERE cluster > 0")
     fun tiles(): Flow<List<FaceTile>>
 
     @Query("SELECT mediaId, `left`, top, `right`, bottom FROM faces WHERE cluster = :cluster")
@@ -86,6 +91,9 @@ interface FaceDao {
     @Query("SELECT id FROM faces WHERE cluster = :cluster AND mediaId IN (:mediaIds)")
     suspend fun facesIn(cluster: Long, mediaIds: List<Long>): List<Long>
 
+    @Query("UPDATE faces SET cluster = :cluster, fit = :fit WHERE id = :id")
+    suspend fun place(id: Long, cluster: Long, fit: Float)
+
     @Query("UPDATE faces SET cluster = :cluster WHERE id = :id")
     suspend fun setCluster(id: Long, cluster: Long)
 
@@ -93,11 +101,17 @@ interface FaceDao {
     suspend fun moveCluster(from: Long, to: Long)
 
     @Transaction
+    suspend fun place(placed: Map<Long, Placed>) = placed.forEach { (id, p) -> place(id, p.cluster, p.fit) }
+
+    @Transaction
     suspend fun setClusters(clusters: Map<Long, Long>) = clusters.forEach { (id, cluster) -> setCluster(id, cluster) }
 }
 
-/** The face index: a cache rebuilt from the photos, so a schema change may drop it (fallbackToDestructiveMigration). */
-@Database(entities = [ScannedPhoto::class, IndexedFace::class], version = 1)
+/**
+ * The face index: a cache rebuilt from the photos, so a schema change may drop it (fallbackToDestructiveMigration).
+ * Version 2: EdgeFace-S embeddings (512 floats) replace SFace's; dropping the old ones means no model is ever compared with the other.
+ */
+@Database(entities = [ScannedPhoto::class, IndexedFace::class], version = 2)
 abstract class FaceDb : RoomDatabase() {
     abstract fun dao(): FaceDao
 }

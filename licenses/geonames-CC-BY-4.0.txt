@@ -1,10 +1,19 @@
 Place names: GeoNames (https://www.geonames.org)
 
-app/src/main/assets/geonames/cities.tsv is built from the GeoNames files cities5000.zip, admin1CodesASCII.txt and
-countryInfo.txt (https://download.geonames.org/export/dump/), licensed under the Creative Commons Attribution 4.0
-International License: https://creativecommons.org/licenses/by/4.0/
+app/src/main/assets/geonames/places.tsv and app/src/main/assets/geonames/aliases.tsv are built by tools/geonames.py from
+the GeoNames files cities500.zip, admin1CodesASCII.txt, admin2Codes.txt and countryInfo.txt
+(https://download.geonames.org/export/dump/), licensed under the Creative Commons Attribution 4.0 International License:
+https://creativecommons.org/licenses/by/4.0/
 
-Changes made by tools/geonames.py: neighbourhoods and historical, abandoned or destroyed places were left out,
-coordinates were rounded to 4 decimal places, and state and country names were joined onto each town.
+Downloaded 25 Oct 2026 (Last-Modified 25 Oct 2026 11:10 GMT, countryInfo.txt 11:16 GMT). SHA-256 of the inputs:
+    cities500.zip         2709e682708bc5a88bb7ce359ab478a71e38db180c5b1c58ce15cf77e3c7a077
+    admin1CodesASCII.txt  2e4867f5397acb056ea26377601b57af37cb4c81399770225018e9e439e91ad3
+    admin2Codes.txt       9f49795da1fd460006a40e58a614dbc1a351c9277340a65fe8d73b5f97ec1852
+    countryInfo.txt       c55f638cfaafb4fe45a9aa15120a0f1f78e8a34a8e1847d7b9320cf740fbc9ab
+
+Changes made by tools/geonames.py: historical, abandoned and destroyed places were left out, as was one place whose
+population is a whole taluk's (Kanayannur, next to Kochi); coordinates were rounded to 3 decimal places; populations under
+5,000 were dropped; state, district and country names were joined onto each place; and alternate names were cut down to
+one- or two-word names in Latin script for capitals, cities of 100,000+ and places in India.
 
 The data is provided "as is", without warranty of any kind.

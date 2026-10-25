@@ -4,84 +4,163 @@ import kotlin.math.abs
 import kotlin.math.asin
 import kotlin.math.cos
 import kotlin.math.floor
+import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
 import kotlin.math.sqrt
 
-/** Where a photo was taken, at town level. [admin1] is the state or province, empty when GeoNames has none. */
-data class Place(val city: String, val admin1: String, val countryCode: String, val country: String)
+/**
+ * Where a photo was taken, at GeoNames' levels. [city] is what Places and trips call it: the city whose area it's in, else
+ * the nearest town, the place itself, its district or its state. [locality] is the named place it's in (a suburb, a
+ * village, a beach), [district] the area under the state (GeoNames admin2) and [admin1] the state or province. Each is
+ * empty where GeoNames has none, or the photo is too far from places to say.
+ */
+data class Place(
+    val city: String,
+    val admin1: String,
+    val countryCode: String,
+    val country: String,
+    val locality: String = "",
+    val district: String = "",
+)
 
 /**
- * Offline reverse geocoder over GeoNames towns (population 5000+, see tools/geonames.py).
- * Towns are bucketed into a 1 degree grid, so a lookup only measures the few hundred towns around the point.
+ * Offline reverse geocoder over GeoNames' populated places of 500+ people (see tools/geonames.py). Places are bucketed
+ * into a 1 degree grid, so a lookup only measures the few hundred around the point.
  */
-class Places private constructor(private val towns: List<Town>, private val cellStart: IntArray) {
-    private class Town(val lat: Double, val lng: Double, val radius: Double, val place: Place)
+class Places private constructor(private val spots: List<Spot>, private val cellStart: IntArray) {
+    private class Area(val countryCode: String, val country: String, val state: String, val district: String)
+
+    /** A GeoNames place. [kind] is C (capital), A (state seat), D (district seat), N (neighbourhood) or a space. */
+    private class Spot(val lat: Double, val lng: Double, val name: String, val people: Int, val kind: Char, val area: Area) {
+        // ponytail: how far a place's area reaches is guessed from its population (Mumbai 25 km, 5000 people 0.6 km).
+        // Tuned on Indian metros and their twin towns; real boundaries would need polygon data.
+        val reach get() = min(KM_PER_SQRT_PERSON * sqrt(people.toDouble()), MAX_REACH_KM)
+
+        // Neighbourhoods are never cities or towns: GeoNames puts whole cities' populations on some (Navi Mumbai)
+        val isCity get() = kind == 'C' || kind == 'A' || kind == 'D' || (people >= CITY_PEOPLE && kind != 'N')
+        val isTown get() = people >= TOWN_PEOPLE && kind != 'N'
+    }
+
+    private class Near(val spot: Spot, val km: Double) {
+        // A big town says more about the area around it than a village the same distance away
+        val weight get() = sqrt(max(spot.people, MIN_PEOPLE).toDouble()) / (km + 1)
+        val depth get() = km - spot.reach // below 0 inside the place's reach
+    }
 
     /**
-     * The town a GPS point belongs to; its state or region when every town is far off (a trek, a beach on an island);
-     * null when no town is within [MAX_KM] (open sea). Big cities cover more ground, so Bandra and Powai are Mumbai, not
-     * the small suburb whose centre is nearest. That reach stops at the state border, though: where the point is also
-     * inside a town of another state, the state is the one whose town it is deeper inside, so Noida stays Uttar Pradesh
-     * instead of becoming Delhi while Ghaziabad's edge stays Ghaziabad.
+     * The place a GPS point is in, or null when no place is within [MAX_KM] (open sea, empty land).
+     * The state comes first, from the places nearest the point, so a big city's reach never crosses a border: Noida stays
+     * Uttar Pradesh and Hoboken New Jersey. The city is then the one of that state whose area the point is deepest inside
+     * (Bandra and Powai are Mumbai, Thane is Thane), else the town whose reach it's nearest, within [NEAR_KM] (Baga beach
+     * is Calangute), else the place it's in, its district or its state (Havelock is Andaman and Nicobar, not Port Blair
+     * 43 km across the sea).
      */
-    fun nearest(lat: Double, lng: Double): Place? {
+    fun at(lat: Double, lng: Double): Place? {
+        val near = around(lat, lng).ifEmpty { return null }
+        // A vote of the nearest few, so one village GeoNames files under the wrong state (it has Canacona, next to Kānkon
+        // in Goa, in Karnataka) doesn't move a beach across the border
+        val voters = near.takeWhile { it.km <= near[0].km + VOTE_KM }.take(VOTERS)
+        val area = voters.groupBy { it.spot.area.countryCode to it.spot.area.state }.maxBy { (_, v) -> v.sumOf { it.weight } }.value[0].spot.area
+        val inState = near.filter { it.spot.area.countryCode == area.countryCode && it.spot.area.state == area.state }
+        // Far from every place, the nearest one's district is a guess (Chandratal isn't in Manali's Kullu)
+        val district = voters.filter { it in inState && it.spot.area.district.isNotEmpty() && it.km <= DISTRICT_KM }
+            .groupBy { it.spot.area.district }.maxByOrNull { (_, v) -> v.sumOf { it.weight } }?.key.orEmpty()
+        val locality = inState.firstOrNull { it.km <= LOCALITY_KM }?.spot?.name.orEmpty()
+        val city = inState.filter { it.spot.isCity && it.km <= min(it.spot.reach * CITY_STRETCH, CITY_KM) }.minByOrNull { it.depth }
+            ?: inState.filter { it.spot.isTown && it.depth <= NEAR_KM }.minByOrNull { it.depth }
+        return Place(
+            city = city?.spot?.name ?: locality.ifEmpty { district.ifEmpty { area.state.ifEmpty { area.country } } },
+            admin1 = area.state,
+            countryCode = area.countryCode,
+            country = area.country,
+            locality = locality,
+            district = district,
+        )
+    }
+
+    /** Every place within [MAX_KM] of the point, nearest first. */
+    private fun around(lat: Double, lng: Double): List<Near> {
         val dLat = MAX_KM / KM_PER_DEGREE
         // A degree of longitude shrinks towards the poles, so widen the search there (to the whole ring at the pole).
         val shrink = cos(Math.toRadians(min(abs(lat) + dLat, 90.0)))
         val dLng = if (shrink < 1e-3) 180.0 else min(180.0, dLat / shrink)
         val cols = if (dLng >= 180.0) -180..179 else floor(lng - dLng).toInt()..floor(lng + dLng).toInt()
-        val near = ArrayList<Pair<Town, Double>>()
+        val near = ArrayList<Near>()
         for (row in floor(lat - dLat).toInt().coerceAtLeast(-90)..floor(lat + dLat).toInt().coerceAtMost(89)) {
             for (col in cols) {
                 val cell = (row + 90) * 360 + Math.floorMod(col + 180, 360) // floorMod wraps across the 180th meridian
                 for (i in cellStart[cell] until cellStart[cell + 1]) {
-                    val km = distanceKm(lat, lng, towns[i].lat, towns[i].lng)
-                    if (km <= MAX_KM) near += towns[i] to km
+                    val km = distanceKm(lat, lng, spots[i].lat, spots[i].lng)
+                    if (km <= MAX_KM) near += Near(spots[i], km)
                 }
             }
         }
-        // Inside towns of two states (a city's reach spilling over the border): the state of the town it's deeper inside
-        val inside = near.filter { (town, km) -> km <= town.radius }
-        val state = inside.takeIf { it.distinctBy { (town) -> town.place.admin1 }.size > 1 }?.minBy { (town, km) -> km / town.radius }?.first?.place?.admin1
-        val (best, km) = near.filter { (town) -> state == null || town.place.admin1 == state }.minByOrNull { (town, km) -> km - town.radius } ?: return null
-        // Far from every town, the state says more than a town 40 km away
-        return if (km - best.radius <= NEAR_KM) best.place else best.place.run { copy(city = admin1.ifEmpty { country }) }
+        near.sortBy { it.km }
+        return near
     }
 
     companion object {
         /** Beyond this a point gets no place rather than a misleading one. */
         const val MAX_KM = 50.0
 
-        /** Further than this past the nearest town's reach, a point is named by its state: Havelock isn't Port Blair. */
+        /** The place a photo is in: GeoNames points sit in a place's centre, and most places of 500+ people are this small. */
+        private const val LOCALITY_KM = 3.0
+
+        /** A city covers its reach and half again, up to this far from its centre. */
+        private const val CITY_STRETCH = 1.5
+        private const val CITY_KM = 25.0
+        private const val CITY_PEOPLE = 100_000
+
+        /** Further than this past the nearest town's reach, a point is named by its place, district or state. */
         private const val NEAR_KM = 20.0
+        private const val TOWN_PEOPLE = 5_000
+
+        // The state vote: the nearest places up to this much further than the nearest one, at most this many
+        private const val VOTE_KM = 5.0
+        private const val VOTERS = 5
+        private const val DISTRICT_KM = 20.0
+        private const val MIN_PEOPLE = 500 // places.tsv leaves out populations under 5,000; cities500 starts here
+
+        private const val KM_PER_SQRT_PERSON = 0.008
+        private const val MAX_REACH_KM = 25.0
         private const val KM_PER_DEGREE = 111.2
         private const val EARTH_RADIUS_KM = 6371.0
         private const val CELLS = 180 * 360
 
-        // ponytail: a city's reach is guessed from its population (Mumbai about 25 km, a 5000 person town about 0.6 km).
-        // Tuned on Indian metros and their twin towns; real city boundaries would need polygon data.
-        private const val KM_PER_SQRT_PERSON = 0.008
-        private const val MAX_RADIUS_KM = 25.0
-
-        /** Reads the tab-separated asset: lat, lng, name, state, country code, country, population. Call off the main thread. */
+        /** Reads places.tsv (its format is in tools/geonames.py). Call off the main thread: 236k places take a moment. */
         fun parse(lines: Sequence<String>): Places {
-            val shared = HashMap<String, String>() // state and country names repeat thousands of times
-            fun String.shared() = shared.getOrPut(this) { this }
-            val towns = lines.filter { it.isNotBlank() }.map { line ->
-                val f = line.split('\t')
-                Town(
-                    lat = f[0].toDouble(),
-                    lng = f[1].toDouble(),
-                    radius = min(KM_PER_SQRT_PERSON * sqrt(f[6].toDouble()), MAX_RADIUS_KM),
-                    place = Place(f[2], f[3].shared(), f[4].shared(), f[5].shared()),
-                )
-            }.sortedBy { cellOf(it.lat, it.lng) }.toList()
-            // cellStart[c] until cellStart[c + 1] are the towns in cell c
+            var countryCode = ""
+            var country = ""
+            var state = ""
+            var area = Area("", "", "", "")
+            val spots = ArrayList<Spot>()
+            for (line in lines) {
+                when {
+                    line.isEmpty() -> {}
+                    line[0] == '=' -> {
+                        countryCode = line.substring(1).substringBefore('\t')
+                        country = line.substringAfter('\t')
+                        state = ""
+                        area = Area(countryCode, country, "", "")
+                    }
+                    line.startsWith(">>") -> area = Area(countryCode, country, state, line.substring(2))
+                    line[0] == '>' -> {
+                        state = line.substring(1)
+                        area = Area(countryCode, country, state, "")
+                    }
+                    else -> {
+                        val f = line.split('\t')
+                        spots += Spot(f[0].toDouble(), f[1].toDouble(), f[2], f.getOrNull(3)?.toInt() ?: 0, f.getOrNull(4)?.firstOrNull() ?: ' ', area)
+                    }
+                }
+            }
+            spots.sortBy { cellOf(it.lat, it.lng) }
+            // cellStart[c] until cellStart[c + 1] are the places in cell c
             val cellStart = IntArray(CELLS + 1)
-            towns.forEach { cellStart[cellOf(it.lat, it.lng) + 1]++ }
+            spots.forEach { cellStart[cellOf(it.lat, it.lng) + 1]++ }
             for (c in 1..CELLS) cellStart[c] += cellStart[c - 1]
-            return Places(towns, cellStart)
+            return Places(spots, cellStart)
         }
 
         private fun cellOf(lat: Double, lng: Double) =

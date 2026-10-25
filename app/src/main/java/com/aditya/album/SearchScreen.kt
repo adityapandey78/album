@@ -7,6 +7,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -14,7 +15,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -58,6 +61,7 @@ import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.ImeAction
@@ -76,10 +80,23 @@ private const val DEBOUNCE_MS = 150L // typing pauses this long before a search 
 private const val RECENT_KEY = "search_recent" // in the "settings" preferences, which AlbumApp loads at start
 private const val MAX_RECENT = 8
 private const val MAX_SUGGESTIONS = 8
-private const val TIP = "Try a place, a thing like food or dogs, a date like March 2024 or last week, or words from a screenshot."
+private const val TIP = "Try a place, a thing like food or dogs, a date like March 2024 or last week, or words from a photo. Quotes find exact text."
 
-/** What a search found: its terms (for the chips), the matching photos newest first, and the terms that found nothing. */
-class SearchResult(val terms: List<Term>, val items: List<Media>, val unmatched: List<Term>, val ms: Long)
+/**
+ * What a search found: its terms (for the chips), the best matches best first, the rest newest first, the terms that
+ * found nothing (for an empty result) and the words left out because nothing knows them.
+ */
+class SearchResult(
+    val terms: List<Term>,
+    val top: List<Media>,
+    val more: List<Media>,
+    val unmatched: List<Term>,
+    val ignored: List<Term>,
+    val ms: Long,
+) {
+    /** Every result in the order shown: what the viewer swipes through. */
+    val items = top + more
+}
 
 /**
  * An open search. AlbumShell holds it and shows [items] like an album's, so the selection bar, the viewer and Back work
@@ -110,7 +127,7 @@ class SearchState(
 
     /** Remembers the query as a recent search: on Search or opening a result. */
     fun keep() {
-        result?.let { CrashLog.note("search: ${it.terms.size} terms, ${it.items.size} found, ${it.ms} ms") } // never the query itself
+        result?.let { CrashLog.note("search: ${it.terms.size} terms, ${it.items.size} found (${it.top.size} top), ${it.ms} ms") } // never the query itself
         saveRecent()
     }
 
@@ -142,6 +159,7 @@ fun rememberSearch(photos: List<Media>, collections: List<CollectionAlbum>): Sea
     val query = rememberSaveable(stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue()) }
     val things = remember { SmartIndex.categories() }.collectAsState(emptyList())
     val places = remember { SmartIndex.places() }.collectAsState(emptyList())
+    val placeNames = remember { SmartIndex.placeNames() }.collectAsState(emptyList())
     val labels = remember { SmartIndex.labels() }.collectAsState(emptyList())
     val people = remember { People.mediaIdsByName() }.collectAsState(emptyMap()) // named, not hidden
     val search = remember { SearchState(query, things, places, context.getSharedPreferences("settings", Context.MODE_PRIVATE)) }
@@ -149,7 +167,7 @@ fun rememberSearch(photos: List<Media>, collections: List<CollectionAlbum>): Sea
     // The query and the index are read here, not in composition: this runs inside AlbumShell, which shouldn't recompose
     // on every keystroke or index batch. Equal snapshots (a batch that changed no counts) don't search again.
     LaunchedEffect(library) {
-        snapshotFlow { SearchInput(query.value.text, things.value, places.value, labels.value, people.value) }.collectLatest { input ->
+        snapshotFlow { SearchInput(query.value.text, things.value, placeNames.value, labels.value, people.value) }.collectLatest { input ->
             if (input.text.isBlank()) {
                 search.result = null // so a new query never flashes the results of the old one
                 return@collectLatest
@@ -164,7 +182,7 @@ fun rememberSearch(photos: List<Media>, collections: List<CollectionAlbum>): Sea
 private data class SearchInput(
     val text: String,
     val things: List<CategoryCount>,
-    val places: List<PlaceCount>,
+    val places: List<String>,
     val labels: List<String>,
     val people: Map<String, Set<Long>>,
 )
@@ -185,10 +203,10 @@ private class Library(private val photos: List<Media>, private val collections: 
         )
     }
 
-    fun search(
+    suspend fun search(
         query: String,
         things: List<CategoryCount>,
-        places: List<PlaceCount>,
+        places: List<String>,
         labels: List<String>,
         people: Map<String, Set<Long>>,
     ): SearchResult {
@@ -196,17 +214,24 @@ private class Library(private val photos: List<Media>, private val collections: 
         val sources = listOf(
             // "aditya" finds "Aditya Pandey"; a person's photos are only gathered when the name matched
             NamedSource(MatchKind.Person, people.map { (name, ids) -> Named(name, partsOf(name)) { ids } }),
-            thingSource(things.map { it.category }, labels, SmartIndex::idsIn, SmartIndex::idsWith),
-            placeSource(places.map { it.place }, SmartIndex::idsAt),
+            thingSource(things.map { it.category }, labels, SmartIndex::scoredIn, SmartIndex::scoredWith),
+            placeSource(places, SmartIndex.placeAliases, SmartIndex::idsAt),
             albums,
             typeSource,
-            textSource(SmartIndex::idsWithText),
+            textSource(SmartIndex::idsWithTokens),
             fileSource,
         )
-        val terms = parseQuery(query, DateSource(LocalDate.now(), WeekFields.of(Locale.getDefault()).firstDayOfWeek), sources)
-        val found = if (terms.isEmpty()) emptyList() else matching(items, terms).map { photos[it] } // only stop words: nothing
-        val unmatched = if (found.isEmpty()) unmatched(items, terms) else emptyList()
-        return SearchResult(terms, found, unmatched, SystemClock.elapsedRealtime() - started)
+        val dates = DateSource(LocalDate.now(), WeekFields.of(Locale.getDefault()).firstDayOfWeek)
+        val terms = parseQuery(query, dates, sources, exactTextSource(SmartIndex::idsWithPhrase))
+        // The describe-it model reads what the photos show: the words that aren't a place, date, person or album. It keeps
+        // only hits it's confident of itself (its calibrated floor), best first; ids outside this library are ignored.
+        val described = terms.filter { it.isThing || it.loose }.joinToString(" ") { it.text }.takeIf { it.isNotBlank() }
+            ?.let { Embeddings.search(it) }?.map { it.first }
+        val found = find(items, terms, described) // only stop words: no terms, nothing found
+        return SearchResult(
+            terms, found.top.map { photos[it] }, found.more.map { photos[it] }, unmatched(items, terms, found), found.ignored,
+            SystemClock.elapsedRealtime() - started,
+        )
     }
 }
 
@@ -248,21 +273,30 @@ fun SearchPage(
             }
             result == null -> {} // the first search takes a moment
             result.items.isEmpty() -> NoResults(result, note, padding)
-            else -> MediaGrid(
-                result.items,
-                columns,
-                grid,
-                selected,
-                onOpen = {
+            else -> {
+                val open = { m: Media ->
                     focusManager.clearFocus()
                     search.keep()
-                    onOpen(it)
-                },
-                onSelect,
-                padding,
-                gridModifier,
-                header = { MatchLine(result, note) },
-            )
+                    onOpen(m)
+                }
+                // The rest are the grid's own photos, newest first with date headers; the top matches sit above them
+                MediaGrid(
+                    result.more,
+                    columns,
+                    grid,
+                    selected,
+                    onOpen = open,
+                    onSelect,
+                    padding,
+                    gridModifier,
+                    header = {
+                        Column {
+                            MatchLine(result, note)
+                            TopMatches(result, columns.intValue, selected, selecting, open, onSelect)
+                        }
+                    },
+                )
+            }
         }
         Column(Modifier.fillMaxWidth().background(c.canvas).statusBarsPadding()) {
             CollapsedTopBar(
@@ -379,7 +413,7 @@ private fun MatchLine(result: SearchResult, note: String?) {
     Column(Modifier.padding(start = Space.s4, end = Space.s4, top = Space.s2, bottom = Space.s3)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), Arrangement.spacedBy(Space.s2)) {
-                result.terms.forEach { term ->
+                result.terms.filter { it !in result.ignored }.forEach { term ->
                     Row(
                         Modifier.background(c.flashSoft, CircleShape).padding(start = Space.s2, end = Space.s3, top = 6.dp, bottom = 6.dp)
                             .semantics(mergeDescendants = true) {}, // read as "Place, Goa"
@@ -393,15 +427,80 @@ private fun MatchLine(result: SearchResult, note: String?) {
             }
             Text(countOf(result.items.size, "result"), Modifier.padding(start = Space.s3), color = c.inkMuted, style = AlbumTheme.type.meta)
         }
-        note?.let { Text(it, Modifier.padding(top = 6.dp), color = c.inkMuted, style = AlbumTheme.type.caption) }
+        val notes = listOfNotNull(leftOut(result.ignored), note)
+        notes.forEach { Text(it, Modifier.padding(top = 6.dp), color = c.inkMuted, style = AlbumTheme.type.caption) }
     }
+}
+
+/** "“zzz” matched nothing, so it's left out": a word nothing knows no longer empties the search, but it says so. */
+fun leftOut(ignored: List<Term>): String? = when (ignored.size) {
+    0 -> null
+    1 -> "${ignored[0].label} matched nothing, so it's left out"
+    else -> "${namesOf(ignored.map { it.label })} matched nothing, so they're left out"
+}
+
+/**
+ * The best matches above the rest, as a block of the grid's own tiles (same columns and gutter): tap opens, long-press
+ * selects, as in the grid. Only when the search had something to rank by (labels, the model, several words found).
+ */
+@Composable
+private fun TopMatches(
+    result: SearchResult,
+    columns: Int,
+    selected: Set<Long>,
+    selecting: Boolean,
+    onOpen: (Media) -> Unit,
+    onSelect: (Set<Long>) -> Unit,
+) {
+    if (result.top.isEmpty()) return
+    val gutter = AlbumTheme.spec.gutter
+    val haptics = rememberHaptics()
+    val toggle = { m: Media -> onSelect(if (m.id in selected) selected - m.id else selected + m.id) }
+    TierHead("Top matches", Modifier.padding(top = Space.s1))
+    Column(verticalArrangement = Arrangement.spacedBy(gutter)) {
+        result.top.chunked(columns).forEach { row ->
+            Row(horizontalArrangement = Arrangement.spacedBy(gutter)) {
+                row.forEach { m ->
+                    MediaTile(
+                        m, selecting, m.id in selected,
+                        Modifier.weight(1f).aspectRatio(1f).combinedClickable(
+                            interactionSource = null,
+                            indication = null, // as in the grid: the photo opening (or its check popping) is the feedback
+                            onLongClickLabel = "Select",
+                            onLongClick = {
+                                haptics.longPress()
+                                toggle(m)
+                            },
+                            hapticFeedbackEnabled = false, // Haptics follows Album's own haptics switch
+                        ) { if (selecting) toggle(m) else onOpen(m) },
+                        small = columns >= 5,
+                        checkSize = checkSizeFor(columns),
+                    )
+                }
+                repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
+            }
+        }
+    }
+    if (result.more.isNotEmpty()) TierHead("More results", Modifier.padding(top = Space.s8))
+}
+
+/** "Top matches", "More results": quieter than the date headers under them. */
+@Composable
+private fun TierHead(text: String, modifier: Modifier) {
+    Text(
+        text,
+        modifier.fillMaxWidth().padding(start = Space.s4, end = Space.s4, bottom = Space.s3).semantics { heading() },
+        style = AlbumTheme.type.label,
+        color = AlbumTheme.colors.inkMuted,
+    )
 }
 
 @Composable
 private fun NoResults(result: SearchResult, note: String?, padding: PaddingValues) {
+    val known = result.terms - result.ignored.toSet()
     val title = when {
         result.unmatched.isNotEmpty() -> "Nothing found for ${namesOf(result.unmatched.map { it.label })}"
-        result.terms.size > 1 -> "Nothing matches ${namesOf(result.terms.map { it.label })} together"
+        known.size > 1 -> "Nothing matches ${namesOf(known.map { it.label })} together"
         else -> "Nothing found"
     }
     Column(Modifier.fillMaxSize().padding(padding), verticalArrangement = Arrangement.Center) {

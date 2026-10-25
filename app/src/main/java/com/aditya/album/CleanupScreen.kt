@@ -1,7 +1,11 @@
 package com.aditya.album
 
+import android.app.Activity
 import android.text.format.Formatter
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.Spring
@@ -71,6 +75,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 
@@ -79,8 +85,8 @@ data class ReviewItem(val id: Long, val reasons: List<String>, val best: Boolean
 
 /**
  * The swipe-to-clean order for [kinds]: categories in chip order, each similar group best shot first, every item once with
- * all its reasons ("Similar · 4", "Blurry"). Duplicates show only the copies, since the original is the same file. At most
- * [MAX_REQUEST] cards, so the one Trash request at the end always fits.
+ * all its reasons ("Similar · 4", "Blurry"). Exact copies and copies show only the copies, since the original stays. At
+ * most [MAX_REQUEST] cards, so the one Trash request at the end always fits.
  */
 fun reviewQueue(result: CleanupResult, kinds: Collection<CleanupKind>): List<ReviewItem> {
     val reasons = LinkedHashMap<Long, MutableList<String>>()
@@ -94,7 +100,7 @@ fun reviewQueue(result: CleanupResult, kinds: Collection<CleanupKind>): List<Rev
                 best += group.keep
                 group.ids.forEach { add(it, "${kind.reason} · ${group.ids.size}") }
             }
-            else -> result.candidates(kind).forEach { add(it, kind.reason) }
+            else -> result.candidates(kind).forEach { add(it, result.reason(kind, it)) }
         }
     }
     return reasons.entries.take(MAX_REQUEST).map { (id, why) -> ReviewItem(id, why, id in best) }
@@ -106,9 +112,11 @@ private const val TILT_DEGREES = 8f
 
 /**
  * Clean up, pushed over the tabs: a chip per category with its count, and the chosen categories' photos in a grid, where
- * a group's best shot carries a Keep badge. "Start swipe to clean" goes through them one card at a time. Nothing is deleted
- * while swiping: on leaving, every card swiped to Trash goes in one Trash request, with one Snackbar and Undo.
- * [category] (a [CleanupKind] name, as Storage passes) opens on that category alone; otherwise on the suggestions.
+ * each group's original or best shot carries a badge. "Start swipe to clean" goes through them one card at a time. Nothing
+ * is deleted while swiping: on leaving, every card swiped to Trash goes in one Trash request, with one Snackbar and Undo.
+ * Exact copies and copies can also go in one tap, behind a ConfirmBar. Either way, an original that stays takes over its
+ * copies' favourites and collections. [category] (a [CleanupKind] name, as Storage passes) opens on that category alone;
+ * otherwise on the suggestions.
  */
 @Composable
 fun CleanupScreen(media: List<Media>, onBack: () -> Unit, onOpen: (Media) -> Unit, category: String? = null) {
@@ -118,6 +126,7 @@ fun CleanupScreen(media: List<Media>, onBack: () -> Unit, onOpen: (Media) -> Uni
     val summary by Cleanup.summary.collectAsState()
     val byId = remember(media) { media.associateBy { it.id } }
     val snackbar = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
     fun size(bytes: Long) = Formatter.formatShortFileSize(context, bytes)
 
     // Kind names, so the choice survives the activity being recreated
@@ -133,9 +142,60 @@ fun CleanupScreen(media: List<Media>, onBack: () -> Unit, onOpen: (Media) -> Uni
         session = null
         keeps = emptyList()
     }
+    // One trip to Trash, while Android asks about favourites and then about Trash: every item going, and the copies among
+    // them with each one's original, in the same order. Ids, so a step in between survives the activity being recreated.
+    var confirming by rememberSaveable { mutableStateOf<String?>(null) } // the kind whose ConfirmBar is up
+    var going by rememberSaveable { mutableStateOf(emptyList<Long>()) }
+    var copies by rememberSaveable { mutableStateOf(emptyList<Long>()) }
+    var originals by rememberSaveable { mutableStateOf(emptyList<Long>()) }
+    fun forget() {
+        going = emptyList()
+        copies = emptyList()
+        originals = emptyList()
+    }
     // The review ends once Android has moved the photos: declining its pop-up keeps every decision to try again
-    val trash = rememberTrashWithUndo(snackbar) { endSession() }
+    val trash = rememberTrashWithUndo(snackbar) {
+        endSession()
+        val moved = copies
+        val kept = originals
+        forget()
+        if (moved.isNotEmpty()) scope.launch { keepCollections(moved, kept) }
+    }
     var asked by remember { mutableStateOf(false) } // a second Back after a declined pop-up leaves without asking again
+    // Android asks to favourite the originals of favourite copies first; the items go only once it has
+    val favourite = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {
+        if (it.resultCode == Activity.RESULT_OK) trash(going.mapNotNull(byId::get)) else forget()
+    }
+
+    /**
+     * Moves [out] to Trash, swiped or in one tap. Copies among it hand their favourite and collections to the original that
+     * stays, as the ConfirmBar promises: Android is asked to favourite those originals first.
+     */
+    fun send(out: List<Media>) {
+        val pairs = result?.originalsOf(out.map { it.id }).orEmpty()
+            .mapNotNull { (original, copy) -> byId[original]?.let { o -> byId[copy]?.let { o to it } } }
+        going = out.map { it.id }
+        copies = pairs.map { it.second.id }
+        originals = pairs.map { it.first.id }
+        val favourites = pairs.filter { (original, copy) -> copy.isFavorite && !original.isFavorite }.map { it.first }.distinct()
+        if (favourites.isEmpty()) {
+            trash(out)
+        } else {
+            favourite.launch(IntentSenderRequest.Builder(favoriteRequest(context.contentResolver, favourites, true)).build())
+        }
+    }
+
+    /** [kind]'s copies, each with its original. Never a copy whose original isn't in the Library. */
+    fun copiesOf(kind: CleanupKind) = result?.groups(kind).orEmpty()
+        .flatMap { g -> byId[g.keep]?.let { keep -> g.ids.drop(1).mapNotNull(byId::get).map { keep to it } }.orEmpty() }
+
+    /** Moves [kind]'s copies (up to one request's worth) to Trash in one tap. */
+    fun moveCopies(kind: CleanupKind) {
+        val out = copiesOf(kind).take(MAX_REQUEST).map { it.second }
+        if (out.isEmpty()) return
+        CrashLog.note("cleanup move ${out.size} ${kind.name}")
+        send(out)
+    }
 
     fun finish() {
         val ids = session ?: return
@@ -147,7 +207,7 @@ fun CleanupScreen(media: List<Media>, onBack: () -> Unit, onOpen: (Media) -> Uni
         }
         asked = true
         CrashLog.note("cleanup trash ${out.size}")
-        trash(out)
+        send(out)
     }
     val leave = { if (session != null) finish() else onBack() }
     BackHandler(onBack = leave)
@@ -181,11 +241,12 @@ fun CleanupScreen(media: List<Media>, onBack: () -> Unit, onOpen: (Media) -> Uni
                 )
                 r == null -> EmptyState(
                     Sym.CleaningServices, "Looking through your photos",
-                    "Duplicates, similar shots and blurry photos show up here as they're found. Nothing leaves this phone.",
+                    "Copies, similar shots and blurry photos show up here as they're found. Nothing leaves this phone.",
                 )
                 else -> CleanupGrid(
                     r, summary, kinds, byId,
                     onToggle = { kind -> chosen = if (kind.name in chosen) chosen - kind.name else chosen + kind.name },
+                    onMove = { confirming = it.name },
                     onOpen = onOpen,
                     bottomPadding = bottom + if (showStart) Space.target + Space.s8 else Space.s8,
                     size = ::size,
@@ -212,9 +273,55 @@ fun CleanupScreen(media: List<Media>, onBack: () -> Unit, onOpen: (Media) -> Uni
                 .padding(bottom = Space.s4 + if (showStart) Space.target + Space.s3 else 0.dp),
         ) { AlbumSnackbar(it) }
     }
+
+    CleanupKind.entries.find { it.name == confirming }?.let { kind ->
+        val copies = copiesOf(kind).map { it.second }
+        val n = minOf(copies.size, MAX_REQUEST)
+        ConfirmBar(
+            title = "Move ${itemCount(n)} to Trash?",
+            body = "Each original stays, and takes over any favourite or collection of its copies. Trash keeps the copies for 30 days." +
+                if (copies.size > n) " Android moves up to ${"%,d".format(MAX_REQUEST)} at a time; the rest can go next." else "",
+            confirmLabel = "Move to Trash",
+            onConfirm = {
+                confirming = null
+                moveCopies(kind)
+            },
+            onCancel = { confirming = null },
+            thumbs = copies.take(3),
+        )
+    }
 }
 
-/** The chips and, under them, each chosen category's photos: a header with what it would free, then its tiles. */
+/** Album's collections that held one of [copies] now hold its original ([originals], in the same order) as well. */
+private suspend fun keepCollections(copies: List<Long>, originals: List<Long>) {
+    val originalOf = copies.zip(originals).toMap()
+    try {
+        Collections.items.first().filter { it.mediaId in originalOf }.groupBy { it.collectionId }.forEach { (id, items) ->
+            Collections.add(id, "", items.map { originalOf.getValue(it.mediaId) }.distinct())
+        }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        CrashLog.note("cleanup collections failed: $e") // the copies are in Trash either way; Undo brings them back
+    }
+}
+
+/** What each category holds, under its heading. */
+private fun noteOf(kind: CleanupKind) = when (kind) {
+    CleanupKind.Exact -> "The same photo or video saved more than once. The original of each stays."
+    CleanupKind.Copies -> "Smaller, re-saved or shared copies of your photos, such as ones saved from WhatsApp. The original of each stays."
+    CleanupKind.Similar -> "Shots taken moments apart. The best one is marked; choose what to keep."
+    CleanupKind.Blurry -> "Photos that look out of focus or shaken."
+    CleanupKind.Exposure -> "Photos that came out nearly black or washed out, like pocket shots."
+    CleanupKind.Screenshots -> "Screenshots older than 30 days."
+    CleanupKind.WhatsApp -> "Photos and videos from WhatsApp, to look through."
+    CleanupKind.BigVideos -> "Videos over 100 MB, biggest first."
+}
+
+/**
+ * The chips and, under them, each chosen category's photos: a header with what it would free (and for copies, [onMove]
+ * to move them all), then its tiles.
+ */
 @Composable
 private fun CleanupGrid(
     result: CleanupResult,
@@ -222,6 +329,7 @@ private fun CleanupGrid(
     kinds: List<CleanupKind>,
     byId: Map<Long, Media>,
     onToggle: (CleanupKind) -> Unit,
+    onMove: (CleanupKind) -> Unit,
     onOpen: (Media) -> Unit,
     bottomPadding: Dp,
     size: (Long) -> String,
@@ -231,7 +339,7 @@ private fun CleanupGrid(
     // Chips for categories with something in them, and any chosen one, so it can be unchosen
     val chips = CleanupKind.entries.filter { (counts[it]?.count ?: 0) > 0 || it in kinds }
     if (chips.isEmpty()) {
-        EmptyState(Sym.CheckCircle, "Nothing to clean up", "No duplicates, similar shots, blurry photos or old screenshots right now.")
+        EmptyState(Sym.CheckCircle, "Nothing to clean up", "No copies, similar shots, blurry photos or old screenshots right now.")
         return
     }
     LazyVerticalGrid(
@@ -257,19 +365,29 @@ private fun CleanupGrid(
         for (kind in shown) {
             item(key = "head:$kind", span = { GridItemSpan(maxLineSpan) }) {
                 val n = counts[kind]
-                Column(Modifier.fillMaxWidth().padding(start = Space.s4, end = Space.s4, top = Space.s6, bottom = Space.s1)) {
-                    Text(kind.label, style = AlbumTheme.type.titleMd, color = AlbumTheme.colors.ink)
-                    if (n != null) Text("${itemCount(n.count)} · frees ${size(n.bytes)}", style = AlbumTheme.type.caption, color = AlbumTheme.colors.inkMuted)
+                val c = AlbumTheme.colors
+                Column(
+                    Modifier.fillMaxWidth().padding(start = Space.s4, end = Space.s4, top = Space.s6, bottom = Space.s1),
+                    verticalArrangement = Arrangement.spacedBy(Space.s1),
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(Space.s3), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(kind.label, style = AlbumTheme.type.titleMd, color = c.ink)
+                            if (n != null) Text("${itemCount(n.count)} · frees ${size(n.bytes)}", style = AlbumTheme.type.caption, color = c.inkMuted)
+                        }
+                        if (kind == CleanupKind.Exact || kind == CleanupKind.Copies) AlbumButton("Move to Trash", { onMove(kind) }, icon = Sym.Delete)
+                    }
+                    Text(noteOf(kind), style = AlbumTheme.type.caption, color = c.inkMuted)
                 }
             }
             when (kind) {
-                CleanupKind.Similar, CleanupKind.Duplicates -> {
-                    val groups = if (kind == CleanupKind.Similar) result.similar else result.duplicates
-                    groups.forEach { group ->
+                CleanupKind.Exact, CleanupKind.Copies, CleanupKind.Similar -> {
+                    val keep = if (kind == CleanupKind.Similar) "Best shot" else "Original"
+                    result.groups(kind).forEach { group ->
                         val tiles = group.ids.mapNotNull(byId::get).takeIf { it.size > 1 } ?: return@forEach
                         // Each group starts on a row of its own
                         item(key = "gap:$kind:${group.keep}", span = { GridItemSpan(maxLineSpan) }) { Spacer(Modifier.height(Space.s2)) }
-                        cleanupTiles(kind, tiles, onOpen) { m -> if (m.id == group.keep) "Keep" to BadgeTone.Flash else null }
+                        cleanupTiles(kind, tiles, onOpen) { m -> if (m.id == group.keep) keep to BadgeTone.Flash else null }
                     }
                 }
                 CleanupKind.BigVideos -> cleanupTiles(kind, result.bigVideos.mapNotNull(byId::get), onOpen) { m -> size(m.size) to BadgeTone.Photo }

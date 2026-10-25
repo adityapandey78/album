@@ -82,6 +82,7 @@ enum class Sym(val glyph: String) {
     LocationOn("\uf1db"),
     Lock("\ue899"),
     LockOpen("\ue898"),
+    Mail("\ue159"),
     Map("\ue55b"),
     MenuBook("\uea19"),
     Merge("\ueb98"),

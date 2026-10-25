@@ -80,7 +80,6 @@ import androidx.compose.ui.unit.dp
 
 /** The Albums section shows two rows of three; See all shows the rest. */
 const val ALBUMS_IN_SECTION = 6
-private const val PEOPLE_IN_SECTION = 6 // two rows of faces; See all shows everyone
 private const val PLACES_IN_ROW = 12
 
 /** The design's scroll-row card: covers in Places' horizontal row are this wide. */
@@ -141,6 +140,7 @@ fun CollectionsScreen(
     onAllAlbums: () -> Unit,
     onAllPlaces: () -> Unit,
     onAllPeople: () -> Unit,
+    onReviewPeople: () -> Unit,
     onOpenSafe: () -> Unit,
     onAction: (Album, AlbumAction) -> Unit,
     onNewAlbum: () -> Unit,
@@ -159,6 +159,7 @@ fun CollectionsScreen(
     }
     val shown = remember(entries) { albumsInSection(entries) }
     val people = remember(everyone) { shownPeople(everyone) }
+    val reviews by remember { People.review }.collectAsState(emptyList())
     val anyHidden = remember(everyone) { everyone.any { it.hidden } }
     val names = remember(places) { placeNames(places.orEmpty().map { it.key }) }
     // Utilities open the same albums as the cards above, so like them they include folders hidden from the Library
@@ -223,11 +224,14 @@ fun CollectionsScreen(
 
         // Shows once people are found, or while looking; See all stays while only hidden people are left, so hiding can be undone
         if (people.isNotEmpty() || anyHidden || scanning.total > 0) {
-            fullRow("people") { SectionHead("People", action = "See all".takeIf { people.isNotEmpty() || anyHidden }, onAction = onAllPeople) }
-            if (scanning.total > 0) fullRow("people scan") { Note(scanningText(scanning)) }
-            items(people.take(PEOPLE_IN_SECTION), key = { "person ${it.cluster}" }) { p ->
-                PersonCard(p, Modifier.padding(bottom = Space.s4)) { open("person", p.albumId) }
+            fullRow("people") {
+                PeopleHead(reviews.size, onReview = {
+                    CrashLog.note("people review")
+                    onReviewPeople()
+                }, onSeeAll = onAllPeople.takeIf { people.isNotEmpty() || anyHidden })
             }
+            if (scanning.total > 0) fullRow("people scan") { Note(scanningText(scanning)) }
+            if (people.isNotEmpty()) fullRow("people row") { PeopleRow(people) { open("person", it.albumId) } }
         }
 
         fullRow("places") {
@@ -387,11 +391,11 @@ private fun AlbumSheet(album: Album, pinned: Boolean, hidden: Boolean, onDismiss
 private class Utility(val sym: Sym, val title: String, val count: Int, val albumId: Long)
 
 /**
- * Favourites, Videos, Screenshots: icon, label and [meta] (the count) on surface-high, read by TalkBack as [description].
- * [quiet] drops the fill and adds a chevron, for the last rows.
+ * Favourites, Videos, Screenshots, People's "Same person?": icon, label and [meta] (the count) on surface-high, read by
+ * TalkBack as [description]. [quiet] drops the fill and adds a chevron, for the last rows.
  */
 @Composable
-private fun UtilityTile(sym: Sym, label: String, meta: String, description: String, modifier: Modifier = Modifier, quiet: Boolean = false, onClick: () -> Unit) {
+fun UtilityTile(sym: Sym, label: String, meta: String, description: String, modifier: Modifier = Modifier, quiet: Boolean = false, onClick: () -> Unit) {
     val c = AlbumTheme.colors
     val shape = RoundedCornerShape(Space.radiusMd)
     Row(

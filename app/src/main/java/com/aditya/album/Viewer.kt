@@ -113,6 +113,7 @@ import coil3.request.ImageRequest
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import me.saket.telephoto.zoomable.coil3.ZoomableAsyncImage
@@ -180,6 +181,8 @@ fun Viewer(
     val edit = rememberEdit(onMessage = say)
     val clock = rememberClock()
     val placeOf = if (external) emptyMap() else rememberPlaces()
+    // Places guessed from camera photos taken around then (location was off): the header leaves them out, Details says so
+    val estimated by remember(external) { if (external) flowOf(emptySet()) else SmartIndex.estimatedIds() }.collectAsState(emptySet())
     // Rotate keeps quality, so it can always be taken back: Undo turns the photo back the other way
     val rotated = { m: Media, quarters: Int ->
         scope.launch {
@@ -400,7 +403,7 @@ fun Viewer(
                 Column(Modifier.weight(1f)) {
                     if (current.taken > 0) {
                         Text(dayTitle(current.day), style = type.label, color = c.onPhoto)
-                        val place = placeOf[current.id]?.city
+                        val place = placeOf[current.id]?.takeIf { current.id !in estimated }?.city
                         Text(listOfNotNull(clock(current.taken), place).joinToString(" · "), style = type.meta, color = c.onPhoto)
                     } else {
                         // files from other apps usually have no date, so show their name instead
@@ -804,6 +807,12 @@ private fun InfoSheet(m: Media, place: Place?, onDismiss: () -> Unit) {
     val file by produceState<FileDetails?>(null, m.uri, editVersion(m.uri)) {
         value = withContext(Dispatchers.IO) { readDetails(context, m) }
     }
+    // The index's own place for this photo: down to the locality, and whether it was estimated from photos taken nearby in
+    // time (a photo without GPS), which must never read as where it was taken
+    val indexed by produceState<ItemPlace?>(null, m.id) {
+        value = withContext(Dispatchers.IO) { runCatching { SmartIndex.placeOf(m.id) }.getOrNull() }
+    }
+    val where = indexed?.place ?: place
     Sheet(onDismiss) {
         Column(Modifier.padding(bottom = Space.s3)) {
             if (m.taken > 0) {
@@ -827,11 +836,14 @@ private fun InfoSheet(m: Media, place: Place?, onDismiss: () -> Unit) {
             }
         }
         val latLng = file?.latLng
-        if (place != null || latLng != null) {
+        if (where != null || latLng != null) {
             InfoRow(Sym.LocationOn) {
                 val coords = latLng?.let { coordinates(it[0], it[1]) }
-                Text(place?.let(::placeLabel) ?: coords.orEmpty(), style = type.label, color = c.ink)
-                if (place != null && coords != null) Text(coords, style = type.meta, color = c.inkMuted)
+                Text(where?.let(::placeLabel) ?: coords.orEmpty(), style = type.label, color = c.ink)
+                when {
+                    indexed?.estimated == true -> Text("Estimated from photos taken around the same time", style = type.meta, color = c.inkMuted)
+                    where != null && coords != null -> Text(coords, style = type.meta, color = c.inkMuted)
+                }
             }
         }
         InfoRow(Sym.Folder) {
@@ -950,8 +962,11 @@ fun fileFormat(name: String, mime: String?): String? {
     }
 }
 
-/** A town with its state, "Bengaluru, Karnataka", or just the town where there's no state or it has the same name. */
-internal fun placeLabel(p: Place) = if (p.admin1.isEmpty() || p.admin1 == p.city) p.city else "${p.city}, ${p.admin1}"
+/**
+ * Where a photo was, from the neighbourhood up: "Baga, Calangute, Goa", "Bengaluru, Karnataka", or just the town where
+ * there's no state or it has the same name. Places without a locality (Explore, slideshows) start at the town.
+ */
+internal fun placeLabel(p: Place) = listOf(p.locality, p.city, p.admin1).filter { it.isNotEmpty() }.distinct().joinToString(", ")
 
 /**
  * Where each photo was taken, by media id: the towns Explore has matched so far (off the main thread), empty until then.

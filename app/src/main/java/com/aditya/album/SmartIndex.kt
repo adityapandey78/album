@@ -47,31 +47,40 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import java.time.Instant
+import java.time.ZoneId
 import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 import kotlin.math.roundToInt
 
 /** Bump when analysis changes (labels, category mapping, place data, text) so every item is analysed again. */
-private const val INDEX_VERSION = 2
+private const val INDEX_VERSION = 3 // 3: labels down to 0.3 confidence, text read in more photos
 private const val BATCH = 32 // items per database transaction; also how often progress moves
 private const val THUMB_PX = 512 // ML Kit labels from a 224 px input, so a small cached thumbnail is plenty
-private const val MAX_LABELS = 10
+// Search keeps labels down to this confidence (ML Kit's default is 0.5) and ranks by it, so a dog ML Kit is only fairly
+// sure of still turns up for "dog", below the sure ones. Categories only count labels of CATEGORY_MIN and up, as before.
+private const val LABEL_MIN = 0.3f
+private const val CATEGORY_MIN = 0.5f
+private const val MAX_LABELS = 20
+private const val EDGE_PX = 256 // long side the edge count runs at: small text still makes edges, and it takes about a millisecond
 // Long side for text recognition: a full screenshot (2400 px tall) shrinks only a little, and small print on a photographed
 // receipt keeps the 16 px per character ML Kit needs. A thumbnail would blur both.
 private const val TEXT_PX = 2048
 // Prefs key holding the id of the photo being decoded in this process. A native crash in the decoder kills the app before
 // it can catch anything, so the next pass finds the id still there and skips that photo's text instead of crashing again.
 private const val DECODING = "decoding"
-// Bump when Places changes how it names a GPS point: saved points are named again (no re-analysing), videos read again.
-private const val PLACES_VERSION = 2 // 2: state borders, regions far from towns, video GPS
+// Bump when Places changes how it names a GPS point: saved points are named again from their stored GPS (no file reads).
+private const val PLACES_VERSION = 3 // 2: state borders, regions far from towns, video GPS. 3: GeoNames levels
+// A photo without GPS takes the place of a photo with GPS taken at most this long before or after it, the same day
+private const val ESTIMATE_MS = 2 * 60 * 60 * 1000L
 private const val PLACES = "places"
 private const val JOB = "Places and things" // on the Organising card
 
 /** How far the current indexing pass has got. (0, 0) when there's nothing to do. */
 data class IndexProgress(val done: Int, val total: Int)
 
-/** A MediaStore item as the indexer sees it. */
-data class MediaStamp(val id: Long, val isVideo: Boolean, val modified: Long, val size: Long, val screenshot: Boolean = false)
+/** A MediaStore item as the indexer sees it. [taken] is its [captureTime]: null unless this phone's camera took it. */
+data class MediaStamp(val id: Long, val isVideo: Boolean, val modified: Long, val size: Long, val screenshot: Boolean = false, val taken: Long? = null)
 
 class IndexPlan(val analyse: List<MediaStamp>, val remove: List<Long>)
 
@@ -98,9 +107,52 @@ fun planIndex(found: List<MediaStamp>, indexed: List<IndexStamp>, version: Int, 
 }
 
 /**
- * On-device index of what's in each photo (ML Kit labels, a category), where it was taken (town from GPS EXIF) and the
- * text in screenshots and documents. Nothing leaves the phone.
- * Read side for Explore and search: [categories], [places], [mediaIdsFor], [progress], [labels] and the ids lookups.
+ * When a photo or video was taken, for estimating places: only for this phone's own camera photos and videos (in DCIM,
+ * with a capture date in their metadata). A WhatsApp, downloaded or received file was made somewhere else, so when it
+ * arrived says nothing about where it was taken: 30 forwarded "good morning" images aren't Goa because they arrived
+ * during a Goa trip. Null for those and for screenshots.
+ */
+fun captureTime(dateTaken: Long, relativePath: String, name: String, screenshot: Boolean): Long? =
+    dateTaken.takeIf { it > 0 && !screenshot && relativePath.startsWith("DCIM/", ignoreCase = true) && !isWhatsAppName(name) }
+
+/**
+ * Places for camera photos without GPS (location off; [without]: id to capture time) from camera photos with GPS
+ * ([with]: id to capture time and place): the one taken nearest in time on the same day ([dayOf] gives an epoch day),
+ * at most [ESTIMATE_MS] away.
+ */
+fun estimatePlaces(without: Map<Long, Long>, with: Map<Long, Pair<Long, Place>>, dayOf: (Long) -> Long): Map<Long, Place> {
+    val sources = with.values.sortedBy { it.first }
+    val times = LongArray(sources.size) { sources[it].first }
+    val out = HashMap<Long, Place>()
+    for ((id, time) in without) {
+        val day = dayOf(time)
+        var at = times.binarySearch(time).let { if (it < 0) -it - 1 else it } // the first source taken at or after it
+        var best: Pair<Long, Place>? = null
+        // Walk out both ways while sources are close enough; the nearest one taken the same day wins
+        for (i in at - 1 downTo 0) {
+            if (time - times[i] > ESTIMATE_MS) break
+            if (dayOf(times[i]) == day) {
+                best = sources[i]
+                break
+            }
+        }
+        while (at < times.size && times[at] - time <= ESTIMATE_MS) {
+            if (dayOf(times[at]) == day) {
+                if (best == null || times[at] - time < time - best.first) best = sources[at]
+                break
+            }
+            at++
+        }
+        best?.let { out[id] = it.second }
+    }
+    return out
+}
+
+/**
+ * On-device index of what's in each photo (ML Kit labels, a category), where it was taken (GeoNames levels from GPS
+ * EXIF, or estimated from photos taken around it) and the text in photos that hold some. Nothing leaves the phone.
+ * Read side for Explore and search: [categories], [places], [mediaIdsFor], [progress], [labels], [placeNames] and the
+ * lookups.
  */
 object SmartIndex {
     private lateinit var app: Context
@@ -149,27 +201,51 @@ object SmartIndex {
     /** Things in the photos, biggest first. Updates live while indexing. */
     fun categories(): Flow<List<CategoryCount>> = dao.categories()
 
-    /** Towns photos were taken in, most photos first. */
+    /** Cities photos were taken in (estimated places included), most photos first. */
     fun places(): Flow<List<PlaceCount>> = dao.places()
 
     fun mediaIdsFor(category: Category): Flow<Set<Long>> = dao.ids(category).map { it.toSet() }
 
     fun mediaIdsFor(place: Place): Flow<Set<Long>> = dao.ids(place.city, place.admin1, place.countryCode).map { it.toSet() }
 
+    /** Photos whose place is estimated from other photos, for the details to say so. */
+    fun estimatedIds(): Flow<Set<Long>> = dao.estimated().map { it.toSet() }
+
     /** Every ML Kit label some photo has, for search to recognise. */
     fun labels(): Flow<List<String>> = dao.labels()
 
+    /** Every place name some photo has, at every level (locality, city, district, state, country), for search. */
+    fun placeNames(): Flow<List<String>> = dao.placeNames()
+
     // Blocking lookups for search: call them off the main thread.
 
-    fun idsIn(category: Category): Set<Long> = dao.idsIn(category).toSet()
+    /** A category's photos, each with how sure ML Kit was of it (its strongest label of that category). */
+    fun scoredIn(category: Category): Map<Long, Float> = dao.scoredIn(category, labelsOf(category)).associate { it.id to (it.score ?: 0f) }
 
-    fun idsWith(label: String): Set<Long> = dao.idsWith(label).toSet()
+    /** Photos with an ML Kit label, each with its confidence. */
+    fun scoredWith(label: String): Map<Long, Float> = dao.scoredWith(label).associate { it.id to (it.score ?: 0f) }
 
-    /** Photos taken in a town, state or country of this name. */
+    /** Photos taken in a locality, city, district, state or country of this name. */
     fun idsAt(placeName: String): Set<Long> = dao.idsAt(placeName).toSet()
 
     /** Photos with a word starting with [prefix] in them. [prefix] must be letters and digits only (no FTS syntax). */
     fun idsWithText(prefix: String): Set<Long> = dao.idsWithText("$prefix*").toSet()
+
+    /** Photos with [tokens] in a row in their text, the last one the start of a word. Tokens as ftsTokens splits them. */
+    fun idsWithTokens(tokens: List<String>): Set<Long> = dao.idsWithText(tokens.joinToString(" ", "\"", "*\"")).toSet()
+
+    /** Photos with exactly [tokens] in a row in their text (a quoted search). Tokens as ftsTokens splits them. */
+    fun idsWithPhrase(tokens: List<String>): Set<Long> = dao.idsWithText(tokens.joinToString(" ", "\"", "\"")).toSet()
+
+    /** Other names people use for places, by GeoNames name (geonames/aliases.tsv): Bombay for Mumbai, Gurgaon for Gurugram. */
+    val placeAliases: Map<String, List<String>> by lazy {
+        app.assets.open("geonames/aliases.tsv").bufferedReader().useLines { lines ->
+            lines.filter { it.isNotBlank() }.associate { line -> line.substringBefore('\t') to line.split('\t').drop(1) }
+        }
+    }
+
+    /** Where photo [mediaId] was taken as the index has it, or null when it isn't indexed. Blocking: call off the main thread. */
+    fun placeOf(mediaId: Long): ItemPlace? = dao.place(mediaId)
 
     /**
      * Forgets [ids] at once (labels, OCR text, place) instead of on the next pass: for photos moved into the Private
@@ -182,30 +258,39 @@ object SmartIndex {
     /** Text read from photo [mediaId], or null when it has none (or isn't indexed yet). Blocking: call off the main thread. */
     fun textOf(mediaId: Long): String? = dao.text(mediaId)
 
+    /** How text reading went in a pass, for the breadcrumb: the cost is what decides how many photos it can look at. */
+    private class TextStats {
+        var looked = 0 // quick looks at a thumbnail
+        var seen = 0 // ...that found text
+        var read = 0 // full-size reads
+        var found = 0 // ...that found text
+        var ms = 0L // spent on all of it
+    }
+
     /** One indexing pass: drops rows of deleted media, then analyses new and changed items in batches, newest first. */
     internal suspend fun run(onLongPass: suspend () -> Unit = {}) = withContext(background) {
         if (!has(READ_MEDIA_IMAGES) && !has(READ_MEDIA_VIDEO) && !has(READ_MEDIA_VISUAL_USER_SELECTED)) return@withContext
         val canLocate = has(ACCESS_MEDIA_LOCATION)
         // With "Select photos" access MediaStore lists only the picked ones: never treat the rest as deleted
         val partial = !has(READ_MEDIA_IMAGES) && !has(READ_MEDIA_VIDEO)
-        // 64k towns: parsed only if some photo in this pass has GPS, and dropped when the pass ends.
-        val places = lazy { app.assets.open("geonames/cities.tsv").bufferedReader().useLines { Places.parse(it) } }
+        // 236k places: parsed only if some photo in this pass has GPS, and dropped when the pass ends.
+        val places = lazy { app.assets.open("geonames/places.tsv").bufferedReader().useLines { Places.parse(it) } }
         var analysed = 0
         var failed = 0
-        var read = 0
+        val text = TextStats()
         val started = SystemClock.elapsedRealtime()
         val crashed = marks.getLong(DECODING, 0L)
         if (crashed != 0L) CrashLog.note("smart index: a photo crashed the decoder last time, its text is skipped")
-        val labeler = ImageLabeling.getClient(ImageLabelerOptions.Builder().setExecutor(thread).build())
+        val labeler = ImageLabeling.getClient(ImageLabelerOptions.Builder().setConfidenceThreshold(LABEL_MIN).setExecutor(thread).build())
         val reader = TextRecognition.getClient(TextRecognizerOptions.Builder().setExecutor(thread).build())
+        var found: List<MediaStamp>
         try {
             do {
                 // Never act on a failed or empty query: either would wipe the index.
-                val found = query()?.takeIf { it.isNotEmpty() } ?: return@withContext
+                found = query()?.takeIf { it.isNotEmpty() } ?: return@withContext
                 if (marks.getInt(PLACES, 1) < PLACES_VERSION) {
-                    // Places are named differently now: name every saved GPS point again, and look in the videos for theirs
-                    dao.setPlaces(dao.located().associate { it.id to places.value.nearest(it.lat, it.lng) })
-                    found.filter { it.isVideo }.map { it.id }.chunked(500).forEach { dao.unlocate(it) }
+                    // Places are named differently now: name every saved GPS point again, from the GPS kept in the index
+                    dao.located().chunked(500).forEach { batch -> dao.setPlaces(batch.associate { it.id to places.value.at(it.lat, it.lng) }) }
                     marks.edit(commit = true) { putInt(PLACES, PLACES_VERSION) }
                 }
                 val plan = planIndex(found, dao.stamps(), INDEX_VERSION, canLocate)
@@ -216,7 +301,7 @@ object SmartIndex {
                     if (plan.analyse.size - i * BATCH >= LONG_PASS) onLongPass()
                     val results = batch.map { item ->
                         try {
-                            analyse(item, labeler, reader, canLocate, places, readText = item.id != crashed)
+                            analyse(item, labeler, reader, canLocate, places, readText = item.id != crashed, text)
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Throwable) {
@@ -227,11 +312,11 @@ object SmartIndex {
                     }
                     dao.save(results.map { it.item }, results.flatMap { it.labels }, results.mapNotNull { it.text })
                     failed += results.count { it.item.category == null }
-                    read += results.count { it.text != null }
                     progress(_progress.value.let { it.copy(done = it.done + batch.size) })
                 }
                 analysed += plan.analyse.size
             } while (plan.analyse.isNotEmpty()) // photos taken during the pass are picked up before it ends
+            estimate(found)
         } finally {
             labeler.close()
             reader.close()
@@ -239,8 +324,34 @@ object SmartIndex {
         }
         if (analysed > 0) {
             val ms = (SystemClock.elapsedRealtime() - started) / analysed
-            CrashLog.note("smart index: $analysed items, $ms ms each, $failed unreadable, $read with text")
+            val textMs = text.ms / maxOf(1, text.looked + text.read)
+            CrashLog.note(
+                "smart index: $analysed items, $ms ms each, $failed unreadable, text: ${text.looked} looked at (${text.seen} with some), " +
+                    "${text.read} read (${text.found} with some), $textMs ms each",
+            )
         }
+    }
+
+    /**
+     * Gives camera photos without GPS the place of a camera photo with GPS taken around the same time (see
+     * [estimatePlaces]), marked estimated, and takes estimates back when their photos change. Only the phone's own
+     * camera photos give or get one ([captureTime]); every other item's estimate is taken back. Writes only what changed.
+     */
+    private suspend fun estimate(found: List<MediaStamp>) {
+        val stamps = found.associateBy { it.id }
+        val rows = dao.itemPlaces().filter { it.id in stamps }
+        val with = rows.mapNotNull { row ->
+            val place = row.place?.takeIf { row.gps } ?: return@mapNotNull null
+            stamps.getValue(row.id).taken?.let { row.id to (it to place) }
+        }.toMap()
+        val without = rows.filter { !it.gps }
+        val times = without.mapNotNull { row -> stamps.getValue(row.id).taken?.let { row.id to it } }.toMap()
+        val zone = ZoneId.systemDefault()
+        // An estimate claims the city, not the street: two hours is time enough to cross town
+        val estimates = estimatePlaces(times, with) { Instant.ofEpochMilli(it).atZone(zone).toLocalDate().toEpochDay() }
+            .mapValues { it.value.copy(locality = "") }
+        val changed = without.filter { row -> row.place != estimates[row.id] || (row.place != null && !row.estimated) }
+        changed.chunked(500).forEach { batch -> dao.setPlaces(batch.associate { it.id to estimates[it.id] }, estimated = true) }
     }
 
     private fun has(permission: String) = app.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
@@ -249,7 +360,7 @@ object SmartIndex {
     private fun query(): List<MediaStamp>? {
         val projection = arrayOf(
             FileColumns._ID, FileColumns.MEDIA_TYPE, FileColumns.DATE_MODIFIED, FileColumns.SIZE, FileColumns.RELATIVE_PATH,
-            FileColumns.DISPLAY_NAME,
+            FileColumns.DISPLAY_NAME, FileColumns.DATE_TAKEN,
         )
         val selection = PHOTOS_AND_VIDEOS
         val uri = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL)
@@ -257,7 +368,10 @@ object SmartIndex {
             List(c.count) {
                 c.moveToNext()
                 val isVideo = c.getInt(1) == FileColumns.MEDIA_TYPE_VIDEO
-                MediaStamp(c.getLong(0), isVideo, c.getLong(2), c.getLong(3), !isVideo && isScreenshot(c.getString(4).orEmpty(), c.getString(5).orEmpty()))
+                val path = c.getString(4).orEmpty()
+                val name = c.getString(5).orEmpty()
+                val screenshot = !isVideo && isScreenshot(path, name)
+                MediaStamp(c.getLong(0), isVideo, c.getLong(2), c.getLong(3), screenshot, captureTime(c.getLong(6), path, name, screenshot))
             }
         }
     }
@@ -276,6 +390,7 @@ object SmartIndex {
         canLocate: Boolean,
         places: Lazy<Places>,
         readText: Boolean,
+        stats: TextStats,
     ): Analysis {
         val uri = mediaUri(item.id, item.isVideo)
         val thumb = try {
@@ -286,7 +401,23 @@ object SmartIndex {
         val labels = thumb?.let { labeler.process(InputImage.fromBitmap(it, 0)).await() }
             ?.sortedByDescending { it.confidence }?.take(MAX_LABELS)
             ?.map { it.text to it.confidence }
-        val category = if (thumb != null && labels != null) categoryOf(labels, brightnessOf(thumb)) else null
+        val category = if (thumb != null && labels != null) categoryOf(labels.filter { it.second >= CATEGORY_MIN }, brightnessOf(thumb)) else null
+        val text = if (thumb != null && labels != null && readText && !item.isVideo) {
+            val started = SystemClock.elapsedRealtime()
+            when (textChance(labels, item.screenshot, edgesOf(thumb))) {
+                TextChance.Sure -> textIn(item.id, uri, reader, stats)
+                // A quick read of the thumbnail first: big text (signs, posters, slides) shows there, leaves and bricks don't
+                TextChance.Maybe -> {
+                    stats.looked++
+                    val seen = looksLikeText(runCatching { reader.process(InputImage.fromBitmap(thumb, 0)) }.getOrNull()?.await()?.text)
+                    if (seen) stats.seen++
+                    if (seen) textIn(item.id, uri, reader, stats) else null
+                }
+                TextChance.None -> null
+            }.also { stats.ms += SystemClock.elapsedRealtime() - started }
+        } else {
+            null
+        }
         thumb?.recycle()
         val gps = if (!canLocate) null else if (item.isVideo) videoLatLng(uri) else latLng(uri)
         val row = IndexedItem(
@@ -298,9 +429,8 @@ object SmartIndex {
             lat = gps?.get(0),
             lng = gps?.get(1),
             located = canLocate,
-            place = gps?.let { places.value.nearest(it[0], it[1]) },
+            place = gps?.let { places.value.at(it[0], it[1]) },
         )
-        val text = if (readText && labels != null && !item.isVideo && mayHaveText(labels, item.screenshot)) textIn(item.id, uri, reader) else null
         return Analysis(
             row,
             labels.orEmpty().map { (label, confidence) -> ItemLabel(item.id, label, confidence) },
@@ -317,13 +447,15 @@ object SmartIndex {
      * Text in the photo, decoded from the original at up to [TEXT_PX]. Null when it has none or can't be read.
      * The only full decode in this process (thumbnails come from MediaProvider), so it's the one [DECODING] guards.
      */
-    private suspend fun textIn(id: Long, uri: Uri, reader: TextRecognizer): String? {
+    private suspend fun textIn(id: Long, uri: Uri, reader: TextRecognizer, stats: TextStats): String? {
+        stats.read++
         marks.edit(commit = true) { putLong(DECODING, id) }
         try {
             val bitmap = decode(uri) ?: return null
             return try {
                 // A failed task comes back as null; this catches an image ML Kit rejects outright
                 runCatching { reader.process(InputImage.fromBitmap(bitmap, 0)) }.getOrNull()?.await()?.text?.takeIf { it.isNotBlank() }
+                    ?.also { stats.found++ }
             } finally {
                 bitmap.recycle()
             }
@@ -351,6 +483,17 @@ object SmartIndex {
         val pixels = IntArray(16 * 16).also { tiny.getPixels(it, 0, 16, 0, 0, 16, 16) }
         tiny.recycle()
         return brightnessOf(pixels)
+    }
+
+    // The thumbnail's edge density (see edgeDensity) at EDGE_PX on its long side
+    private fun edgesOf(bitmap: Bitmap): Float {
+        val scale = minOf(1f, EDGE_PX.toFloat() / maxOf(bitmap.width, bitmap.height))
+        val width = (bitmap.width * scale).roundToInt().coerceAtLeast(2)
+        val height = (bitmap.height * scale).roundToInt().coerceAtLeast(2)
+        val small = Bitmap.createScaledBitmap(bitmap, width, height, true)
+        val pixels = IntArray(width * height).also { small.getPixels(it, 0, width, 0, 0, width, height) }
+        if (small !== bitmap) small.recycle()
+        return edgeDensity(pixels, width)
     }
 
     // Android hides EXIF location unless the app holds ACCESS_MEDIA_LOCATION and asks for the original file. Read-only.

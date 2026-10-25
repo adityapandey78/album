@@ -37,6 +37,9 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.Instant
+import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.LocalTime
 import java.time.ZoneId
 import android.widget.Toast
 
@@ -109,8 +112,7 @@ object Gallery {
             while (c.moveToNext()) {
                 val id = c.getLong(0)
                 val isVideo = c.getInt(1) == FileColumns.MEDIA_TYPE_VIDEO
-                // DATE_TAKEN can be missing (screenshots from some apps, downloads): fall back to file time
-                val taken = c.getLong(2).takeIf { it > 0 } ?: (c.getLong(3) * 1000)
+                val taken = takenOf(c.getLong(2), c.getLong(3), c.getString(11).orEmpty(), zone)
                 out += Media(
                     id = id,
                     uri = mediaUri(id, isVideo),
@@ -134,6 +136,47 @@ object Gallery {
         return out
     }
 }
+
+// WhatsApp on phones names files IMG-20240315-WA0012.jpg (VID-, AUD-, PTT-); its desktop and web apps save
+// "WhatsApp Image 2024-03-15 at 18.30.12.jpeg", or "at 6.30.12 PM" on a 12-hour clock (macOS puts a narrow space before PM)
+private val whatsAppName = Regex("^[A-Z]{3}-(\\d{4})(\\d{2})(\\d{2})-WA\\d+")
+private val whatsAppWebName =
+    Regex("^WhatsApp (?:Image|Video) (\\d{4})-(\\d{2})-(\\d{2}) at (\\d{1,2})\\.(\\d{2})\\.(\\d{2})(?:[\\s\\u202F]*([AaPp])\\.?[Mm]\\.?)?")
+
+/** Whether a file name is one WhatsApp gave it: a file that arrived, not one this phone's camera took. */
+fun isWhatsAppName(name: String) = whatsAppName.containsMatchIn(name) || whatsAppWebName.containsMatchIn(name)
+
+/**
+ * When an item was taken (epoch millis), for the timeline, from MediaStore's DATE_TAKEN (millis, 0 when missing),
+ * DATE_MODIFIED (seconds) and its file name. WhatsApp strips the date from what it sends, and a backup restore gives every
+ * file the restore day, so its file names are the only date left: the file's own time when it falls on that day (when it
+ * arrived), else noon of that day; its desktop names have the time it was saved. Other files without a date keep their
+ * file time, as before. None of these say when or where the photo itself was taken (see captureTime).
+ */
+fun takenOf(dateTaken: Long, modifiedSec: Long, name: String, zone: ZoneId): Long {
+    if (dateTaken > 0) return dateTaken
+    val modified = modifiedSec * 1000
+    whatsAppWebName.find(name)?.groupValues?.let { g ->
+        val clock = g[4].toInt()
+        val hour = when (g[7].lowercase()) {
+            "p" -> if (clock < 12) clock + 12 else clock // 6.30 PM is 18:30, 12.15 PM stays 12:15
+            "a" -> if (clock == 12) 0 else clock // 12.15 AM is 00:15
+            else -> clock
+        }
+        val time = runCatching { LocalDateTime.of(g[1].toInt(), g[2].toInt(), g[3].toInt(), hour, g[5].toInt(), g[6].toInt()) }.getOrNull()
+        if (time != null && time.year in YEARS) return time.atZone(zone).toInstant().toEpochMilli()
+    }
+    whatsAppName.find(name)?.groupValues?.let { g ->
+        val day = runCatching { LocalDate.of(g[1].toInt(), g[2].toInt(), g[3].toInt()) }.getOrNull() // IMG-20241345-WA0001 isn't one
+        if (day != null && day.year in YEARS) {
+            val arrived = Instant.ofEpochMilli(modified).atZone(zone).toLocalDate() == day
+            return if (arrived) modified else day.atTime(LocalTime.NOON).atZone(zone).toInstant().toEpochMilli()
+        }
+    }
+    return modified
+}
+
+private val YEARS = 2000..2100
 
 /** SQL selection for photos and videos: the Files collection also holds audio and documents. */
 const val PHOTOS_AND_VIDEOS = "${FileColumns.MEDIA_TYPE} IN (${FileColumns.MEDIA_TYPE_IMAGE}, ${FileColumns.MEDIA_TYPE_VIDEO})"

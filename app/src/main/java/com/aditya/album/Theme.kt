@@ -145,8 +145,8 @@ data class AlbumColors(
     val void get() = Color.Black
 }
 
-private val Ink = Color(0xFF111110)
-private val Paper = Color(0xFFF4F4F0)
+internal val Ink = Color(0xFF111110)
+internal val Paper = Color(0xFFF4F4F0)
 
 private fun base(mode: ThemeMode) = when (mode) {
     ThemeMode.Dark -> AlbumColors(

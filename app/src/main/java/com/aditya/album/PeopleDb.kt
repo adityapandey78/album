@@ -1,5 +1,6 @@
 package com.aditya.album
 
+import androidx.room.AutoMigration
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Embedded
@@ -17,8 +18,8 @@ import kotlinx.coroutines.flow.Flow
 
 /**
  * A person the user named, hid or corrected. Automatic groups only live in the face index; touching one makes it a person.
- * [centroid] is the mean of the person's face embeddings, so their new photos find them while a rebuilt index is still
- * re-finding the old ones.
+ * [coverMediaId] and [cover]: the face the user picked as their cover photo, by photo and box like [PersonFace], or null
+ * for the automatic pick.
  */
 @Entity(tableName = "people")
 class Person(
@@ -26,9 +27,13 @@ class Person(
     val name: String?, // null: corrected or hidden but not named yet
     val hidden: Boolean,
     val created: Long, // epoch millis
-    val centroid: ByteArray? = null, // unit length, little-endian floats
-    val centroidFaces: Int = 0, // how many faces it was averaged from: its weight, and how many it takes to replace it
-    val centroidModel: Int = 0, // FACE_MODEL the centroid came from; any other is ignored
+    // v0.7 to v0.9 kept a mean face here, in SFace's space. Unused since v0.10 (EdgeFace-S, matched by exemplars); the
+    // columns stay so the table never has to be rebuilt under its user data.
+    val centroid: ByteArray? = null,
+    val centroidFaces: Int = 0,
+    val centroidModel: Int = 0,
+    val coverMediaId: Long? = null,
+    @Embedded(prefix = "cover_") val cover: FaceBox? = null,
 )
 
 /**
@@ -56,8 +61,26 @@ data class PersonFace(
 )
 data class NotPerson(val personId: Long, val mediaId: Long)
 
+/** "Same person?" answered Different: [a] and [b] (a < b) are never offered as one again. */
+@Entity(
+    tableName = "different_people",
+    primaryKeys = ["a", "b"],
+    foreignKeys = [
+        ForeignKey(Person::class, ["id"], ["a"], onDelete = ForeignKey.CASCADE),
+        ForeignKey(Person::class, ["id"], ["b"], onDelete = ForeignKey.CASCADE),
+    ],
+    indices = [Index("b")],
+)
+data class DifferentPeople(val a: Long, val b: Long)
+
 /** What People screens show of a person. */
-data class PersonName(val id: Long, val name: String?, val hidden: Boolean)
+data class PersonName(
+    val id: Long,
+    val name: String?,
+    val hidden: Boolean,
+    val coverMediaId: Long? = null,
+    @Embedded(prefix = "cover_") val cover: FaceBox? = null,
+)
 
 /**
  * What a "Not <name>" changed, so Undo can put it back exactly. [personId] may be new: an automatic group became a person.
@@ -70,7 +93,7 @@ private const val CHUNK = 500
 
 @Dao
 interface PeopleDao {
-    @Query("SELECT id, name, hidden FROM people")
+    @Query("SELECT id, name, hidden, coverMediaId, cover_left, cover_top, cover_right, cover_bottom FROM people")
     fun names(): Flow<List<PersonName>>
 
     @Query("SELECT * FROM people")
@@ -84,6 +107,9 @@ interface PeopleDao {
 
     @Query("SELECT * FROM not_person")
     suspend fun notPerson(): List<NotPerson>
+
+    @Query("SELECT * FROM different_people")
+    suspend fun different(): List<DifferentPeople>
 
     @Insert
     suspend fun insert(person: Person): Long
@@ -103,14 +129,21 @@ interface PeopleDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertNot(rows: List<NotPerson>): List<Long>
 
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertDifferent(row: DifferentPeople)
+
     @Query("UPDATE people SET name = :name WHERE id = :id")
     suspend fun rename(id: Long, name: String?)
 
     @Query("UPDATE people SET hidden = :hidden WHERE id = :id")
     suspend fun setHidden(id: Long, hidden: Boolean)
 
-    @Query("UPDATE people SET centroid = :centroid, centroidFaces = :faces, centroidModel = :model WHERE id = :id")
-    suspend fun setCentroid(id: Long, centroid: ByteArray, faces: Int, model: Int)
+    /** Pins the face at [mediaId] and [box] as [id]'s cover; nulls go back to the automatic pick. */
+    @Query("UPDATE people SET coverMediaId = :mediaId, cover_left = :left, cover_top = :top, cover_right = :right, cover_bottom = :bottom WHERE id = :id")
+    suspend fun setCover(id: Long, mediaId: Long?, left: Float?, top: Float?, right: Float?, bottom: Float?)
+
+    @Query("SELECT * FROM people WHERE coverMediaId = :mediaId")
+    suspend fun coveredBy(mediaId: Long): List<Person>
 
     @Query("SELECT * FROM person_faces WHERE mediaId = :mediaId")
     suspend fun facesOf(mediaId: Long): List<PersonFace>
@@ -118,7 +151,14 @@ interface PeopleDao {
     @Update
     suspend fun update(faces: List<PersonFace>)
 
-    /** Faces, centroid and "Not" rows go too (ON DELETE CASCADE). */
+    /** Turns the boxes of photo [mediaId]: its confirmed faces and any cover pinned on it. */
+    @Transaction
+    suspend fun rotate(mediaId: Long, clockwise: Boolean) {
+        update(facesOf(mediaId).map { it.copy(box = it.box.rotated(clockwise)) })
+        for (p in coveredBy(mediaId)) p.cover?.rotated(clockwise)?.let { setCover(p.id, mediaId, it.left, it.top, it.right, it.bottom) }
+    }
+
+    /** Faces, "Not" rows and "Different" pairs go too (ON DELETE CASCADE). */
     @Query("DELETE FROM people WHERE id = :id")
     suspend fun delete(id: Long)
 
@@ -129,6 +169,13 @@ interface PeopleDao {
     @Query("UPDATE OR IGNORE not_person SET personId = :to WHERE personId = :from")
     suspend fun moveNot(from: Long, to: Long)
 
+    /** [from]'s "Different" pairs, copied to [to] (smaller id first); [from]'s own rows go when it does. */
+    @Query(
+        "INSERT OR IGNORE INTO different_people (a, b) SELECT MIN(:to, other), MAX(:to, other) FROM " +
+            "(SELECT CASE WHEN a = :from THEN b ELSE a END AS other FROM different_people WHERE a = :from OR b = :from) WHERE other != :to",
+    )
+    suspend fun copyDifferent(from: Long, to: Long)
+
     @Query("SELECT * FROM person_faces WHERE personId = :personId AND mediaId IN (:mediaIds)")
     suspend fun facesIn(personId: Long, mediaIds: List<Long>): List<PersonFace>
 
@@ -138,11 +185,12 @@ interface PeopleDao {
     @Query("DELETE FROM not_person WHERE personId = :personId AND mediaId IN (:mediaIds)")
     suspend fun deleteNot(personId: Long, mediaIds: List<Long>)
 
-    /** [from]'s faces and "Not" photos become [to]'s, then [from] goes. */
+    /** [from]'s faces, "Not" photos and "Different" pairs become [to]'s, then [from] goes. */
     @Transaction
     suspend fun merge(from: Long, to: Long) {
         moveFaces(from, to)
         moveNot(from, to)
+        copyDifferent(from, to)
         delete(from)
     }
 
@@ -167,9 +215,14 @@ interface PeopleDao {
  * People are user data, unlike the face index: never add fallbackToDestructiveMigration. Without a migration, Room
  * refuses to open a newer version (a crash on launch) rather than silently dropping everyone's names and corrections.
  * To change the schema: bump the version, keep the exported app/schemas/com.aditya.album.PeopleDb/N.json files in git,
- * and add `autoMigrations = [AutoMigration(from = N, to = N + 1)]` (or a hand-written Migration for renames and splits).
+ * and add an AutoMigration (or a hand-written Migration for renames and splits), with a test in PeopleDbTest.
+ * 2 (v0.10): pinned cover photos (nullable columns) and "Different" pairs (a new table); nothing existing changes.
  */
-@Database(entities = [Person::class, PersonFace::class, NotPerson::class], version = 1)
+@Database(
+    entities = [Person::class, PersonFace::class, NotPerson::class, DifferentPeople::class],
+    version = 2,
+    autoMigrations = [AutoMigration(from = 1, to = 2)],
+)
 abstract class PeopleDb : RoomDatabase() {
     abstract fun dao(): PeopleDao
 }

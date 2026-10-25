@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -41,6 +42,8 @@ private const val BATCH = 16 // photos per database transaction; also how often 
 private const val CLUSTER_EVERY = 8 // batches between clustering runs, so People fills in during a long first pass
 private const val NEXT_AUTO = "next_auto"
 private const val DECODING = "decoding"
+private const val NOT_SURE = "not_sure_faces" // "Same person?" answered Not sure, as the two faces shown (see NotSure)
+private const val SUGGESTIONS = "suggestions" // the last clustering run's, so "Same person?" is there right after a restart
 private const val JOB = "People" // on the Organising card
 
 /**
@@ -56,7 +59,7 @@ fun personAlbumId(cluster: Long) = PEOPLE_IDS + cluster
 /** The cluster behind an album id, or null for any other album. */
 fun clusterOfAlbum(albumId: Long): Long? = if (albumId > PEOPLE_IDS && albumId < PEOPLE_IDS * 2) albumId - PEOPLE_IDS else null
 
-/** A person or automatic group, with its photos still on the phone (newest first) and its best face as the cover. */
+/** A person or automatic group, with its photos still on the phone (newest first) and its cover face ([coverPinned] if the user chose it). */
 data class PersonAlbum(
     val cluster: Long,
     val name: String?,
@@ -64,20 +67,42 @@ data class PersonAlbum(
     val cover: FaceCrop,
     val items: List<Media>,
     val faces: Int,
+    val coverPinned: Boolean = false,
 ) {
     val albumId get() = personAlbumId(cluster)
 }
 
-/** Each cluster's photos in [media]'s order, its face count and best face, from [tiles]. Photos gone from the phone drop out. */
+/** "Same person?": two people or groups that may be one, [a] the one with more faces. */
+data class PeoplePair(val a: PersonAlbum, val b: PersonAlbum)
+
+/** Each cluster's photos in [media]'s order, its face count and cover, from [tiles]. Photos gone from the phone drop out. */
 class Members<T>(val items: List<T>, val faces: Int, val cover: FaceTile)
 
-fun <T> clusterMembers(tiles: List<FaceTile>, media: List<T>, idOf: (T) -> Long): Map<Long, Members<T>> {
+/** Groups [tiles] by cluster; [isCamera] and [pinned] (cluster to the face the user chose) pick covers, see [coverOf]. */
+fun <T> clusterMembers(
+    tiles: List<FaceTile>,
+    media: List<T>,
+    idOf: (T) -> Long,
+    isCamera: (T) -> Boolean = { true },
+    pinned: Map<Long, FaceSpot> = emptyMap(),
+): Map<Long, Members<T>> {
     val position = HashMap<Long, Int>(media.size).also { m -> media.forEachIndexed { i, it -> m[idOf(it)] = i } }
-    return tiles.filter { it.mediaId in position }.groupBy { it.cluster }.mapValues { (_, faces) ->
+    return tiles.filter { it.mediaId in position }.groupBy { it.cluster }.mapValues { (cluster, faces) ->
         val items = faces.mapTo(HashSet()) { it.mediaId }.map { position.getValue(it) }.sorted().map { media[it] }
-        Members(items, faces.size, faces.maxWith(compareBy<FaceTile> { it.quality }.thenByDescending { it.id }))
+        Members(items, faces.size, coverOf(faces, pinned[cluster]) { isCamera(media[position.getValue(it)]) })
     }
 }
+
+/**
+ * How good a cover [face] makes: its picture quality (faceQuality), how typical of the person it is (its fit), and
+ * camera photos over screenshots and forwards. Calibration knobs.
+ */
+fun coverScore(face: FaceTile, camera: Boolean) = face.quality * (0.5f + 0.5f * face.fit.coerceIn(0f, 1f)) * (if (camera) 1f else 0.8f)
+
+/** The face to show for a person: the one the user [pinned] while it's still theirs, else the best by [coverScore]. */
+fun coverOf(faces: List<FaceTile>, pinned: FaceSpot?, isCamera: (mediaId: Long) -> Boolean): FaceTile =
+    pinned?.let { p -> faces.filter { it.mediaId == p.mediaId && iou(it.box, p.box) >= SAME_BOX }.maxByOrNull { iou(it.box, p.box) } }
+        ?: faces.maxWith(compareBy<FaceTile> { coverScore(it, isCamera(it.mediaId)) }.thenByDescending { it.id })
 
 /** Whether a group appears in People: named people always, other groups once they have [MIN_FACES] faces. */
 fun isShown(name: String?, faces: Int) = name != null || faces >= MIN_FACES
@@ -91,13 +116,76 @@ fun namedMedia(names: List<PersonName>, tiles: List<FaceTile>): Map<String, Set<
 }
 
 /**
- * People in photos, found on the phone: ML Kit finds faces, SFace turns each into an embedding, and similar faces are
- * grouped. The face index (faces.db) is a cache that can be rebuilt any time; names, hidden people and every correction
- * live in people.db and always win over the automatic grouping. Read side: [albums], [mediaIdsByName], [progress].
+ * "Same person?" answered Not sure about the faces at [a] and [b] (photo and box). Kept by face rather than group id, so
+ * whatever groups those faces are in later (an automatic group made a person, a rebuilt index) aren't asked about again.
+ */
+data class NotSure(val a: FaceSpot, val b: FaceSpot)
+
+/** The group pairs (smaller id first) [answers] are about now, each face found again by photo and box in [tiles]. */
+fun answeredPairs(answers: Collection<NotSure>, tiles: List<FaceTile>): Set<Pair<Long, Long>> {
+    val byPhoto = tiles.groupBy { it.mediaId }
+    fun clusterAt(spot: FaceSpot) = byPhoto[spot.mediaId].orEmpty()
+        .map { it to iou(it.box, spot.box) }.filter { it.second >= SAME_BOX }.maxByOrNull { it.second }?.first?.cluster
+    return answers.mapNotNullTo(HashSet()) { n ->
+        val a = clusterAt(n.a) ?: return@mapNotNullTo null // photo deleted, or the face no longer in a group
+        val b = clusterAt(n.b) ?: return@mapNotNullTo null
+        minOf(a, b) to maxOf(a, b)
+    }
+}
+
+// Not sure answers and suggestions as preference strings: "mediaId:left,top,right,bottom" spots, "a:b:score" pairs.
+// Anything unreadable (an older format) is dropped rather than trusted.
+
+fun encodeNotSure(n: NotSure) = listOf(n.a, n.b).joinToString("|") { "${it.mediaId}:${it.box.left},${it.box.top},${it.box.right},${it.box.bottom}" }
+
+fun decodeNotSure(text: String): NotSure? {
+    val spots = text.split('|').map { part ->
+        val box = part.substringAfter(':', "").split(',').mapNotNull { it.toFloatOrNull() }
+        val mediaId = part.substringBefore(':').toLongOrNull()
+        if (mediaId == null || box.size != 4) return null
+        FaceSpot(mediaId, FaceBox(box[0], box[1], box[2], box[3]))
+    }
+    return if (spots.size == 2) NotSure(spots[0], spots[1]) else null
+}
+
+fun encodeSuggestions(suggestions: List<Suggestion>) = suggestions.joinToString(";") { "${it.a}:${it.b}:${it.score}" }
+
+fun decodeSuggestions(text: String?): List<Suggestion> = text.orEmpty().split(';').mapNotNull { item ->
+    val parts = item.split(':')
+    val a = parts.getOrNull(0)?.toLongOrNull()
+    val b = parts.getOrNull(1)?.toLongOrNull()
+    val score = parts.getOrNull(2)?.toFloatOrNull()
+    if (parts.size == 3 && a != null && b != null && score != null) Suggestion(a, b, score) else null
+}
+
+/**
+ * "Same person?" pairs worth asking: both shown and not hidden, not both named (two names mean two people), not answered
+ * Not sure ([skipped], group pairs from [answeredPairs]). Most alike first.
+ */
+fun reviewPairs(suggestions: List<Suggestion>, albums: List<PersonAlbum>, skipped: Set<Pair<Long, Long>>): List<PeoplePair> {
+    val byCluster = albums.associateBy { it.cluster }
+    return suggestions.mapNotNull { s ->
+        val a = byCluster[s.a] ?: return@mapNotNull null
+        val b = byCluster[s.b] ?: return@mapNotNull null
+        when {
+            s.a to s.b in skipped -> null
+            a.hidden || b.hidden || !isShown(a.name, a.faces) || !isShown(b.name, b.faces) -> null
+            a.name != null && b.name != null -> null
+            a.faces >= b.faces -> PeoplePair(a, b)
+            else -> PeoplePair(b, a)
+        }
+    }
+}
+
+/**
+ * People in photos, found on the phone: YuNet finds faces, EdgeFace-S turns each into an embedding, and similar faces are
+ * grouped (see cluster()). The face index (faces.db) is a cache that can be rebuilt any time; names, hidden people, cover
+ * choices and every correction live in people.db and always win over the automatic grouping. Read side: [albums],
+ * [mediaIdsByName], [review], [progress].
  */
 object People {
     private lateinit var app: Context
-    // Small state that must outlive the face index: the next automatic id, and the photo being decoded (see run)
+    // Small state that must outlive the face index: the next automatic id, the photo being decoded (see run), Not sure answers
     private val prefs by lazy { app.getSharedPreferences("people", Context.MODE_PRIVATE) }
     private val faces by lazy {
         Room.databaseBuilder(app, FaceDb::class.java, "faces.db")
@@ -118,7 +206,11 @@ object People {
     }
     private val clustering = Mutex() // the indexer and the user's corrections both re-cluster: one at a time
 
-    // One background-priority thread for decoding, ML Kit and the embedding model, so the UI thread always wins the CPU.
+    // Groups an edit gave faces (merges, new people, Undo) since the last clustering run: their faces moved without
+    // cluster() seeing it, so it's told, and faces left out are tried against them. Only used holding [clustering].
+    private val touched = HashSet<Long>()
+
+    // One background-priority thread for decoding and the models, so the UI thread always wins the CPU.
     private val thread = Executors.newSingleThreadExecutor { r ->
         Thread({
             Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
@@ -155,18 +247,39 @@ object People {
     val albums: StateFlow<List<PersonAlbum>> by lazy {
         combine(faces.tiles(), people.names(), Gallery.media.filterNotNull(), AlbumPrefs.hidden) { tiles, names, media, hidden ->
             val byId = names.associateBy { it.id }
+            val pinned = names.mapNotNull { p -> p.coverMediaId?.let { id -> p.cover?.let { p.id to FaceSpot(id, it) } } }.toMap()
             // Folders hidden from Photos stay out of People too, as they do from Explore and search
-            clusterMembers(tiles, media.inPhotos(hidden)) { it.id }.map { (cluster, m) ->
+            clusterMembers(tiles, media.inPhotos(hidden), { it.id }, ::isCamera, pinned).map { (cluster, m) ->
                 val person = byId[cluster]
-                PersonAlbum(cluster, person?.name, person?.hidden == true, FaceCrop(m.cover.id, mediaUri(m.cover.mediaId, isVideo = false), m.cover.box), m.items, m.faces)
+                val chosen = pinned[cluster]?.let { it.mediaId == m.cover.mediaId && iou(it.box, m.cover.box) >= SAME_BOX } == true
+                PersonAlbum(cluster, person?.name, person?.hidden == true, FaceCrop(m.cover.id, m.cover.mediaId, m.cover.box), m.items, m.faces, chosen)
             }
         }
             .flowOn(Dispatchers.Default)
             .stateIn(scope, SharingStarted.WhileSubscribed(5_000), emptyList())
     }
 
+    private fun isCamera(m: Media) = m.path.startsWith("DCIM/", ignoreCase = true)
+
     /** For search: each named person who isn't hidden, to the MediaStore ids of photos they're in. Live. */
     fun mediaIdsByName(): Flow<Map<String, Set<Long>>> = combine(people.names(), faces.tiles(), ::namedMedia).flowOn(Dispatchers.Default)
+
+    // Pairs that may be one person, from the last clustering run
+    private val suggestions = MutableStateFlow<List<Suggestion>>(emptyList())
+    private val notSure = MutableStateFlow<Set<NotSure>>(emptySet())
+
+    /** "Same person?" pairs to ask about, most alike first. Live. */
+    val review: Flow<List<PeoplePair>> by lazy {
+        combine(suggestions, albums, notSure, faces.tiles()) { s, a, n, t -> reviewPairs(s, a, answeredPairs(n, t)) }.flowOn(Dispatchers.Default)
+    }
+
+    /** [cluster]'s faces in photos still on the phone, best covers first: the cover picker's grid. Live. */
+    fun facesOf(cluster: Long): Flow<List<FaceTile>> =
+        combine(faces.tiles(), Gallery.media.filterNotNull(), AlbumPrefs.hidden) { tiles, media, hidden ->
+            val shown = media.inPhotos(hidden).associateBy { it.id }
+            tiles.filter { it.cluster == cluster && it.mediaId in shown }
+                .sortedWith(compareByDescending<FaceTile> { coverScore(it, isCamera(shown.getValue(it.mediaId))) }.thenBy { it.id })
+        }.flowOn(Dispatchers.Default)
 
     /**
      * Call once from Application.onCreate. Scanning starts after the gallery's first load (so only once photo access
@@ -174,6 +287,10 @@ object People {
      */
     fun start(context: Context) {
         app = context.applicationContext
+        scope.launch {
+            notSure.update { it + prefs.getStringSet(NOT_SURE, emptySet()).orEmpty().mapNotNull(::decodeNotSure) }
+            suggestions.compareAndSet(emptyList(), decodeSuggestions(prefs.getString(SUGGESTIONS, null)))
+        }
         scope.launch {
             Gallery.media.filterNotNull().collect {
                 val request = OneTimeWorkRequestBuilder<FaceWorker>()
@@ -196,12 +313,31 @@ object People {
         if (same != null) moveInto(cluster, same.id) else personOf(cluster).also { people.rename(it, trimmed) }
     }
 
-    /** Merges [from] into [into]. The result keeps [into]'s name, or [from]'s if [into] had none. Returns its cluster id. */
+    /** Merges [from] into [into]. The result keeps [into]'s name and cover, or [from]'s if [into] had none. Returns its cluster id. */
     suspend fun merge(from: Long, into: Long): Long = edit { moveInto(from, into) }
 
     /** Hides or shows [cluster] in People. Returns its cluster id (new if it was an automatic group). */
     suspend fun setHidden(cluster: Long, hidden: Boolean): Long = edit {
         personOf(cluster).also { people.setHidden(it, hidden) }
+    }
+
+    /** Pins [face] as [cluster]'s cover photo, or with null lets Album pick again. Returns its cluster id (new if it was an automatic group). */
+    suspend fun setCover(cluster: Long, face: FaceTile?): Long = edit {
+        personOf(cluster).also { people.setCover(it, face?.mediaId, face?.box?.left, face?.box?.top, face?.box?.right, face?.box?.bottom) }
+    }
+
+    /** "Same person?" answered Different: both become people (so the answer survives a rebuild) and are never offered again. */
+    suspend fun different(a: Long, b: Long) = edit {
+        val x = personOf(a)
+        val y = personOf(b)
+        if (x != y) people.insertDifferent(DifferentPeople(minOf(x, y), maxOf(x, y)))
+    }
+
+    /** "Same person?" answered Not sure about the two faces shown: whoever they belong to isn't asked about again. */
+    fun notSure(pair: PeoplePair) {
+        val answer = NotSure(FaceSpot(pair.a.cover.mediaId, pair.a.cover.box), FaceSpot(pair.b.cover.mediaId, pair.b.cover.box))
+        notSure.update { it + answer }
+        scope.launch { prefs.edit().putStringSet(NOT_SURE, notSure.value.mapTo(HashSet(), ::encodeNotSure)).apply() }
     }
 
     /** "Not <name>": takes [mediaIds] out of [cluster] for good. Keep the result for [undo]. */
@@ -215,6 +351,7 @@ object People {
     suspend fun undo(change: NotPersonChange) = edit {
         people.undo(change)
         faces.setClusters(change.faceIds.associateWith { change.personId })
+        touched += change.personId
     }
 
     private suspend fun <T> edit(block: suspend () -> T): T = scope.async {
@@ -232,6 +369,7 @@ object People {
         val id = people.create(Person(name = null, hidden = false, created = System.currentTimeMillis()), faces.spots(current))
         moved[current] = id
         faces.moveCluster(current, id)
+        touched += id
         return id
     }
 
@@ -254,54 +392,58 @@ object People {
             val t = people.person(target)
             if (t?.name == null && person.name != null) people.rename(target, person.name)
             if (t?.hidden == true && !person.hidden) people.setHidden(target, false) // stays hidden only if both were
+            val cover = person.cover
+            if (t?.coverMediaId == null && person.coverMediaId != null && cover != null) {
+                people.setCover(target, person.coverMediaId, cover.left, cover.top, cover.right, cover.bottom)
+            }
             people.merge(person.id, target)
         }
         moved[from] = target
         faces.moveCluster(from, target) // its automatic faces too, not just the confirmed ones
+        touched += target
         return target
     }
 
     /** Runs [cluster] over every face with the user's corrections, then saves the changes. Call holding [clustering]. */
     private suspend fun recluster() {
-        val rows = faces.rows()
-        val saved = people.people().associate { p ->
-            p.id to p.centroid?.takeIf { p.centroidModel == FACE_MODEL }?.let { Centroid(it.toFloats(), p.centroidFaces) }
-        }
         val corrections = Corrections(
-            saved,
+            people.people().mapTo(HashSet()) { it.id },
             people.faces().map { Confirmed(it.personId, it.mediaId, it.box, it.id) },
             people.notPerson().groupBy({ it.mediaId }, { it.personId }).mapValues { it.value.toSet() },
+            people.different().mapTo(HashSet()) { it.a to it.b },
         )
-        val vectors = rows.map { FaceVector(it.id, it.mediaId, it.box, it.embedding.toFloats(), it.cluster) }
+        // A row from another model (an index that wasn't dropped) would be compared across spaces: left out
+        val vectors = faces.rows().filter { it.embedding.size == EMBEDDING * 4 }
+            .map { FaceVector(it.id, it.mediaId, it.box, it.embedding.toFloats(), it.cluster, it.weak, it.fit) }
         val nextAuto = prefs.getLong(NEXT_AUTO, AUTO_CLUSTERS)
-        val result = cluster(vectors, corrections, nextAuto = nextAuto)
-        // Ids of folded groups are never handed out again, so a page or an edit still holding one can't reach a stranger
+        val result = cluster(vectors, corrections, nextAuto, touched)
+        touched.clear()
+        // Ids are never handed out again, so a page or an edit still holding a gone group's id can't reach a stranger
         if (result.nextAuto != nextAuto) prefs.edit().putLong(NEXT_AUTO, result.nextAuto).commit()
-        moved.putAll(result.merged)
-        faces.setClusters(result.changed)
-        for ((id, live) in result.centroids) {
-            val old = saved[id]
-            // A few re-found faces never replace a centroid made from many; unchanged ones aren't written back either
-            if (old != null && (live.faces < old.faces || (live.faces == old.faces && dot(old.vector, live.vector) > 0.9999f))) continue
-            people.setCentroid(id, live.vector.toBytes(), live.faces, FACE_MODEL)
-        }
+        faces.place(result.changed)
+        if (result.suggestions != suggestions.value) prefs.edit().putString(SUGGESTIONS, encodeSuggestions(result.suggestions)).apply()
+        suggestions.value = result.suggestions
     }
 
     /**
      * Album turned photo [mediaId] a quarter [clockwise] or anticlockwise: turns the boxes of the faces the user
-     * confirmed in it the same way, so they still match once the photo is scanned again. Call after the file is written.
+     * confirmed or pinned as a cover in it the same way, so they still match once the photo is scanned again. Call
+     * after the file is written.
      */
     fun rotated(mediaId: Long, clockwise: Boolean) {
         scope.launch {
             try {
-                clustering.withLock { people.update(people.facesOf(mediaId).map { it.copy(box = it.box.rotated(clockwise)) }) }
+                clustering.withLock { people.rotate(mediaId, clockwise) }
             } catch (e: Exception) {
                 CrashLog.note("people rotate failed: $e")
             }
         }
     }
 
-    /** One scanning pass: drops faces of deleted photos, then scans new and changed photos in batches, newest first. */
+    /**
+     * One scanning pass: drops faces of deleted photos, then scans new and changed photos in batches: photos with faces
+     * the user confirmed first (so after a rebuild everyone named is back before anything else is grouped), then newest first.
+     */
     internal suspend fun run(onLongPass: suspend () -> Unit = {}) = withContext(background) {
         if (!has(READ_MEDIA_IMAGES) && !has(READ_MEDIA_VISUAL_USER_SELECTED)) return@withContext
         // With "Select photos" access MediaStore lists only the picked ones: never treat the rest as deleted
@@ -311,22 +453,24 @@ object People {
         var unreadable = 0
         val started = SystemClock.elapsedRealtime()
         val dropped = try {
-            FaceAnalyser(app, thread).use { analyser ->
+            FaceAnalyser(app).use { analyser ->
                 do {
                     // Never act on a failed or empty query: either would wipe the index.
                     val photos = query()?.takeIf { it.isNotEmpty() } ?: break
                     skipCrashed(photos)
                     val plan = planIndex(photos, faces.stamps(), FACE_INDEX_VERSION, canLocate = false)
                     if (!partial) plan.remove.chunked(500).forEach { faces.delete(it) }
+                    val confirmed = people.faces().mapTo(HashSet()) { it.mediaId }
+                    val todo = plan.analyse.sortedByDescending { it.id in confirmed } // stable: newest first within each
                     // Counted over the whole library, so a pass that resumes shows where it is, not a fresh start from 0
-                    progress(IndexProgress(photos.size - plan.analyse.size, photos.size))
-                    plan.analyse.chunked(BATCH).forEachIndexed { i, batch ->
-                        if (plan.analyse.size - i * BATCH >= LONG_PASS) onLongPass()
+                    progress(IndexProgress(photos.size - todo.size, photos.size))
+                    todo.chunked(BATCH).forEachIndexed { i, batch ->
+                        if (todo.size - i * BATCH >= LONG_PASS) onLongPass()
                         val results = batch.map { it to analyse(analyser, it.id) }
                         faces.save(
                             results.map { (photo, _) -> ScannedPhoto(photo.id, photo.modified, photo.size, FACE_INDEX_VERSION) },
                             results.flatMap { (photo, found) ->
-                                found.orEmpty().map { IndexedFace(mediaId = photo.id, box = it.box, quality = it.quality, embedding = it.embedding.toBytes()) }
+                                found.orEmpty().map { IndexedFace(mediaId = photo.id, box = it.box, quality = it.quality, weak = it.weak, embedding = it.embedding.toBytes()) }
                             },
                         )
                         found += results.sumOf { it.second?.size ?: 0 }
@@ -334,9 +478,9 @@ object People {
                         progress(_progress.value.let { it.copy(done = it.done + batch.size) })
                         if (i % CLUSTER_EVERY == CLUSTER_EVERY - 1) clustering.withLock { recluster() }
                     }
-                    scanned += plan.analyse.size
-                } while (plan.analyse.isNotEmpty()) // photos taken during the pass are picked up before it ends
-                analyser.dropped.toString() // {blurred=3, small=40, ...}
+                    scanned += todo.size
+                } while (todo.isNotEmpty()) // photos taken during the pass are picked up before it ends
+                analyser.dropped.toString() // {crowd=3, small=40, unlike a face=12}
             }
         } finally {
             prefs.edit().remove(DECODING).commit() // finished or stopped by WorkManager: no photo to blame
@@ -354,12 +498,10 @@ object People {
      * it (native code) or run it out of memory: the photo is noted first, and a later pass saves a photo that never
      * finished as unreadable instead of crashing on it again. An OutOfMemoryError just skips the photo.
      */
-    private suspend fun analyse(analyser: FaceAnalyser, mediaId: Long): List<FoundFace>? {
+    private fun analyse(analyser: FaceAnalyser, mediaId: Long): List<FoundFace>? {
         prefs.edit().putLong(DECODING, mediaId).commit()
         return try {
             analyser.analyse(mediaUri(mediaId, isVideo = false))
-        } catch (e: CancellationException) {
-            throw e
         } catch (e: Throwable) {
             CrashLog.note("faces: photo skipped: $e")
             null

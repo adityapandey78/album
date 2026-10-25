@@ -33,6 +33,7 @@ class AlbumApp : Application(), SingletonImageLoader.Factory, Configuration.Prov
         Collections.start(this)
         People.start(this)
         Cleanup.start(this)
+        Embeddings.start(this)
         // The widget may show a photo that was just trashed or moved to the safe: redraw once the Library settles
         widgetScope.launch { Gallery.media.filterNotNull().drop(1).debounce(5_000).collect { MemoryWidget.refresh(this@AlbumApp) } }
     }

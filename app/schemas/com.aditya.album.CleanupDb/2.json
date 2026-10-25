@@ -1,0 +1,166 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 2,
+    "identityHash": "c76214dceb5b13db76fefc216e335c03",
+    "entities": [
+      {
+        "tableName": "items",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `modified` INTEGER NOT NULL, `size` INTEGER NOT NULL, `version` INTEGER NOT NULL, `pdq` TEXT, `quality` INTEGER, `blur` REAL, `textured` REAL, `low` INTEGER, `high` INTEGER, `clipped` REAL, `capture` TEXT, `night` INTEGER, `portrait` INTEGER, `faces` INTEGER, `eyes` REAL, `smile` REAL, `faceSharpness` REAL, `hash` TEXT, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "modified",
+            "columnName": "modified",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "size",
+            "columnName": "size",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "version",
+            "columnName": "version",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pdq",
+            "columnName": "pdq",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "quality",
+            "columnName": "quality",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "blur",
+            "columnName": "blur",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "textured",
+            "columnName": "textured",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "low",
+            "columnName": "low",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "high",
+            "columnName": "high",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "clipped",
+            "columnName": "clipped",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "capture",
+            "columnName": "capture",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "night",
+            "columnName": "night",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "portrait",
+            "columnName": "portrait",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "faces",
+            "columnName": "faces",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "eyes",
+            "columnName": "eyes",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "smile",
+            "columnName": "smile",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "faceSharpness",
+            "columnName": "faceSharpness",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "hash",
+            "columnName": "hash",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "copies",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`a` INTEGER NOT NULL, `b` INTEGER NOT NULL, `distance` INTEGER NOT NULL, PRIMARY KEY(`a`, `b`))",
+        "fields": [
+          {
+            "fieldPath": "a",
+            "columnName": "a",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "b",
+            "columnName": "b",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "distance",
+            "columnName": "distance",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "a",
+            "b"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_copies_b",
+            "unique": false,
+            "columnNames": [
+              "b"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_copies_b` ON `${TABLE_NAME}` (`b`)"
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'c76214dceb5b13db76fefc216e335c03')"
+    ]
+  }
+}

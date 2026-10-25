@@ -81,11 +81,14 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -760,23 +763,42 @@ fun AlbumSnackbar(data: SnackbarData, modifier: Modifier = Modifier) {
 
 // ---------- Logo ----------
 
-/** The Album mark: three rounded tiles and one flash disc, a tile picked out of the grid. Ringed in ink on light grounds. */
+/**
+ * The Album mark, drawn as the home-screen icon shows it (tools/app_icon.py): a fanned stack of prints on a near-black
+ * circle, the top one a photo with a sun in the accent. The same on every ground, so it reads as the app's own icon.
+ */
 @Composable
 fun LogoMark(modifier: Modifier = Modifier, size: Dp = 32.dp) {
-    val c = AlbumTheme.colors
+    val sun = logoSun(AlbumTheme.spec.appearance.accent)
     Canvas(modifier.size(size).semantics { contentDescription = "Album" }) {
-        val u = this.size.width / 48f
-        val tile = Size(20 * u, 20 * u)
-        listOf(2f to 2f, 2f to 26f, 26f to 26f).forEach { (x, y) ->
-            drawRoundRect(c.ink, Offset(x * u, y * u), tile, CornerRadius(5 * u))
+        // The icon's 108-unit grid as a launcher shows it: its middle 72 units, the drawing at three quarters about (54, 55)
+        val u = this.size.width / 72f
+        fun at(x: Float, y: Float) = Offset(((x - 54) * 0.75f + 36) * u, ((y - 55) * 0.75f + 36) * u)
+        val print = Size(37.5f * u, 37.5f * u)
+        val corner = CornerRadius(7.5f * u)
+        val pivot = at(54f, 55f)
+        drawCircle(Ink)
+        rotate(-14f, pivot) { drawRoundRect(Color(0xFF5F5E5A), at(29f, 30f), print, corner) }
+        rotate(8f, pivot) { drawRoundRect(Color(0xFFB4B2A9), at(29f, 30f), print, corner) }
+        drawRoundRect(Paper, at(29f, 32f), print, corner)
+        val mountains = Path().apply {
+            listOf(34f to 78f, 48f to 61f, 57f to 71f, 64f to 65f, 74f to 78f).forEachIndexed { i, (x, y) ->
+                val p = at(x, y)
+                if (i == 0) moveTo(p.x, p.y) else lineTo(p.x, p.y)
+            }
+            close()
         }
-        val center = Offset(36 * u, 12 * u)
-        if (c.dark) drawCircle(c.flash, 10 * u, center)
-        else {
-            drawCircle(c.ink, 10 * u, center)
-            drawCircle(c.flash, 8 * u, center)
-        }
+        drawPath(mountains, Ink)
+        drawCircle(sun, 5.25f * u, at(64f, 46f))
     }
+}
+
+/** The logo's sun: the accent's fill as on a dark ground. Mono's is the paper itself, so there the sun is cut out. */
+@Composable
+private fun logoSun(accent: Accent): Color = when (accent) {
+    Accent.Wallpaper -> colorResource(android.R.color.system_accent1_400) // as the launcher icon's
+    Accent.Mono -> Ink
+    else -> albumColors(ThemeMode.Dark, accent).flash
 }
 
 /** Content padding that clears the floating bottom bar: bar height plus space-8, plus the navigation bar. */
