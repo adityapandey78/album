@@ -57,9 +57,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.dp
@@ -205,11 +207,13 @@ fun MediaGrid(
     val selecting = selected.isNotEmpty()
     val toggle = { m: Media -> onSelect(if (m.id in selected) selected - m.id else selected + m.id) }
     val startPadding = with(LocalDensity.current) { contentPadding.calculateStartPadding(LocalLayoutDirection.current).roundToPx() }
-    Box(modifier.fillMaxSize()) {
+    // Test tags double as resource ids so the benchmarks (UiAutomator) can find the grid and the fast scroller
+    Box(modifier.fillMaxSize().semantics { testTagsAsResourceId = true }) {
         LazyVerticalGrid(
             columns = GridCells.Fixed(columns.intValue),
             state = state,
             modifier = Modifier.fillMaxSize()
+                .testTag("media_grid")
                 .pinchToZoom(columns) { zoomIn ->
                     val i = columnSteps.indexOf(columns.intValue).coerceAtLeast(0)
                     val next = columnSteps[(if (zoomIn) i - 1 else i + 1).coerceIn(0, columnSteps.lastIndex)]

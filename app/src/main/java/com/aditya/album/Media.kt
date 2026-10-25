@@ -7,6 +7,8 @@ import android.content.Context
 import android.content.Intent
 import android.database.ContentObserver
 import android.net.Uri
+import android.os.CancellationSignal
+import android.os.Trace
 import android.provider.MediaStore
 import android.provider.MediaStore.Files.FileColumns
 import android.util.Size
@@ -19,10 +21,13 @@ import coil3.fetch.ImageFetchResult
 import coil3.key.Keyer
 import coil3.request.Options
 import coil3.size.pxOrElse
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.catch
@@ -30,6 +35,7 @@ import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.Instant
 import java.time.ZoneId
 import android.widget.Toast
@@ -196,15 +202,49 @@ fun shareIntent(items: Collection<Media>): Intent {
  */
 data class Thumb(val uri: Uri, val version: Int = editVersion(uri))
 
+// A few at a time: a fling or the fast scroller asks for hundreds, and running them all at once starves the UI threads.
+// Queued requests for cells that scrolled away are cancelled before they ever start.
+private val thumbLoads = Dispatchers.IO.limitedParallelism(4)
+
 class ThumbFetcher(private val thumb: Thumb, private val options: Options) : Fetcher {
-    override suspend fun fetch(): FetchResult {
+    override suspend fun fetch(): FetchResult = withContext(thumbLoads) {
         val size = Size(options.size.width.pxOrElse { 256 }, options.size.height.pxOrElse { 256 })
-        val bitmap = options.context.contentResolver.loadThumbnail(thumb.uri, size, null)
-        return ImageFetchResult(image = bitmap.asImage(), isSampled = true, dataSource = DataSource.DISK)
+        val signal = CancellationSignal()
+        val bitmap = cancellable(onCancel = signal::cancel) {
+            Trace.beginSection("thumb") // each load shows up in Perfetto traces (see the benchmark module)
+            try {
+                options.context.contentResolver.loadThumbnail(thumb.uri, size, signal)
+            } finally {
+                Trace.endSection()
+            }
+        }
+        ImageFetchResult(image = bitmap.asImage(), isSampled = true, dataSource = DataSource.DISK)
     }
 
     class Factory : Fetcher.Factory<Thumb> {
         override fun create(data: Thumb, options: Options, imageLoader: ImageLoader) = ThumbFetcher(data, options)
+    }
+}
+
+/**
+ * Runs the blocking [block] and calls [onCancel] as soon as this coroutine is cancelled (its cell scrolled away), while
+ * [block] is still running, so MediaProvider can drop a thumbnail nobody will see instead of finishing it first.
+ */
+internal suspend fun <T> cancellable(onCancel: () -> Unit, block: () -> T): T = coroutineScope {
+    val done = Job()
+    // Unconfined: runs in the thread that cancels, instead of waiting for a free one behind the blocked loads
+    launch(Dispatchers.Unconfined) {
+        try {
+            done.join()
+        } catch (e: CancellationException) {
+            onCancel()
+            throw e
+        }
+    }
+    try {
+        block()
+    } finally {
+        done.complete()
     }
 }
 

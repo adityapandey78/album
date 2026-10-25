@@ -14,3 +14,4 @@ dependencyResolutionManagement {
 }
 rootProject.name = "Album"
 include(":app")
+include(":benchmark")

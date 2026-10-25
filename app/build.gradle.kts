@@ -2,6 +2,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp") // Room's code generator
+    id("androidx.baselineprofile") // ships the profile from :benchmark so grid and viewer code is precompiled, not JIT-compiled mid-scroll
 }
 
 android {
@@ -12,8 +13,8 @@ android {
         applicationId = "com.aditya.album"
         minSdk = 33 // Android 13+: READ_MEDIA_* permissions and AGSL shaders, no legacy branches
         targetSdk = 37 // Android 17
-        versionCode = 7
-        versionName = "0.5.1"
+        versionCode = 8
+        versionName = "0.7.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // 64-bit ARM only: the phone and the emulator. Each extra ABI would add another 11 MB ML Kit library.
         ndk { abiFilters += "arm64-v8a" }
@@ -41,6 +42,10 @@ android {
     }
 
     buildFeatures { compose = true }
+
+    // ML Kit and LiteRT native libraries are ~35 MB uncompressed. Compressed, every update download is much smaller;
+    // Android unpacks them once at install (a little more storage), with no cost at runtime.
+    packaging { jniLibs { useLegacyPackaging = true } }
 }
 
 // Smart index schemas, kept in git so later tables (faces, text, embeddings) can ship as Room auto-migrations.
@@ -62,7 +67,15 @@ dependencies {
     implementation("androidx.exifinterface:exifinterface:1.4.2") // GPS from EXIF, including HEIF photos
     // On-device labels; model bundled in the APK, nothing downloaded. Version pinned: proguard-rules.pro strips its telemetry by obfuscated name.
     implementation("com.google.mlkit:image-labeling:17.0.9")
+    // On-device text in screenshots and documents, for search; Latin model bundled. Pinned for the same proguard reason.
+    implementation("com.google.mlkit:text-recognition:16.0.1")
+    // People: on-device face finding with landmarks; bundled like the labeller. Pinned for the same proguard rule reason.
+    implementation("com.google.mlkit:face-detection:16.1.7")
+    // People: runs the bundled SFace face-embedding model (assets/faces) on the CPU. No Play services, nothing downloaded.
+    implementation("com.google.ai.edge.litert:litert:1.4.2")
     debugImplementation("androidx.compose.ui:ui-tooling")
+    // Profile generator; Compose already brings androidx.profileinstaller, which installs the profile on sideloaded APKs
+    baselineProfile(project(":benchmark"))
     testImplementation("junit:junit:4.13.2")
     // On-device UI tests (gestures): ./gradlew connectedDebugAndroidTest
     androidTestImplementation(platform("androidx.compose:compose-bom:2026.09.00"))

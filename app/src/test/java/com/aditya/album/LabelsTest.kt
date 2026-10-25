@@ -42,4 +42,17 @@ class LabelsTest {
         assertEquals(0.587f, brightnessOf(intArrayOf(0xFF00FF00.toInt())), 1e-3f) // green looks brighter than blue
         assertEquals(0f, brightnessOf(IntArray(0)), 0f)
     }
+
+    @Test fun textIsReadOnlyWhereItLikelyIs() {
+        assertEquals(true, mayHaveText(listOf("Receipt" to 0.8f), screenshot = false))
+        assertEquals(true, mayHaveText(listOf("Mobile phone" to 0.6f), screenshot = false)) // a photo of a screen
+        assertEquals(true, mayHaveText(emptyList(), screenshot = true))
+        assertEquals(false, mayHaveText(listOf("Dog" to 0.9f, "Beach" to 0.8f), screenshot = false))
+    }
+
+    @Test fun screenshotsByFolderOrName() {
+        assertEquals(true, isScreenshot("DCIM/Screenshots/", "IMG_1.png"))
+        assertEquals(true, isScreenshot("Pictures/", "Screenshot_20260101-101010.png"))
+        assertEquals(false, isScreenshot("DCIM/Camera/", "IMG_20260101.jpg"))
+    }
 }

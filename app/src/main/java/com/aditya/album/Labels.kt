@@ -123,3 +123,17 @@ fun brightnessOf(pixels: IntArray): Float {
     for (p in pixels) sum += 0.299 * (p shr 16 and 0xFF) + 0.587 * (p shr 8 and 0xFF) + 0.114 * (p and 0xFF)
     return (sum / pixels.size / 255).toFloat()
 }
+
+// Photos of screens often show text too; documents are already covered by their category's labels.
+private val screenLabels = setOf("Computer", "Mobile phone", "Television")
+
+/**
+ * Whether text recognition is worth running on a photo: a screenshot, or labels that suggest a document or a screen.
+ * Text recognition is several times slower than labelling, so the rest (most photos) skip it.
+ */
+fun mayHaveText(labels: List<Pair<String, Float>>, screenshot: Boolean) =
+    screenshot || labels.any { (label, _) -> categoryOfLabel[label] == Documents || label in screenLabels }
+
+/** Android saves screenshots in a Screenshots folder (DCIM or Pictures) and names them Screenshot_... */
+fun isScreenshot(relativePath: String, name: String) =
+    relativePath.contains("screenshot", ignoreCase = true) || name.startsWith("screenshot", ignoreCase = true)

@@ -2,6 +2,7 @@ package com.aditya.album
 
 import android.app.Activity
 import android.content.ContentResolver
+import android.content.ContentUris
 import android.content.Context
 import android.net.Uri
 import android.provider.MediaStore
@@ -106,6 +107,8 @@ private suspend fun rotate(context: Context, uri: Uri, clockwise: Boolean): Bool
         CrashLog.note("rotate failed: $e")
         return@withContext false
     }
+    // People keeps confirmed faces as boxes in the upright photo: turn them with it, or names could swap between faces
+    People.rotated(ContentUris.parseId(uri), clockwise)
     // MediaStore rescans the file once it's closed (orientation, size, Android's thumbnail): reload after that
     withTimeoutOrNull(3_000) { Gallery.changes(resolver).first { generationOf(resolver, uri) != before } }
     withContext(Dispatchers.Main) {

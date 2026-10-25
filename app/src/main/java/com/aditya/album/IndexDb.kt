@@ -1,10 +1,13 @@
 package com.aditya.album
 
+import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Embedded
 import androidx.room.Entity
 import androidx.room.ForeignKey
+import androidx.room.Fts4
+import androidx.room.FtsOptions
 import androidx.room.Index
 import androidx.room.Insert
 import androidx.room.PrimaryKey
@@ -18,7 +21,8 @@ import kotlinx.coroutines.flow.Flow
  * What the smart index knows about one photo or video, keyed by its MediaStore id.
  * Later analyses (faces, text in photos, embeddings) get their own tables keyed by mediaId, like [ItemLabel].
  */
-@Entity(tableName = "items")
+// Explore and search look items up by category and by place
+@Entity(tableName = "items", indices = [Index("category"), Index("city", "admin1", "countryCode")])
 data class IndexedItem(
     @PrimaryKey val id: Long,
     val modified: Long, // MediaStore DATE_MODIFIED (seconds); with size, tells an edited file from an unchanged one
@@ -40,6 +44,14 @@ data class IndexedItem(
 )
 data class ItemLabel(val mediaId: Long, val label: String, val confidence: Float)
 
+/**
+ * Text read from a photo (ML Kit text recognition), full-text indexed for search. Its rowid is the MediaStore id.
+ * FTS tables can't have foreign keys, so rows are deleted alongside their item ([IndexDao.save], [IndexDao.remove]).
+ */
+@Fts4(tokenizer = FtsOptions.TOKENIZER_UNICODE61) // splits on any script's punctuation and ignores case and accents
+@Entity(tableName = "texts")
+data class ItemText(@PrimaryKey @ColumnInfo(name = "rowid") val mediaId: Long, val text: String)
+
 /** The columns that decide whether an item needs analysing again. */
 data class IndexStamp(val id: Long, val modified: Long, val size: Long, val version: Int, val located: Boolean)
 
@@ -52,12 +64,15 @@ interface IndexDao {
     @Query("SELECT id, modified, size, version, located FROM items")
     suspend fun stamps(): List<IndexStamp>
 
-    /** Replaces the rows and labels of [items] in one transaction, so a stopped run never leaves half an item. */
+    /** Replaces the rows, labels and text of [items] in one transaction, so a stopped run never leaves half an item. */
     @Transaction
-    suspend fun save(items: List<IndexedItem>, labels: List<ItemLabel>) {
-        deleteLabels(items.map { it.id })
+    suspend fun save(items: List<IndexedItem>, labels: List<ItemLabel>, texts: List<ItemText>) {
+        val ids = items.map { it.id }
+        deleteLabels(ids)
+        deleteTexts(ids)
         upsert(items)
         insert(labels)
+        insertTexts(texts)
     }
 
     @Upsert
@@ -66,12 +81,25 @@ interface IndexDao {
     @Insert
     suspend fun insert(labels: List<ItemLabel>)
 
+    @Insert
+    suspend fun insertTexts(texts: List<ItemText>)
+
     @Query("DELETE FROM labels WHERE mediaId IN (:ids)")
     suspend fun deleteLabels(ids: List<Long>)
+
+    @Query("DELETE FROM texts WHERE rowid IN (:ids)")
+    suspend fun deleteTexts(ids: List<Long>)
 
     /** Labels go too (ON DELETE CASCADE). */
     @Query("DELETE FROM items WHERE id IN (:ids)")
     suspend fun delete(ids: List<Long>)
+
+    /** Forgets media that's gone. */
+    @Transaction
+    suspend fun remove(ids: List<Long>) {
+        deleteTexts(ids)
+        delete(ids)
+    }
 
     @Query("SELECT category, COUNT(*) AS count FROM items WHERE category IS NOT NULL GROUP BY category ORDER BY count DESC")
     fun categories(): Flow<List<CategoryCount>>
@@ -87,10 +115,30 @@ interface IndexDao {
 
     @Query("SELECT id FROM items WHERE city = :city AND admin1 = :admin1 AND countryCode = :countryCode")
     fun ids(city: String, admin1: String, countryCode: String): Flow<List<Long>>
+
+    // Search: the names it can match, then blocking lookups for the ones it did (called off the main thread).
+
+    @Query("SELECT DISTINCT label FROM labels")
+    fun labels(): Flow<List<String>>
+
+    @Query("SELECT id FROM items WHERE category = :category")
+    fun idsIn(category: Category): List<Long>
+
+    @Query("SELECT mediaId FROM labels WHERE label = :label")
+    fun idsWith(label: String): List<Long>
+
+    /** By town, state or country name. */
+    @Query("SELECT id FROM items WHERE city = :name OR admin1 = :name OR country = :name")
+    fun idsAt(name: String): List<Long>
+
+    /** [query] is FTS syntax, like `invoice*` for words starting with "invoice". */
+    @Query("SELECT rowid FROM texts WHERE texts MATCH :query")
+    fun idsWithText(query: String): List<Long>
 }
 
 // Schemas are exported to app/schemas so new tables can ship as Room auto-migrations instead of a full re-index.
-@Database(entities = [IndexedItem::class, ItemLabel::class], version = 1)
+// Version 2 added texts without one: existing photos need text read anyway, so the index is dropped and rebuilt.
+@Database(entities = [IndexedItem::class, ItemLabel::class, ItemText::class], version = 2)
 abstract class IndexDb : RoomDatabase() {
     abstract fun dao(): IndexDao
 }

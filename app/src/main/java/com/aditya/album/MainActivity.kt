@@ -78,6 +78,8 @@ import androidx.compose.ui.unit.toSize
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material.icons.outlined.PersonRemove
+import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -140,7 +142,11 @@ private fun AlbumShell(look: Look, onLook: (Look) -> Unit) {
     var tab by rememberSaveable { mutableStateOf(Tab.Photos) }
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
     var calendarOpen by rememberSaveable { mutableStateOf(false) }
+    var searchOpen by rememberSaveable { mutableStateOf(false) }
+    var peopleOpen by rememberSaveable { mutableStateOf(false) } // Explore's "See all" people
     var albumId by rememberSaveable { mutableStateOf<Long?>(null) }
+    var exploreId by rememberSaveable { mutableStateOf<Long?>(null) } // a place, thing or utility opened from Explore
+    var allPlaces by rememberSaveable { mutableStateOf(false) } // Explore's "See all" places
     var viewerId by rememberSaveable { mutableStateOf<Long?>(null) }
     var selected by remember { mutableStateOf(emptySet<Long>()) }
 
@@ -152,27 +158,62 @@ private fun AlbumShell(look: Look, onLook: (Look) -> Unit) {
     val albums = remember(media) { albumsOf(media) }
     val specials = remember(media, trash) { specialCounts(media, trash.orEmpty().size) }
     val collections = rememberCollections(media)
-    val album = albums.find { it.id == albumId }
-    val special = Special.entries.find { it.id == albumId }
-    val collection = collections.find { it.albumId == albumId }
-    val albumMedia = remember(media, albumId, collection) { collection?.items ?: albumId?.let { id -> media.filter { it.isIn(id) } }.orEmpty() }
-    val inTrash = tab == Tab.Albums && special == Special.Trash
-    val inAlbum = tab == Tab.Albums && (album != null || special != null || collection != null) && !inTrash
-    val openCollection = collection?.takeIf { inAlbum } // its selection removes from it instead of adding to one
-    val shown = if (inAlbum) albumMedia else photos
+    // Albums and Explore each keep their own open album, so switching tabs comes back to it
+    val openId = when (tab) {
+        Tab.Albums -> albumId
+        Tab.Explore -> exploreId
+        Tab.Photos -> null
+    }
+    val album = albums.find { it.id == openId }
+    val special = Special.entries.find { it.id == openId }
+    val collection = collections.find { it.albumId == openId }
+    val smart = openId?.let { rememberSmartAlbum(it) }
+    val person = rememberPerson(openId) // person pages open from Explore
+    val albumMedia = remember(media, openId, collection, smart, person) {
+        collection?.items ?: smart?.items ?: person?.items ?: openId?.let { id -> media.filter { it.isIn(id) } }.orEmpty()
+    }
+    val inTrash = special == Special.Trash
+    val inAlbum = (album != null || special != null || collection != null || smart != null || person != null) && !inTrash
+    val closeAlbum = { if (tab == Tab.Explore) exploreId = null else albumId = null }
+    // Search replaces the top bar and the page underneath it, and its results are what selection and the viewer work on
+    val search = if (searchOpen) rememberSearch(photos, collections) else null
+    // Only while that page is what's on screen: search results get the normal selection actions, not Remove or Not <name>
+    val openCollection = collection?.takeIf { inAlbum && search == null } // its selection removes from it instead of adding to one
+    val openPerson = person?.takeIf { inAlbum && search == null }
+    // An open album or person that stops existing (merged, emptied, deleted) closes after a moment for its data to load,
+    // instead of lingering as an id that could reopen something else later
+    LaunchedEffect(openId, inAlbum, inTrash) {
+        if (openId != null && !inAlbum && !inTrash) {
+            delay(1_500)
+            closeAlbum()
+        }
+    }
+    val shown = search?.items ?: if (inAlbum) albumMedia else photos
 
     // Grid states live here so scroll position and zoom survive the viewer, settings and tab switches.
     val photosGrid = rememberLazyGridState()
     val photosColumns = rememberColumns("columns_photos")
     val albumsGrid = rememberLazyGridState()
     val albumGrid = rememberLazyGridState()
+    val exploreGrid = rememberLazyGridState()
+    val placesGrid = rememberLazyGridState()
+    val exploreAlbumGrid = rememberLazyGridState() // apart from albumGrid, so each tab's open album keeps its place
+    val openGrid = if (tab == Tab.Explore) exploreAlbumGrid else albumGrid
+    val openFromExplore = { id: Long ->
+        exploreAlbumGrid.requestScrollToItem(0) // a new album starts at the top, not where the last one was left
+        exploreId = id
+    }
     val albumColumns = rememberColumns("columns_album")
+    val searchGrid = rememberLazyGridState()
+    val searchColumns = rememberColumns("columns_search")
+    val peopleGrid = rememberLazyGridState()
 
     val snackbar = remember { SnackbarHostState() }
     val trashWithUndo = rememberTrashWithUndo(snackbar) { selected = emptySet() }
     val albumActions = rememberAlbumActions { selected = emptySet() }
     val addToCollection = rememberAddToCollection(snackbar)
     val removeFromCollection = rememberRemoveFromCollection(snackbar)
+    val notPerson = rememberNotPerson(snackbar) { exploreId = it }
     var addingToCollection by remember { mutableStateOf<List<Long>?>(null) } // the selection, while the sheet is open
     // Photos deleted by another app leave the selection, so "N selected" and its actions stay truthful
     LaunchedEffect(shown) {
@@ -185,8 +226,15 @@ private fun AlbumShell(look: Look, onLook: (Look) -> Unit) {
     var gridOrigin by remember { mutableStateOf(Offset.Zero) }
     var openedFrom by remember { mutableStateOf<Rect?>(null) }
     val gridPosition = Modifier.onGloballyPositioned { gridOrigin = it.positionInWindow() }
-    val cellOnScreen = { id: Long ->
-        val info = (if (inAlbum) albumGrid else photosGrid).layoutInfo
+    val cellOnScreen = cell@{ id: Long ->
+        // the grid that's on screen; none for screens without one (Explore's own page), so the viewer fades instead
+        val grid = when {
+            search != null -> searchGrid
+            inAlbum -> openGrid
+            tab == Tab.Photos -> photosGrid
+            else -> return@cell null
+        }
+        val info = grid.layoutInfo
         info.visibleItemsInfo.find { it.key == id }?.let { cell ->
             // cell offsets start after the top content padding; viewportStartOffset is minus that padding
             Rect(gridOrigin + Offset(cell.offset.x.toFloat(), (cell.offset.y - info.viewportStartOffset).toFloat()), cell.size.toSize())
@@ -198,7 +246,9 @@ private fun AlbumShell(look: Look, onLook: (Look) -> Unit) {
         viewerId = m.id
     }
     BackHandler(selecting) { selected = emptySet() }
-    BackHandler(inAlbum && !selecting) { albumId = null }
+    BackHandler(inAlbum && !selecting) { closeAlbum() }
+    BackHandler(tab == Tab.Explore && allPlaces && !inAlbum) { allPlaces = false }
+    BackHandler(search != null && !selecting) { searchOpen = false }
 
     Box(Modifier.fillMaxSize()) {
         Scaffold(
@@ -218,6 +268,10 @@ private fun AlbumShell(look: Look, onLook: (Look) -> Unit) {
                                     context.startSafely(shareIntent(items))
                                 }
                             }) { Icon(Icons.Outlined.Share, "Share") }
+                            if (openPerson != null) IconButton(onClick = {
+                                notPerson(openPerson, shown.filter { it.id in selected }.map { it.id })
+                                selected = emptySet()
+                            }) { Icon(Icons.Outlined.PersonRemove, notPersonLabel(openPerson)) }
                             if (openCollection != null) {
                                 IconButton(onClick = {
                                     removeFromCollection(openCollection, shown.filter { it.id in selected }.map { it.id })
@@ -252,7 +306,10 @@ private fun AlbumShell(look: Look, onLook: (Look) -> Unit) {
                                 trashWithUndo(items)
                             }) { Icon(Icons.Outlined.Delete, "Delete") }
                         }
-                        inAlbum -> TitleBar(album?.name ?: special?.title ?: collection?.name.orEmpty(), onBack = { albumId = null })
+                        search != null -> SearchBar(search, onBack = { searchOpen = false })
+                        openPerson != null -> PersonTitleBar(openPerson, onBack = closeAlbum) { exploreId = it } // merging opens the merged person
+                        inAlbum -> TitleBar(album?.name ?: special?.title ?: collection?.name ?: smart?.title.orEmpty(), onBack = closeAlbum)
+                        tab == Tab.Explore && allPlaces -> TitleBar("Places", onBack = { allPlaces = false })
                         else -> TitleBar(tab.name) {
                             val icons = LocalLook.current.icons
                             if (tab == Tab.Photos && photos.isNotEmpty()) {
@@ -262,7 +319,10 @@ private fun AlbumShell(look: Look, onLook: (Look) -> Unit) {
                                 }) { Icon(icons.calendar, "Calendar") }
                             }
                             if (tab == Tab.Albums) AlbumSortButton()
-                            IconButton(onClick = {}) { Icon(icons.search, "Search") }
+                            IconButton(onClick = {
+                                searchOpen = true
+                                CrashLog.note("open search")
+                            }) { Icon(icons.search, "Search") }
                             IconButton(onClick = {
                                 settingsOpen = true
                                 CrashLog.note("open settings")
@@ -273,7 +333,7 @@ private fun AlbumShell(look: Look, onLook: (Look) -> Unit) {
                 }
             },
             bottomBar = {
-                if (!selecting) {
+                if (!selecting && search == null) {
                     val icons = LocalLook.current.icons
                     NavigationBar {
                         Tab.entries.forEach { t ->
@@ -281,6 +341,10 @@ private fun AlbumShell(look: Look, onLook: (Look) -> Unit) {
                                 selected = tab == t,
                                 onClick = {
                                     if (tab == t && t == Tab.Albums) albumId = null // tapping Albums again goes back to the list
+                                    if (tab == t && t == Tab.Explore) {
+                                        exploreId = null
+                                        allPlaces = false
+                                    }
                                     tab = t
                                     CrashLog.note("tab ${t.name}")
                                 },
@@ -304,20 +368,26 @@ private fun AlbumShell(look: Look, onLook: (Look) -> Unit) {
         ) { padding ->
             when {
                 access == Access.None -> PermissionScreen(Modifier.padding(padding)) { askAccess.launch(mediaPermissions) }
+                search != null -> SearchContent(search, searchColumns, searchGrid, selected, open, select, padding, gridPosition)
                 // Albums still opens when empty, so Recently deleted stays reachable after deleting everything
                 loaded != null && media.isEmpty() && tab != Tab.Albums -> Message("No photos or videos yet", Modifier.padding(padding))
                 tab == Tab.Photos -> MediaGrid(photos, photosColumns, photosGrid, selected, open, select, padding, gridPosition)
-                inAlbum && loaded != null && albumMedia.isEmpty() -> Message(special?.emptyText ?: EMPTY_COLLECTION, Modifier.padding(padding))
-                inAlbum -> MediaGrid(albumMedia, albumColumns, albumGrid, selected, open, select, padding, gridPosition)
+                inAlbum && loaded != null && albumMedia.isEmpty() -> Message(special?.emptyText ?: smart?.emptyText ?: EMPTY_COLLECTION, Modifier.padding(padding))
+                inAlbum -> MediaGrid(albumMedia, albumColumns, openGrid, selected, open, select, padding, gridPosition)
                 tab == Tab.Albums -> AlbumsGrid(albums, specials, collections, albumsGrid, onOpen = {
                     CrashLog.note("open album ${Special.entries.find { s -> s.id == it }?.name ?: if (collectionIdOf(it) != null) "collection" else "folder"}")
                     albumId = it
                 }, padding, albumActions::onAlbum, albumActions::newAlbum)
-                else -> Message("People, places and things arrive in Phase 2 and 3", Modifier.padding(padding))
+                allPlaces -> PlacesScreen(placesGrid, padding, openFromExplore)
+                else -> ExploreScreen(albums, specials, exploreGrid, padding, openFromExplore, onAllPlaces = { allPlaces = true }) {
+                    PeopleSection(onOpenPerson = openFromExplore, onSeeAll = { peopleOpen = true })
+                }
             }
         }
         AlbumActionsHost(albumActions, media, albums, snackbar)
-        if (inTrash) TrashScreen(trash, onBack = { albumId = null })
+        if (inTrash) TrashScreen(trash, onBack = closeAlbum)
+        // Steps aside while a person page is open, so Back from that page lands here again
+        if (peopleOpen && tab == Tab.Explore && !inAlbum) PeopleScreen(peopleGrid, onBack = { peopleOpen = false }, onOpenPerson = openFromExplore)
         if (calendarOpen) {
             CalendarScreen(photos, onBack = { calendarOpen = false }) { day ->
                 // At 7 columns the grid has month headers only, so the day's month goes to the top

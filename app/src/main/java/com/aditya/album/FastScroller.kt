@@ -37,6 +37,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
@@ -92,6 +93,7 @@ fun FastScroller(state: LazyGridState, columns: Int, contentPadding: PaddingValu
                 }
                 Box(
                     Modifier
+                        .testTag("fast_scroller")
                         .draggable(
                             rememberDraggableState { delta ->
                                 if (track <= 0f) return@rememberDraggableState

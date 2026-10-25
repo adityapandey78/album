@@ -14,6 +14,7 @@ After that, update from inside the app: **Settings → Check for updates → Upd
 
 | Version | Phase | What's in it |
 |---|---|---|
+| 0.7.0 | 2 | Places, things and People (on-device face groups: name, merge, hide, "Not this person") in Explore · search by thing, place, person, year, month and words inside photos · release builds pre-compiled with a Baseline Profile for smooth 120/144 Hz scrolling · faster thumbnails · smaller download |
 | 0.5.1 | 1 | Updates download and install inside Album again (progress bar, checksum checked, Android confirms); dark mode text fix on Settings and other overlay screens |
 | 0.5.0 | 1 | Albums: new, rename, delete, pin, sort, hide from Photos · move or copy photos between albums (dates and location kept, name clashes renamed, never overwritten) · collections: one photo in many albums without copies · calendar view with day thumbnails, tap a day to jump there · viewer ⋮ menu: slideshow, lossless rotate (changes 2 bytes, never re-saves the photo), motion photos (Google format), Use as wallpaper or contact |
 | 0.4.0 | 1 + 2 base | Fast scrollbar with date bubble, drag to select, select a day or all, remembered zoom level · photos fly out of and back into the grid, swipe down to close, swipe up for details · Favourites, Videos, Recently deleted (restore, delete forever), Undo, optional "no pop-ups" mode · open photos from other apps · on-device index for places (offline GeoNames) and things (ML Kit), shown in a later version |
@@ -34,6 +35,42 @@ export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 ./gradlew :app:assembleRelease
 ```
 
+### Scroll performance
+
+Scrolling needs a long timeline to measure, so seed the phone or emulator first (3,000 photos over two years, needs Pillow):
+
+```bash
+python3 tools/seed_library.py
+```
+
+Quick check, no build needed: open Album on Photos, then this flings the grid and drags the fast scroller with adb and
+prints Android's own frame stats (`dumpsys gfxinfo`). At 144 Hz a frame has 6.9 ms.
+
+```bash
+tools/scroll_jank.sh
+```
+
+Full benchmark: frame timing (P50/P90/P99, overrun, janky frames) for flinging, a first fling while MediaProvider still
+has to make thumbnails, and the fast scroller, on a release-like build. Results and a Perfetto trace per run land in
+`benchmark/build/outputs/connected_android_test_additional_output/`. Debug and release-signed builds can't be installed
+over each other, so uninstall Album first. The cold-thumbnail run deletes MediaProvider's thumbnail cache, which
+Android rebuilds by itself.
+
+```bash
+./gradlew :benchmark:connectedBenchmarkReleaseAndroidTest -Pandroid.injected.androidTest.leaveApksInstalledAfterRun=true
+```
+
+After changing startup, the grid or the viewer, regenerate the Baseline Profile (code ART compiles ahead of time instead
+of interpreting it on the first scrolls) and commit `app/src/release/generated/baselineProfiles/`:
+
+```bash
+./gradlew :app:generateBaselineProfile
+```
+
+On an emulator, compare before and after on the same setup only: run it headless (`emulator -no-window`), since macOS
+slows down a hidden emulator window, and give it 4 cores and the host GPU (`hw.cpu.ncore=4`, `-gpu host`).
+
 Fonts (Inter, Outfit, Plus Jakarta Sans) are under the SIL Open Font License, see `licenses/`.
 ML Kit telemetry is stripped by R8, so the "nothing leaves the phone" guarantee applies to release builds (the APKs in Releases), not debug builds.
 Place names come from [GeoNames](https://www.geonames.org) under CC BY 4.0, see `licenses/geonames-CC-BY-4.0.txt`.
+People uses the SFace face recognition model from [OpenCV Zoo](https://github.com/opencv/opencv_zoo) under Apache 2.0, see `licenses/sface-Apache-2.0.txt`.
