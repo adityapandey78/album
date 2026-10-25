@@ -11,8 +11,20 @@ android {
         applicationId = "com.aditya.album"
         minSdk = 33 // Android 13+: READ_MEDIA_* permissions and AGSL shaders, no legacy branches
         targetSdk = 37 // Android 17
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
+    }
+
+    // Permanent release key. Path and password live in ~/.gradle/gradle.properties, never in git.
+    // Without them the release APK is built unsigned (not installable) instead of silently using another key.
+    val storeFile = providers.gradleProperty("ALBUM_STORE_FILE").orNull
+    if (storeFile != null) {
+        signingConfigs.create("release") {
+            this.storeFile = file(storeFile)
+            storePassword = providers.gradleProperty("ALBUM_STORE_PASSWORD").get()
+            keyAlias = "album"
+            keyPassword = storePassword
+        }
     }
 
     buildTypes {
@@ -20,8 +32,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
-            // ponytail: debug key until Phase 6 adds a real release keystore
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("release")
         }
     }
 
