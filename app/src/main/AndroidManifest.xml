@@ -2,9 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Internet is used ONLY by Settings > Check for updates (GitHub). The gallery itself never goes online.
-         No REQUEST_INSTALL_PACKAGES on purpose: Play Protect flags apps that install APKs as harmful. -->
+    <!-- Internet is used ONLY by Settings > Check for updates (GitHub). The gallery itself never goes online. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- In-app updates: Album installs its own newer versions through Android's installer, after Android asks.
+         Play Protect may warn about apps from unknown developers that can install apps; the user decides. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- Read-only access to photos and videos. Changes (delete, favourite) always go through MediaStore requests. -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
@@ -39,6 +41,10 @@
             tools:node="merge">
             <meta-data android:name="androidx.work.WorkManagerInitializer" tools:node="remove" />
         </provider>
+
+        <receiver
+            android:name=".InstallResultReceiver"
+            android:exported="false" />
 
         <activity
             android:name=".MainActivity"

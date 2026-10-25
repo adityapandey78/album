@@ -20,6 +20,7 @@ import androidx.compose.material.icons.rounded.Photo
 import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
@@ -119,7 +120,11 @@ fun AlbumTheme(look: Look, content: @Composable () -> Unit) {
         Look.You -> if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
     }
     CompositionLocalProvider(LocalLook provides spec) {
-        MaterialTheme(colorScheme = colors, typography = Typography().withFont(spec.font), content = content)
+        MaterialTheme(colorScheme = colors, typography = Typography().withFont(spec.font)) {
+            // Screens drawn over the Scaffold (Settings, Trash, Calendar, ...) aren't inside a Surface, so text with no
+            // colour of its own would fall back to black and vanish in dark mode. Default every screen to the theme's.
+            CompositionLocalProvider(LocalContentColor provides colors.onBackground, content = content)
+        }
     }
 }
 

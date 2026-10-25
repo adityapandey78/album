@@ -12,8 +12,8 @@ android {
         applicationId = "com.aditya.album"
         minSdk = 33 // Android 13+: READ_MEDIA_* permissions and AGSL shaders, no legacy branches
         targetSdk = 37 // Android 17
-        versionCode = 6
-        versionName = "0.5.0"
+        versionCode = 7
+        versionName = "0.5.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // 64-bit ARM only: the phone and the emulator. Each extra ABI would add another 11 MB ML Kit library.
         ndk { abiFilters += "arm64-v8a" }

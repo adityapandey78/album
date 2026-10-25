@@ -47,6 +47,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import android.provider.Settings
+import androidx.compose.material3.LinearProgressIndicator
 
 @Composable
 fun SettingsScreen(look: Look, onLook: (Look) -> Unit, onBack: () -> Unit) {
@@ -142,46 +144,69 @@ private fun UpdateSection() {
     val current = remember { Updater.currentVersion(context) }
     var status by remember { mutableStateOf("You have version $current") }
     var release by remember { mutableStateOf<Updater.Release?>(null) }
+    var progress by remember { mutableStateOf<Float?>(null) }
     var busy by remember { mutableStateOf(false) }
+    var failed by remember { mutableStateOf(false) }
 
-    Text(status, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Text(Updater.installMessage ?: status, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     release?.notes?.takeIf { it.isNotBlank() }?.let {
         Text(it, Modifier.padding(top = 4.dp), style = MaterialTheme.typography.bodySmall)
     }
+    progress?.let { LinearProgressIndicator(progress = { it }, Modifier.fillMaxWidth().padding(top = 12.dp)) }
 
     val available = release
-    OutlinedButton(
-        modifier = Modifier.padding(top = 12.dp),
-        enabled = !busy,
-        onClick = {
-            if (available != null) {
-                // The browser downloads the APK; tapping it in the download notification opens Android's installer.
-                CrashLog.note("update to ${available.version}")
-                context.startSafely(Intent(Intent.ACTION_VIEW, Uri.parse(available.url)))
-                status = "Downloading ${available.version} in your browser. When it finishes, tap Open, then Update."
-                return@OutlinedButton
-            }
-            scope.launch {
-                busy = true
-                CrashLog.note("check for updates")
-                status = "Checking…"
-                status = runCatching { withContext(Dispatchers.IO) { Updater.latest() } }.fold(
-                    onSuccess = { latest ->
-                        when {
-                            latest == null -> "No downloadable update found"
-                            Updater.isNewer(latest.version, current) -> {
-                                release = latest
-                                "Version ${latest.version} is available (you have $current)"
-                            }
-                            else -> "You're on the latest version ($current)"
-                        }
-                    },
-                    onFailure = { "Couldn't reach GitHub. Check your internet and try again." },
-                )
-                busy = false
-            }
-        },
-    ) { Text(if (available == null) "Check for updates" else "Update to ${available.version}") }
+    Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(
+            enabled = !busy,
+            onClick = {
+                scope.launch {
+                    busy = true
+                    failed = false
+                    Updater.installMessage = null
+                    if (available == null) {
+                        CrashLog.note("check for updates")
+                        status = "Checking…"
+                        status = runCatching { withContext(Dispatchers.IO) { Updater.latest() } }.fold(
+                            onSuccess = { latest ->
+                                when {
+                                    latest == null -> "No downloadable update found"
+                                    Updater.isNewer(latest.version, current) -> {
+                                        release = latest
+                                        "Version ${latest.version} is available (you have $current)"
+                                    }
+                                    else -> "You're on the latest version ($current)"
+                                }
+                            },
+                            onFailure = { "Couldn't reach GitHub. Check your internet and try again." },
+                        )
+                    } else if (!context.packageManager.canRequestPackageInstalls()) {
+                        // One-time Android permission: "Allow from this source" for Album
+                        context.startSafely(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}")))
+                        status = "Turn on \"Allow from this source\", come back, and tap Update again"
+                    } else {
+                        CrashLog.note("update to ${available.version}")
+                        status = "Downloading ${available.version}…"
+                        progress = 0f
+                        status = runCatching {
+                            withContext(Dispatchers.IO) { Updater.downloadAndInstall(context, available) { progress = it } }
+                        }.fold(
+                            onSuccess = { "Confirm on the next screen. Album will close and update." },
+                            onFailure = {
+                                failed = true
+                                "Update failed: ${it.message}"
+                            },
+                        )
+                        progress = null
+                    }
+                    busy = false
+                }
+            },
+        ) { Text(if (available == null) "Check for updates" else "Update to ${available.version}") }
+        // Only when the in-app install didn't work: the release page, to download it another way
+        if (available != null && (failed || Updater.installMessage != null)) {
+            TextButton(onClick = { context.startSafely(Intent(Intent.ACTION_VIEW, Uri.parse(available.page))) }) { Text("Download page") }
+        }
+    }
 }
 
 @Composable

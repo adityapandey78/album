@@ -8,12 +8,13 @@ Settings → Check for updates, which talks to this GitHub repo's Releases.
 
 Get the latest APK from **[Releases](https://github.com/adityapandey78/album/releases/latest)**: open it on the phone, tap the `.apk`, and allow "Install unknown apps" when asked.
 
-After that, update from inside the app: **Settings → Check for updates**.
+After that, update from inside the app: **Settings → Check for updates → Update**. Album downloads the new version itself and Android asks you to confirm. The first time, Android asks you to allow installs from Album.
 
 > Upgrading from 0.1.0: uninstall it first. 0.2.0 is signed with the permanent release key, so Android won't install it over 0.1.0. This is a one-time step.
 
 | Version | Phase | What's in it |
 |---|---|---|
+| 0.5.1 | 1 | Updates download and install inside Album again (progress bar, checksum checked, Android confirms); dark mode text fix on Settings and other overlay screens |
 | 0.5.0 | 1 | Albums: new, rename, delete, pin, sort, hide from Photos · move or copy photos between albums (dates and location kept, name clashes renamed, never overwritten) · collections: one photo in many albums without copies · calendar view with day thumbnails, tap a day to jump there · viewer ⋮ menu: slideshow, lossless rotate (changes 2 bytes, never re-saves the photo), motion photos (Google format), Use as wallpaper or contact |
 | 0.4.0 | 1 + 2 base | Fast scrollbar with date bubble, drag to select, select a day or all, remembered zoom level · photos fly out of and back into the grid, swipe down to close, swipe up for details · Favourites, Videos, Recently deleted (restore, delete forever), Undo, optional "no pop-ups" mode · open photos from other apps · on-device index for places (offline GeoNames) and things (ML Kit), shown in a later version |
 | 0.3.1 | 1 | Updates download through the browser, so Play Protect no longer flags Album |
