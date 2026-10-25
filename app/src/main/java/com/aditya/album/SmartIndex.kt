@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.ColorSpace
 import android.graphics.ImageDecoder
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Process
 import android.os.SystemClock
@@ -43,7 +44,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -62,6 +62,10 @@ private const val TEXT_PX = 2048
 // Prefs key holding the id of the photo being decoded in this process. A native crash in the decoder kills the app before
 // it can catch anything, so the next pass finds the id still there and skips that photo's text instead of crashing again.
 private const val DECODING = "decoding"
+// Bump when Places changes how it names a GPS point: saved points are named again (no re-analysing), videos read again.
+private const val PLACES_VERSION = 2 // 2: state borders, regions far from towns, video GPS
+private const val PLACES = "places"
+private const val JOB = "Places and things" // on the Organising card
 
 /** How far the current indexing pass has got. (0, 0) when there's nothing to do. */
 data class IndexProgress(val done: Int, val total: Int)
@@ -70,6 +74,14 @@ data class IndexProgress(val done: Int, val total: Int)
 data class MediaStamp(val id: Long, val isVideo: Boolean, val modified: Long, val size: Long, val screenshot: Boolean = false)
 
 class IndexPlan(val analyse: List<MediaStamp>, val remove: List<Long>)
+
+/** A video's location as MediaMetadataRetriever gives it (ISO 6709, "+12.9716+077.5946/" or with altitude), or null. */
+fun iso6709(location: String): DoubleArray? {
+    val m = Regex("^([+-]\\d+(?:\\.\\d+)?)([+-]\\d+(?:\\.\\d+)?)").find(location) ?: return null
+    val lat = m.groupValues[1].toDouble()
+    val lng = m.groupValues[2].toDouble()
+    return doubleArrayOf(lat, lng).takeIf { lat in -90.0..90.0 && lng in -180.0..180.0 && !(lat == 0.0 && lng == 0.0) }
+}
 
 /**
  * Which items need analysing (new, edited, analysed by an older version, or not yet located now that we may)
@@ -113,6 +125,11 @@ object SmartIndex {
     private val _progress = MutableStateFlow(IndexProgress(0, 0))
     val progress: StateFlow<IndexProgress> = _progress.asStateFlow()
 
+    private fun progress(p: IndexProgress) {
+        _progress.value = p
+        IndexStatus.report(JOB, p.done, p.total)
+    }
+
     /**
      * Call once from Application.onCreate. Indexing starts after the gallery's first load (so only once photo access
      * is granted) and runs again whenever the photos change. Unique work with KEEP: a running pass is never doubled.
@@ -154,6 +171,14 @@ object SmartIndex {
     /** Photos with a word starting with [prefix] in them. [prefix] must be letters and digits only (no FTS syntax). */
     fun idsWithText(prefix: String): Set<Long> = dao.idsWithText("$prefix*").toSet()
 
+    /**
+     * Forgets [ids] at once (labels, OCR text, place) instead of on the next pass: for photos moved into the Private
+     * safe, so an ID card's text doesn't stay readable in the index.
+     */
+    suspend fun forget(ids: Collection<Long>) = withContext(Dispatchers.IO) {
+        if (::app.isInitialized) ids.chunked(500).forEach { dao.remove(it) } // under SQLite's 999-variable limit
+    }
+
     /** Text read from photo [mediaId], or null when it has none (or isn't indexed yet). Blocking: call off the main thread. */
     fun textOf(mediaId: Long): String? = dao.text(mediaId)
 
@@ -177,9 +202,15 @@ object SmartIndex {
             do {
                 // Never act on a failed or empty query: either would wipe the index.
                 val found = query()?.takeIf { it.isNotEmpty() } ?: return@withContext
+                if (marks.getInt(PLACES, 1) < PLACES_VERSION) {
+                    // Places are named differently now: name every saved GPS point again, and look in the videos for theirs
+                    dao.setPlaces(dao.located().associate { it.id to places.value.nearest(it.lat, it.lng) })
+                    found.filter { it.isVideo }.map { it.id }.chunked(500).forEach { dao.unlocate(it) }
+                    marks.edit(commit = true) { putInt(PLACES, PLACES_VERSION) }
+                }
                 val plan = planIndex(found, dao.stamps(), INDEX_VERSION, canLocate)
                 if (!partial) plan.remove.chunked(500).forEach { dao.remove(it) }
-                _progress.value = IndexProgress(0, plan.analyse.size)
+                progress(IndexProgress(0, plan.analyse.size))
                 for (batch in plan.analyse.chunked(BATCH)) {
                     val results = batch.map { item ->
                         try {
@@ -195,13 +226,14 @@ object SmartIndex {
                     dao.save(results.map { it.item }, results.flatMap { it.labels }, results.mapNotNull { it.text })
                     failed += results.count { it.item.category == null }
                     read += results.count { it.text != null }
-                    _progress.update { it.copy(done = it.done + batch.size) }
+                    progress(_progress.value.let { it.copy(done = it.done + batch.size) })
                 }
                 analysed += plan.analyse.size
             } while (plan.analyse.isNotEmpty()) // photos taken during the pass are picked up before it ends
         } finally {
             labeler.close()
             reader.close()
+            IndexStatus.report(JOB, 0, 0) // finished or stopped (battery low): off the card
         }
         if (analysed > 0) {
             val ms = (SystemClock.elapsedRealtime() - started) / analysed
@@ -234,7 +266,7 @@ object SmartIndex {
     private fun unreadable(item: MediaStamp) =
         IndexedItem(item.id, item.modified, item.size, INDEX_VERSION, category = null, lat = null, lng = null, located = true, place = null)
 
-    // Videos are labelled from their thumbnail frame. Their GPS (MP4 metadata, not EXIF) and text aren't read yet.
+    // Videos are labelled from their thumbnail frame and located from their metadata. Their text isn't read.
     private suspend fun analyse(
         item: MediaStamp,
         labeler: ImageLabeler,
@@ -254,7 +286,7 @@ object SmartIndex {
             ?.map { it.text to it.confidence }
         val category = if (thumb != null && labels != null) categoryOf(labels, brightnessOf(thumb)) else null
         thumb?.recycle()
-        val gps = if (canLocate && !item.isVideo) latLng(uri) else null
+        val gps = if (!canLocate) null else if (item.isVideo) videoLatLng(uri) else latLng(uri)
         val row = IndexedItem(
             id = item.id,
             modified = item.modified,
@@ -263,7 +295,7 @@ object SmartIndex {
             category = category,
             lat = gps?.get(0),
             lng = gps?.get(1),
-            located = canLocate || item.isVideo,
+            located = canLocate,
             place = gps?.let { places.value.nearest(it[0], it[1]) },
         )
         val text = if (readText && labels != null && !item.isVideo && mayHaveText(labels, item.screenshot)) textIn(item.id, uri, reader) else null
@@ -323,6 +355,16 @@ object SmartIndex {
     private fun latLng(uri: Uri): DoubleArray? = try {
         app.contentResolver.openFileDescriptor(MediaStore.setRequireOriginal(uri), "r")?.use { ExifInterface(it.fileDescriptor).latLong }
             ?.takeUnless { it[0] == 0.0 && it[1] == 0.0 } // some cameras write 0,0 when they had no fix
+    } catch (e: Exception) {
+        null
+    }
+
+    // A video's location is hidden the same way as a photo's GPS.
+    private fun videoLatLng(uri: Uri): DoubleArray? = try {
+        MediaMetadataRetriever().use { r ->
+            r.setDataSource(app, MediaStore.setRequireOriginal(uri))
+            r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_LOCATION)?.let(::iso6709)
+        }
     } catch (e: Exception) {
         null
     }

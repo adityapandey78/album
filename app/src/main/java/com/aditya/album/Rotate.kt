@@ -12,6 +12,7 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -55,33 +56,45 @@ private val edits = mutableStateMapOf<Uri, Int>()
 fun editVersion(uri: Uri) = edits[uri] ?: 0
 
 /**
- * Returns a function that turns a photo a quarter clockwise (true) or anticlockwise without re-encoding it: only the
- * Exif orientation tag changes, after Android's write permission (no pop-up with Media management access).
- * [onMessage] says why when a photo can't be turned (the viewer shows it in its snackbar).
+ * Returns a function that turns a photo by quarter turns, clockwise for positive counts, without re-encoding it: only
+ * the Exif orientation tag changes, after Android's write permission (no pop-up with Media management access).
+ * [onMessage] says why when a photo can't be turned (the viewer shows it in its snackbar). Each call's `done` hears
+ * whether the file was turned: false when refused, cancelled at Android's pop-up, already busy, or the write failed.
  */
 @Composable
-fun rememberRotate(onMessage: (String) -> Unit): (Media, Boolean) -> Unit {
+fun rememberRotate(onMessage: (String) -> Unit): (m: Media, quarters: Int, done: (Boolean) -> Unit) -> Unit {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     // Saveable so they survive the activity being recreated while Android's pop-up is open
     var pending by rememberSaveable { mutableStateOf<String?>(null) }
-    var clockwise by rememberSaveable { mutableStateOf(false) }
-    // Not saved: if the screen is recreated mid-write the write still finishes, and rotate must not stay locked
+    var turns by rememberSaveable { mutableIntStateOf(0) }
+    // Not saved: if the screen is recreated mid-write the write still finishes, and rotate must not stay locked.
+    // A recreated screen has no twist left to settle, so losing [finish] then is fine.
     var busy by remember { mutableStateOf(false) }
+    var finish by remember { mutableStateOf<((Boolean) -> Unit)?>(null) }
+    fun finished(ok: Boolean) {
+        finish?.invoke(ok)
+        finish = null
+    }
     val write = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
         val uri = pending?.let(Uri::parse)
         pending = null
-        if (result.resultCode != Activity.RESULT_OK || uri == null) return@rememberLauncherForActivityResult
+        if (result.resultCode != Activity.RESULT_OK || uri == null) return@rememberLauncherForActivityResult finished(false)
         busy = true
         scope.launch {
-            if (!rotate(context, uri, clockwise)) onMessage("Couldn't rotate this photo")
+            val ok = rotate(context, uri, turns)
+            if (!ok) onMessage("Couldn't rotate this photo")
             busy = false
+            finished(ok)
         }
     }
-    return rotate@{ m, turnClockwise ->
-        if (pending != null || busy) return@rotate // one at a time
+    return rotate@{ m, quarters, done ->
+        if (pending != null || busy) return@rotate done(false) // one at a time
+        val clockwiseTurns = Math.floorMod(quarters, 4)
+        if (clockwiseTurns == 0) return@rotate done(true) // a full turn changes nothing
         pending = m.uri.toString()
-        clockwise = turnClockwise
+        turns = clockwiseTurns
+        finish = done
         scope.launch {
             // Checked before asking for write access, so Android's pop-up never comes up for a photo we'd then refuse
             val refusal = withContext(Dispatchers.IO) { whyNotRotatable(context.contentResolver, m.uri) }
@@ -89,26 +102,30 @@ fun rememberRotate(onMessage: (String) -> Unit): (Media, Boolean) -> Unit {
                 CrashLog.note("rotate refused: $refusal")
                 onMessage(refusal)
                 pending = null
-                return@launch
+                return@launch finished(false)
             }
-            CrashLog.note("rotate ${if (turnClockwise) "right" else "left"}")
+            CrashLog.note("rotate ${listOf("", "right", "half", "left")[clockwiseTurns]}")
             write.launch(IntentSenderRequest.Builder(MediaStore.createWriteRequest(context.contentResolver, listOf(m.uri))).build())
         }
     }
 }
 
-/** Writes and verifies the new orientation, then reloads every cached copy. Finishes even if the viewer closes meanwhile. */
-private suspend fun rotate(context: Context, uri: Uri, clockwise: Boolean): Boolean = withContext(NonCancellable + Dispatchers.IO) {
+/**
+ * Writes and verifies the new orientation, [turns] quarters clockwise (1 to 3), then reloads every cached copy.
+ * Finishes even if the viewer closes meanwhile.
+ */
+private suspend fun rotate(context: Context, uri: Uri, turns: Int): Boolean = withContext(NonCancellable + Dispatchers.IO) {
     val resolver = context.contentResolver
     val before = generationOf(resolver, uri)
     try {
-        writeOrientation(resolver, uri, clockwise)
+        writeOrientation(resolver, uri, turns)
     } catch (e: Exception) {
         CrashLog.note("rotate failed: $e")
         return@withContext false
     }
     // People keeps confirmed faces as boxes in the upright photo: turn them with it, or names could swap between faces
-    People.rotated(ContentUris.parseId(uri), clockwise)
+    val id = ContentUris.parseId(uri)
+    if (turns == 3) People.rotated(id, clockwise = false) else repeat(turns) { People.rotated(id, clockwise = true) }
     // MediaStore rescans the file once it's closed (orientation, size, Android's thumbnail): reload after that
     withTimeoutOrNull(3_000) { Gallery.changes(resolver).first { generationOf(resolver, uri) != before } }
     withContext(Dispatchers.Main) { reloadEdited(context, uri) }
@@ -150,16 +167,20 @@ fun orientationBytes(stored: ByteArray, orientation: Int): ByteArray? = when {
 }
 
 /**
- * Turns [uri]'s Exif orientation a quarter by overwriting just its 2 bytes in place, then reads it back. One tiny
- * write means the photo can never be left half-written (even if the phone dies mid-way), and nothing else in the
- * file moves: pixels, other metadata, a motion photo's video. Throws if anything is off, before writing if possible.
+ * Turns [uri]'s Exif orientation [turns] quarters clockwise by overwriting just its 2 bytes in place, then reads it
+ * back. One tiny write means the photo can never be left half-written (even if the phone dies mid-way), and nothing
+ * else in the file moves: pixels, other metadata, a motion photo's video. Throws if anything is off, before writing if
+ * possible.
  */
-private fun writeOrientation(resolver: ContentResolver, uri: Uri, clockwise: Boolean) {
+private fun writeOrientation(resolver: ContentResolver, uri: Uri, turns: Int) {
+    var slot: Pair<Long, ByteArray>? = null // where the 2 bytes are and what they were, to put back if the check fails
     val target = resolver.openFileDescriptor(uri, "rw")!!.use { file ->
         val fd = file.fileDescriptor
         val exif = ExifInterface(fd)
         val (offset, stored) = checkNotNull(orientationSlot(exif)) { "no orientation value to patch" }
-        val turned = rotatedOrientation(exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL), clockwise)
+        slot = offset to stored
+        val start = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+        val turned = (1..turns).fold(start) { tag, _ -> rotatedOrientation(tag, clockwise = true) }
         // Belt and braces: the 2 bytes at that offset must be the orientation value we're about to replace
         val there = ByteArray(2)
         check(Os.pread(fd, there, 0, 2, offset) == 2 && there.contentEquals(stored)) { "orientation isn't where Exif says it is" }
@@ -169,7 +190,16 @@ private fun writeOrientation(resolver: ContentResolver, uri: Uri, clockwise: Boo
         turned
     }
     val saved = resolver.openFileDescriptor(uri, "r")!!.use { ExifInterface(it.fileDescriptor).getAttributeInt(ExifInterface.TAG_ORIENTATION, 0) }
-    check(saved == target) { "orientation reads back as $saved, not $target" }
+    if (saved != target) {
+        // Put the original 2 bytes back, so a rotate that failed its check leaves the photo exactly as it was
+        slot?.let { (offset, stored) ->
+            resolver.openFileDescriptor(uri, "rw")!!.use {
+                Os.pwrite(it.fileDescriptor, stored, 0, 2, offset)
+                Os.fsync(it.fileDescriptor)
+            }
+        }
+        error("orientation reads back as $saved, not $target")
+    }
 }
 
 /** MediaStore's change counter for [uri]: it goes up each time the file is rescanned after a change. */

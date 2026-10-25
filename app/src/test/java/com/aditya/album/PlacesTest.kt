@@ -24,6 +24,21 @@ class PlacesTest {
         assertEquals("Hosūr", city(12.7409, 77.8253)) // Tamil Nadu, 30 km from Bengaluru
     }
 
+    @Test fun aCitysReachStopsAtTheStateBorder() {
+        assertEquals("Delhi", city(28.6315, 77.2167)) // Connaught Place
+        assertEquals("Noida", city(28.5708, 77.3261)) // Uttar Pradesh, inside Delhi's reach
+        assertEquals("Ghāziābād", city(28.6692, 77.4538)) // also inside it, from the other side
+        assertEquals("Mohali", city(30.7046, 76.7179)) // Punjab, inside Chandigarh's reach
+        assertEquals("Hoboken", city(40.7440, -74.0324)) // New Jersey, across the river from New York
+        assertEquals("New York City", city(40.7580, -73.9855)) // Times Square, with Hoboken's state across that river
+    }
+
+    @Test fun farFromEveryTownTheStateNamesIt() {
+        assertEquals(Place("Andaman and Nicobar", "Andaman and Nicobar", "IN", "India"), places.nearest(11.9761, 92.9876)) // Havelock, not Port Blair 43 km off
+        assertEquals("Himachal Pradesh", city(32.4720, 77.6200)) // Chandratal in Spiti, 45 km from Manali
+        assertEquals("Calangute", city(15.5553, 73.7517)) // Baga beach: a town nearby is still the town
+    }
+
     @Test fun seaNearTheCoastGetsTheCoastalCity() {
         assertEquals("Mumbai", city(18.95, 72.6)) // about 30 km out in the Arabian Sea
     }
@@ -35,7 +50,7 @@ class PlacesTest {
 
     @Test fun searchWrapsAcrossTheDateLineAndPoles() {
         val towns = Places.parse(sequenceOf("0.0\t179.9\tEast\t\tXX\tX\t5000", "89.9\t10.0\tNorth\t\tXX\tX\t5000"))
-        assertEquals("East", towns.nearest(0.0, -179.9)?.city) // 22 km away, on the other side of the 180th meridian
+        assertEquals("East", towns.nearest(0.0, -179.95)?.city) // 17 km away, on the other side of the 180th meridian
         assertEquals("North", towns.nearest(89.95, -170.0)?.city) // 17 km away, across the pole
         assertNull(towns.nearest(0.0, -179.0))
     }

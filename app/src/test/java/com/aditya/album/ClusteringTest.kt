@@ -155,6 +155,28 @@ class ClusteringTest {
         assertEquals(AUTO_CLUSTERS + 41, cluster(listOf(face(2, person = 1)), none, nextAuto = first.nextAuto).changed[2])
     }
 
+    @Test fun twoFacesInOnePhotoNeverShareAGroup() {
+        val twin = face(1, person = 0)
+        val faces = listOf(twin, FaceVector(2, mediaId = 1, box, twin.embedding, 0)) + (3L..6L).map { face(it, person = 0) }
+        val clusters = apply(faces, cluster(faces, none))
+        assertNotEquals(clusters[1], clusters[2]) // identical faces, but one photo: two people
+        // Nor do two groups merge across a shared photo, even when everyone else in them is alike
+        val a = (1L..4L).map { face(it, person = 1, cluster = AUTO_CLUSTERS + 1) }
+        val b = listOf(face(5, person = 1, mediaId = 1), face(6, person = 1))
+        val merged = apply(a + b, cluster(a + b, none))
+        assertNotEquals(merged[1], merged[5])
+    }
+
+    @Test fun aLooseGroupOfLookAlikesStopsGrowing() {
+        // Each face is a common direction plus its own, so any two score 1/3: below SFace's same-person bar. Their sum
+        // points along the common direction, so a new look-alike scores over SAME_PERSON against the centroid.
+        fun lookAlike(i: Int) = unit(FloatArray(128) { if (it == 0) 1f else if (it == i) 1.4142135f else 0f })
+        val group = (1..8).map { FaceVector(it.toLong(), it.toLong(), box, lookAlike(it), AUTO_CLUSTERS + 1) }
+        val next = FaceVector(9, 9, box, lookAlike(9), 0)
+        assertTrue(dot(unit(FloatArray(128) { i -> group.sumOf { it.embedding[i].toDouble() }.toFloat() }), next.embedding) > SAME_PERSON)
+        assertNotEquals(AUTO_CLUSTERS + 1, cluster(group + next, none).changed[9])
+    }
+
     private fun assertBox(expected: FaceBox, actual: FaceBox) = assertArrayEquals(
         floatArrayOf(expected.left, expected.top, expected.right, expected.bottom),
         floatArrayOf(actual.left, actual.top, actual.right, actual.bottom),

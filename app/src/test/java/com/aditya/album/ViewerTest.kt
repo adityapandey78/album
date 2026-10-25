@@ -1,5 +1,6 @@
 package com.aditya.album
 
+import androidx.compose.ui.geometry.Size
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -65,5 +66,45 @@ class ViewerWordsTest {
         assertEquals("HEIC", fileFormat("IMG_1.heic", null))
         assertEquals("MP4", fileFormat("VID", "video/mp4")) // a name from another app, without an extension
         assertNull(fileFormat("VID", null))
+    }
+}
+
+class TwistTest {
+    @Test fun aSmallTwistDoesNothingThenFollowsWithoutAJump() {
+        assertEquals(0f, twistAngle(10f), 0f) // pinching twists a little
+        assertEquals(0f, twistAngle(-15f), 0f)
+        assertEquals(1f, twistAngle(16f), 0.001f)
+        assertEquals(-90f, twistAngle(-105f), 0.001f)
+    }
+
+    @Test fun releaseSettlesOnTheNearestQuarter() {
+        assertEquals(0, nearestQuarter(44f))
+        assertEquals(1, nearestQuarter(46f))
+        assertEquals(-1, nearestQuarter(-80f))
+        assertEquals(2, nearestQuarter(200f))
+        assertEquals(4, nearestQuarter(350f)) // a full turn: the viewer writes nothing
+    }
+
+    @Test fun ticksOnReachingEachQuarterButNotOnLeavingOne() {
+        assertEquals(true, reachesQuarter(89f, 90f))
+        assertEquals(true, reachesQuarter(91f, 89f)) // back through it
+        assertEquals(true, reachesQuarter(-89f, -91f))
+        assertEquals(true, reachesQuarter(1f, -1f)) // back to upright
+        assertEquals(false, reachesQuarter(90f, 91f)) // already ticked at 90
+        assertEquals(false, reachesQuarter(0f, -1f)) // the twist starts at 0
+        assertEquals(false, reachesQuarter(10f, 80f))
+    }
+
+    @Test fun aTurnedPhotoFitsAndEndsAtItsRotatedSize() {
+        val box = Size(1080f, 2400f)
+        val landscape = fitRect(4000, 3000, box).size // 1080 x 810
+        assertEquals(1f, twistScale(landscape, box, 0f), 0.001f)
+        // a quarter turn: exactly the size the rotated (now portrait) photo is drawn at once it reloads
+        val portrait = fitRect(3000, 4000, box).size
+        assertEquals(portrait.width / landscape.height, twistScale(landscape, box, 90f), 0.001f)
+        assertEquals(1f, twistScale(landscape, box, 180f), 0.001f)
+        // a square at 45° needs √2 of the room, so it shrinks to fit
+        assertEquals(1 / Math.sqrt(2.0).toFloat(), twistScale(Size(100f, 100f), Size(100f, 100f), 45f), 0.001f)
+        assertEquals(1f, twistScale(Size.Zero, box, 30f), 0f) // nothing drawn yet
     }
 }

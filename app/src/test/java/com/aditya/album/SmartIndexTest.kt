@@ -1,6 +1,8 @@
 package com.aditya.album
 
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class SmartIndexTest {
@@ -30,5 +32,14 @@ class SmartIndexTest {
         val plan = planIndex(listOf(media(2)), listOf(row(1), row(2), row(3)), version = 1, canLocate = true)
         assertEquals(listOf(1L, 3L), plan.remove)
         assertEquals(emptyList<Long>(), plan.analyse.map { it.id })
+    }
+
+    @Test fun readsVideoLocationInIso6709() {
+        assertArrayEquals(doubleArrayOf(12.9716, 77.5946), iso6709("+12.9716+077.5946/"), 1e-9)
+        assertArrayEquals(doubleArrayOf(37.422, -122.0841), iso6709("+37.4220-122.0841+012.000/"), 1e-9) // with altitude
+        assertArrayEquals(doubleArrayOf(-33.8688, 151.2093), iso6709("-33.8688+151.2093/"), 1e-9)
+        assertNull(iso6709("+00.0000+000.0000/")) // a camera without a fix
+        assertNull(iso6709("+95.0000+010.0000/"))
+        assertNull(iso6709(""))
     }
 }

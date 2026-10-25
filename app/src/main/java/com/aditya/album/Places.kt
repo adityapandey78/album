@@ -18,35 +18,43 @@ data class Place(val city: String, val admin1: String, val countryCode: String, 
 class Places private constructor(private val towns: List<Town>, private val cellStart: IntArray) {
     private class Town(val lat: Double, val lng: Double, val radius: Double, val place: Place)
 
-    /** The town a GPS point belongs to, or null when none is within [MAX_KM] (open sea, remote mountains). */
+    /**
+     * The town a GPS point belongs to; its state or region when every town is far off (a trek, a beach on an island);
+     * null when no town is within [MAX_KM] (open sea). Big cities cover more ground, so Bandra and Powai are Mumbai, not
+     * the small suburb whose centre is nearest. That reach stops at the state border, though: where the point is also
+     * inside a town of another state, the state is the one whose town it is deeper inside, so Noida stays Uttar Pradesh
+     * instead of becoming Delhi while Ghaziabad's edge stays Ghaziabad.
+     */
     fun nearest(lat: Double, lng: Double): Place? {
         val dLat = MAX_KM / KM_PER_DEGREE
         // A degree of longitude shrinks towards the poles, so widen the search there (to the whole ring at the pole).
         val shrink = cos(Math.toRadians(min(abs(lat) + dLat, 90.0)))
         val dLng = if (shrink < 1e-3) 180.0 else min(180.0, dLat / shrink)
         val cols = if (dLng >= 180.0) -180..179 else floor(lng - dLng).toInt()..floor(lng + dLng).toInt()
-        var best: Town? = null
-        var bestScore = Double.MAX_VALUE
+        val near = ArrayList<Pair<Town, Double>>()
         for (row in floor(lat - dLat).toInt().coerceAtLeast(-90)..floor(lat + dLat).toInt().coerceAtMost(89)) {
             for (col in cols) {
                 val cell = (row + 90) * 360 + Math.floorMod(col + 180, 360) // floorMod wraps across the 180th meridian
                 for (i in cellStart[cell] until cellStart[cell + 1]) {
-                    val town = towns[i]
-                    val km = distanceKm(lat, lng, town.lat, town.lng)
-                    // Big cities cover more ground: Bandra and Powai are Mumbai, not the small suburb whose centre is nearest.
-                    if (km <= MAX_KM && km - town.radius < bestScore) {
-                        best = town
-                        bestScore = km - town.radius
-                    }
+                    val km = distanceKm(lat, lng, towns[i].lat, towns[i].lng)
+                    if (km <= MAX_KM) near += towns[i] to km
                 }
             }
         }
-        return best?.place
+        // Inside towns of two states (a city's reach spilling over the border): the state of the town it's deeper inside
+        val inside = near.filter { (town, km) -> km <= town.radius }
+        val state = inside.takeIf { it.distinctBy { (town) -> town.place.admin1 }.size > 1 }?.minBy { (town, km) -> km / town.radius }?.first?.place?.admin1
+        val (best, km) = near.filter { (town) -> state == null || town.place.admin1 == state }.minByOrNull { (town, km) -> km - town.radius } ?: return null
+        // Far from every town, the state says more than a town 40 km away
+        return if (km - best.radius <= NEAR_KM) best.place else best.place.run { copy(city = admin1.ifEmpty { country }) }
     }
 
     companion object {
         /** Beyond this a point gets no place rather than a misleading one. */
         const val MAX_KM = 50.0
+
+        /** Further than this past the nearest town's reach, a point is named by its state: Havelock isn't Port Blair. */
+        private const val NEAR_KM = 20.0
         private const val KM_PER_DEGREE = 111.2
         private const val EARTH_RADIUS_KM = 6371.0
         private const val CELLS = 180 * 360

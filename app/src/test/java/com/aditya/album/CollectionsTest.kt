@@ -95,4 +95,29 @@ class CollectionsTest {
         assertEquals(listOf("WhatsApp Images", "Camera", "Goa", "Bills"), names(albumEntries(all, AlbumSort.Count, emptySet())))
         assertEquals(listOf("Goa", "WhatsApp Images", "Bills", "Camera"), names(albumEntries(all, AlbumSort.Updated, emptySet())))
     }
+
+    // Eight folders, "Album 8" the most recently changed
+    private val eight = (1..8).map { entry(10L + it, "Album $it", count = it, recent = it.toLong()) }
+
+    @Test fun sectionShowsTwoRowsOfThreeWithPinnedFirst() {
+        val shown = albumsInSection(albumEntries(eight, AlbumSort.Updated, setOf("pictures/Album 2/")))
+        assertEquals(listOf("Album 2", "Album 8", "Album 7", "Album 6", "Album 5", "Album 4"), names(shown))
+    }
+
+    @Test fun sectionFollowsTheChosenSort() {
+        assertEquals(listOf("Album 1", "Album 2", "Album 3", "Album 4", "Album 5", "Album 6"), names(albumsInSection(albumEntries(eight, AlbumSort.Name, emptySet()))))
+    }
+
+    @Test fun sectionKeepsPinnedAlbumsEvenWhenTheyFillIt() {
+        val pinned = (1..7).map { "pictures/Album $it/" }.toSet()
+        assertEquals(listOf("Album 7", "Album 6", "Album 5", "Album 4", "Album 3", "Album 2"), names(albumsInSection(albumEntries(eight, AlbumSort.Updated, pinned))))
+    }
+
+    @Test fun seeAllOnlyWhenSomeAreLeftOut() {
+        // the screen offers See all when the section shows fewer than there are
+        assertEquals(ALBUMS_IN_SECTION, albumsInSection(eight).size)
+        assertEquals(all, albumsInSection(all)) // four: every one shows, so Sort stays on the heading
+        assertEquals(eight.take(6), albumsInSection(eight.take(6)))
+        assertTrue(albumsInSection(emptyList<AlbumEntry>()).isEmpty())
+    }
 }

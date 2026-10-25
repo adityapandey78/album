@@ -97,4 +97,44 @@ class ForYouTest {
         )
         assertEquals(emptyList<Pair<StorageKind, Long>>(), storageOf(emptyList<Pair<StorageKind, Long>>(), { it.first }, { it.second }))
     }
+
+    @Test fun yearRecapIsLastYearInJanuaryAndThisYearFromJuly() {
+        val p = photos("nye" to day(2025, 12, 31), "newYear" to day(2026, 1, 1), "june" to day(2026, 6, 30), "lastYear" to day(2025, 3, 1))
+        val january = yearRecap(p, LocalDate.of(2026, 1, 10), dayOf)!!
+        assertEquals("Year recap", january.eyebrow)
+        assertEquals("2025", january.title)
+        assertEquals(listOf("lastYear", "nye"), names(january))
+        val soFar = yearRecap(p, LocalDate.of(2026, 7, 1), dayOf)!!
+        assertEquals("So far this year", soFar.eyebrow)
+        assertEquals("2026", soFar.title)
+        assertEquals(listOf("newYear", "june"), names(soFar))
+        assertNull(yearRecap(p, LocalDate.of(2026, 6, 30), dayOf)) // February to June: none
+        assertNull(yearRecap(p, LocalDate.of(2028, 1, 5), dayOf)) // 2027 had no photos
+    }
+
+    @Test fun idCardsNeedTheirNumberOrASecondPhrase() {
+        // Made-up details in the layout each card prints
+        val aadhaar = "Government of India\nRahul Sharma\nDOB: 01/01/1990\nMale\n2345 6789 0123\nVID : 9134 5678 9012 3456"
+        val pan = "INCOME TAX DEPARTMENT GOVT. OF INDIA\nRAHUL SHARMA\nPermanent Account Number\nABCDE1234F"
+        val passport = "REPUBLIC OF INDIA\nType P Country Code IND Passport No. K1234567"
+        val mrz = "P<INDSHARMA<<RAHUL<<<<<<<<<<<<<<<<<<<<<<<<<"
+        val voter = "ELECTION COMMISSION OF INDIA\nIDENTITY CARD\nABC1234567"
+        val licence = "Indian Union Driving Licence\nIssued by Government of Karnataka\nKA01 20190001234"
+        val card = "Platinum\n4111 1111\n1111 1111\nVALID THRU 12/29\nRAHUL SHARMA VISA"
+        listOf(aadhaar, pan, passport, mrz, voter, licence, card).forEach { assertEquals(it, true, looksLikeIdCard(it)) }
+
+        val notCards = listOf(
+            "Link your Aadhaar with PAN before 31 March, says the Income Tax Department",
+            "Your Aadhaar XXXX XXXX 1234 has been linked to your mobile number",
+            "Enter your Permanent Account Number (PAN) to continue",
+            "Keep your passport and boarding pass ready at the gate",
+            "if (p<max) return p",
+            "Election Commission announces dates for the Bihar election",
+            "Apply for a driving licence online in 3 steps",
+            "VISA 4111 1111 1111 1112 VALID THRU 12/29", // fails the card checksum
+            "Paid with RuPay card XXXX XXXX XXXX 1234",
+            "VID : 9134 5678 9012 3456", // an Aadhaar virtual ID alone, no network or card words
+        )
+        notCards.forEach { assertEquals(it, false, looksLikeIdCard(it)) }
+    }
 }

@@ -144,7 +144,13 @@ private enum class Tab(val sym: Sym, val label: String) {
 private sealed class Route(val key: String) {
     /** An album: a folder, Favourites or Videos, a collection, a place, a thing or a person. */
     data class Open(val id: Long) : Route("open:$id")
+    data object Albums : Route("albums")
     data object Places : Route("places")
+    data object Storage : Route("storage")
+    data object PrivateSafe : Route("safe") // not "Safe": that's the object in Safe.kt
+
+    /** Clean up, on one category (a CleanupKind name) or the suggested ones. */
+    data class Clean(val category: String?) : Route("cleanup:${category.orEmpty()}")
     data object People : Route("people")
     data object Trash : Route("trash")
     data object Search : Route("search")
@@ -152,7 +158,8 @@ private sealed class Route(val key: String) {
 
     companion object {
         fun of(key: String): Route? = key.removePrefix("open:").toLongOrNull()?.takeIf { key.startsWith("open:") }?.let(::Open)
-            ?: listOf(Places, People, Trash, Search, Settings).find { it.key == key }
+            ?: key.removePrefix("cleanup:").takeIf { key.startsWith("cleanup:") }?.let { Clean(it.ifEmpty { null }) }
+            ?: listOf(Albums, Places, People, Trash, Search, Settings, Storage, PrivateSafe).find { it.key == key }
     }
 }
 
@@ -240,6 +247,7 @@ private fun AlbumShell() {
     var albumMenu by remember { mutableStateOf<List<Media>?>(null) } // the selection, while "Add to" is open
     var addingToCollection by remember { mutableStateOf<List<Long>?>(null) }
     var story by remember { mutableStateOf<Story?>(null) }
+    var protecting by remember { mutableStateOf<List<Media>?>(null) } // For you's ID-card photos, while asking
     var barHidden by remember { mutableStateOf(false) }
 
     val loaded = Gallery.media.collectAsState().value
@@ -257,6 +265,8 @@ private fun AlbumShell() {
     val shown = when (top) {
         is Route.Open -> page?.takeIf { it.key == top.key }?.items.orEmpty()
         Route.Search -> searchState?.items.orEmpty()
+        // Clean up and Storage show items from every folder (WhatsApp may be hidden from the Library)
+        is Route.Clean, Route.Storage -> media
         null -> if (tab == Tab.Library) photos else emptyList()
         else -> emptyList()
     }
@@ -274,11 +284,16 @@ private fun AlbumShell() {
     val collectionsGrid = rememberLazyGridState()
     val forYouList = rememberLazyListState()
     val peopleGrid = rememberLazyGridState()
+    val albumsGrid = rememberLazyGridState()
     val placesGrid = rememberLazyGridState()
     LaunchedEffect(stack.toList()) { albumGrids.keys.retainAll(stack.mapTo(HashSet()) { it.key }) }
 
     val snackbar = remember { SnackbarHostState() }
     val trashWithUndo = rememberTrashWithUndo(snackbar) { clearSelection() }
+    // Always composed: it also finishes a move into the safe that the app was closed in the middle of.
+    // The selection clears only once the fingerprint is given, so a cancelled prompt leaves it as it was.
+    val moveToSafe = rememberMoveToSafe(snackbar) { clearSelection() }
+    val cleanup by Cleanup.summary.collectAsState()
     val albumActions = rememberAlbumActions { clearSelection() }
     val addToCollection = rememberAddToCollection(snackbar)
     val removeFromCollection = rememberRemoveFromCollection(snackbar)
@@ -377,16 +392,26 @@ private fun AlbumShell() {
                             CrashLog.note("open album ${Special.entries.find { it.id == id }?.name ?: if (collectionIdOf(id) != null) "collection" else "other"}")
                             openId(id)
                         },
+                        onAllAlbums = { push(Route.Albums) },
                         onAllPlaces = { push(Route.Places) },
                         onAllPeople = { push(Route.People) },
+                        onOpenSafe = { push(Route.PrivateSafe) },
                         onAction = albumActions::onAlbum,
                         onNewAlbum = albumActions::newAlbum,
                         onSettings = { push(Route.Settings) },
                     )
-                    Tab.ForYou -> ForYouScreen(photos, forYouList, tabPadding) { title, eyebrow, items ->
-                        CrashLog.note("play memory")
-                        story = Story(items, title, eyebrow)
-                    }
+                    Tab.ForYou -> ForYouScreen(
+                        photos, forYouList, tabPadding,
+                        cleanupCount = cleanup?.toReview ?: 0,
+                        onPlay = { title, eyebrow, items ->
+                            CrashLog.note("play memory")
+                            story = Story(items, title, eyebrow)
+                        },
+                        onCleanup = { push(Route.Clean(null)) },
+                        onStorage = { push(Route.Storage) },
+                        // A false positive must not leave the Library on one tap: confirm with what will move
+                        onProtect = { items -> protecting = items },
+                    )
                 }
             }
         }
@@ -442,12 +467,19 @@ private fun AlbumShell() {
                         tabPadding, gridPosition,
                         onBack = pop,
                         onOpenPerson = { id -> stack[stack.lastIndex] = Route.Open(id) }, // merging leaves you on the merged person
-                        onPlay = { items, title -> story = Story(items, title, null) },
                         selectMode = selectMode,
                         onStartSelecting = startSelecting,
                         report = { page = it },
                     )
+                    Route.Albums -> AllAlbumsScreen(
+                        albums, collections, albumsGrid, onBack = pop, onOpen = openId,
+                        onAction = albumActions::onAlbum, onNewAlbum = albumActions::newAlbum,
+                    )
                     Route.Places -> PlacesScreen(placesGrid, onBack = pop, onOpen = openId)
+                    // Clean up and Storage get every item: WhatsApp may live in folders hidden from the Library
+                    is Route.Clean -> CleanupScreen(media, onBack = pop, onOpen = open, category = route.category)
+                    Route.Storage -> StorageScreen(media, onBack = pop, onOpenCategory = { push(Route.Clean(it)) }, onOpen = open)
+                    Route.PrivateSafe -> SafeScreen(onBack = pop)
                     Route.People -> PeopleScreen(peopleGrid, onBack = pop, onOpenPerson = openId)
                     Route.Trash -> TrashScreen(trash, onBack = pop)
                     Route.Settings -> SettingsScreen(onBack = pop, columns = photosColumns, onOpenTrash = { push(Route.Trash) })
@@ -570,7 +602,23 @@ private fun AlbumShell() {
                 MenuRow(Sym.DriveFileMove, "Move to album", { albumMenu = null; albumActions.moveOrCopy(items, Transfer.Move) }, sub = "The files move to that folder")
                 MenuRow(Sym.ContentCopy, "Copy to album", { albumMenu = null; albumActions.moveOrCopy(items, Transfer.Copy) }, sub = "A copy goes to that folder")
                 MenuRow(Sym.LibraryAdd, "Add to collection", { albumMenu = null; addingToCollection = items.map { it.id } }, sub = "No copies: one photo can be in many collections")
+                MenuRow(Sym.Lock, "Private safe", { albumMenu = null; moveToSafe(items) }, sub = "Encrypted, opens with your fingerprint")
             }
+        }
+        protecting?.let { items ->
+            ConfirmBar(
+                title = "Move ${countOf(items.size, "photo")} to Private safe?",
+                body = "They look like ID cards. They leave the Library and search, and open only with your fingerprint or screen lock.",
+                confirmLabel = "Move to safe",
+                onConfirm = {
+                    protecting = null
+                    moveToSafe(items)
+                },
+                onCancel = { protecting = null },
+                icon = Sym.Lock,
+                tone = ConfirmTone.Flash,
+                thumbs = items.take(3),
+            )
         }
         addingToCollection?.let { ids ->
             AddToCollectionSheet(ids.size, collections, onDismiss = { addingToCollection = null }, onPick = { id, name ->
@@ -595,6 +643,7 @@ private fun AlbumShell() {
                 it,
                 onClose = { viewerId = null },
                 onTrash = if (openCollection == null) { m -> trashWithUndo(listOf(m)) } else null,
+                onMoveToSafe = { m -> moveToSafe(listOf(m)) },
                 openFrom = openedFrom,
                 closeTo = cellOnScreen,
             )
@@ -736,6 +785,7 @@ private fun LibraryPage(
             header = {
                 Column {
                     LargeTopBar("Library", subtitle = subtitle, actions = actions)
+                    IndexingCard(Modifier.padding(start = Space.s4, end = Space.s4, bottom = Space.s3))
                     if (partial) PartialAccessBanner(onAllowAll)
                 }
             },
@@ -765,7 +815,6 @@ private fun AlbumPage(
     gridPosition: Modifier,
     onBack: () -> Unit,
     onOpenPerson: (Long) -> Unit,
-    onPlay: (List<Media>, String) -> Unit,
     selectMode: Boolean,
     onStartSelecting: () -> Unit,
     report: (PageInfo) -> Unit,
@@ -793,12 +842,10 @@ private fun AlbumPage(
         }
     }
     val title = album?.name ?: special?.title ?: collection?.name ?: smart?.title ?: person?.let(::personTitle).orEmpty()
-    val folder = album?.cover?.path?.trimEnd('/')
-    val subtitle = listOfNotNull(countOf(items.size, "item"), folder).joinToString(" · ")
+    val subtitle = countOf(items.size, "item")
     val actions: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {
         if (items.isNotEmpty()) {
             AlbumIconButton(Sym.CheckCircle, "Select", onStartSelecting)
-            AlbumIconButton(Sym.Slideshow, "Slideshow", { onPlay(items, title) })
         }
     }
     if (loaded && items.isEmpty()) {

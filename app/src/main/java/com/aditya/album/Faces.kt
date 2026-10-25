@@ -40,7 +40,7 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /** Bump when detection, alignment or quality rules change, so every photo is scanned again. People's names and corrections stay. */
-const val FACE_INDEX_VERSION = 1
+const val FACE_INDEX_VERSION = 2 // 2: three-quarter views kept, unlike-a-face results dropped
 
 /** The embedding model below. Saved person centroids from another model are ignored (they live in a different space). */
 const val FACE_MODEL = 1
@@ -51,8 +51,17 @@ private const val INPUT = 112 // SFace takes an aligned 112 x 112 RGB face (0 to
 private const val EMBEDDING = 128
 private const val DECODE_PX = 1024 // long edge photos are decoded at for detection
 private const val MIN_FACE_PX = 40 // narrower faces (at DECODE_PX) carry too little detail to recognise
-private const val MAX_YAW = 35f // degrees; turned further, it's a profile, which SFace barely recognises
+// Degrees. SFace still matches three-quarter views: on the evaluation photos (FaceEvalTest) faces turned 35 to 50 degrees
+// scored 0.4 to 0.7 against their own person and under 0.35 against anyone else. Turned further, it's a profile.
+private const val MAX_YAW = 50f
 private const val MAX_PITCH = 30f
+
+/**
+ * Length of SFace's raw embedding below which the input was barely a face. The length grows with how clear and face-like
+ * the picture is: on the evaluation photos every real face scored over 9, while the backs of heads, hands and smeared
+ * faces that ML Kit took for faces scored 4 to 9, and those grouped with each other into a "person".
+ */
+private const val MIN_EMBEDDING_LENGTH = 9f
 
 /**
  * Laplacian variance of the aligned 112 px face below which it's too blurred (or too small) to recognise. A sharp face
@@ -92,8 +101,8 @@ class FaceAnalyser(private val context: Context, private val executor: Executor)
     private val aligned = Bitmap.createBitmap(INPUT, INPUT, Bitmap.Config.ARGB_8888)
     private val pixels = IntArray(INPUT * INPUT)
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
-    var dropped = 0 // faces found but too small, turned or blurred; for the timing breadcrumb
-        private set
+    /** Faces found but not kept, by reason, for the timing breadcrumb: where the gates above need calibrating. */
+    val dropped = sortedMapOf<String, Int>()
 
     /** The faces worth recognising in the photo at [uri] (maybe none), or null when it can't be read. */
     suspend fun analyse(uri: Uri): List<FoundFace>? {
@@ -122,8 +131,9 @@ class FaceAnalyser(private val context: Context, private val executor: Executor)
         val width = face.boundingBox.width()
         val yaw = face.headEulerAngleY
         val points = listOf(FaceLandmark.LEFT_EYE, FaceLandmark.RIGHT_EYE, FaceLandmark.MOUTH_LEFT, FaceLandmark.MOUTH_RIGHT)
-            .map { face.getLandmark(it)?.position ?: return drop() }
-        if (width < MIN_FACE_PX || abs(yaw) > MAX_YAW || abs(face.headEulerAngleX) > MAX_PITCH) return drop()
+            .map { face.getLandmark(it)?.position ?: return drop("no landmarks") }
+        if (width < MIN_FACE_PX) return drop("small")
+        if (abs(yaw) > MAX_YAW || abs(face.headEulerAngleX) > MAX_PITCH) return drop("turned")
 
         val t = similarity(alignmentPoints(points.flatMap { listOf(it.x, it.y) }.toFloatArray()), TEMPLATE)
         val matrix = Matrix().apply { setValues(floatArrayOf(t[0], -t[1], t[2], t[1], t[0], t[3], 0f, 0f, 1f)) }
@@ -133,7 +143,7 @@ class FaceAnalyser(private val context: Context, private val executor: Executor)
         }
         aligned.getPixels(pixels, 0, INPUT, 0, 0, INPUT, INPUT)
         val sharpness = sharpness(pixels, INPUT, INPUT)
-        if (sharpness < MIN_SHARPNESS) return drop()
+        if (sharpness < MIN_SHARPNESS) return drop("blurred")
 
         input.rewind()
         for (p in pixels) {
@@ -143,6 +153,7 @@ class FaceAnalyser(private val context: Context, private val executor: Executor)
         }
         input.rewind()
         model.run(input, output)
+        if (length(output[0]) < MIN_EMBEDDING_LENGTH) return drop("unlike a face")
         val b = face.boundingBox
         val box = FaceBox(
             (b.left.toFloat() / photo.width).coerceIn(0f, 1f),
@@ -153,8 +164,8 @@ class FaceAnalyser(private val context: Context, private val executor: Executor)
         return FoundFace(box, faceQuality(width, yaw, sharpness), unit(output[0]))
     }
 
-    private fun drop(): FoundFace? {
-        dropped++
+    private fun drop(reason: String): FoundFace? {
+        dropped.merge(reason, 1, Int::plus)
         return null
     }
 

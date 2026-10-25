@@ -9,7 +9,16 @@ import coil3.ImageLoader
 import coil3.PlatformContext
 import coil3.SingletonImageLoader
 import coil3.memory.MemoryCache
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.launch
 
+@OptIn(FlowPreview::class) // debounce
 class AlbumApp : Application(), SingletonImageLoader.Factory, Configuration.Provider {
     override fun onCreate() {
         super.onCreate()
@@ -23,7 +32,12 @@ class AlbumApp : Application(), SingletonImageLoader.Factory, Configuration.Prov
         SmartIndex.start(this)
         Collections.start(this)
         People.start(this)
+        Cleanup.start(this)
+        // The widget may show a photo that was just trashed or moved to the safe: redraw once the Library settles
+        widgetScope.launch { Gallery.media.filterNotNull().drop(1).debounce(5_000).collect { MemoryWidget.refresh(this@AlbumApp) } }
     }
+
+    private val widgetScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     // WorkManager starts on first use (the smart index, off the main thread) instead of at every launch. See the manifest.
     override val workManagerConfiguration get() = Configuration.Builder().build()

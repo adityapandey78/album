@@ -17,8 +17,22 @@
     <uses-permission android:name="android.permission.MANAGE_MEDIA" />
     <!-- Where photos were taken (EXIF GPS), for Places. Turned into a town name on the phone, never sent anywhere. -->
     <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />
+    <!-- Private safe: asks for the fingerprint (or the screen lock) through Android's own prompt before it opens. -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <!-- Added by WorkManager and ML Kit's telemetry; nothing here watches the network (no network constraints, telemetry cut below). -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" tools:node="remove" />
+
+    <!-- Edit lists the apps that can edit a photo or video ("Edit with"). Without this, Android hides them from Album. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.EDIT" />
+            <data android:mimeType="image/*" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.EDIT" />
+            <data android:mimeType="video/*" />
+        </intent>
+    </queries>
 
     <application
         android:name=".AlbumApp"
@@ -45,6 +59,19 @@
         <receiver
             android:name=".InstallResultReceiver"
             android:exported="false" />
+
+        <!-- The Memories home-screen widget (MemoryWidget.kt). Exported so the launcher can place and update it. -->
+        <receiver
+            android:name=".MemoryWidgetReceiver"
+            android:exported="true"
+            android:label="Memories">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/memory_widget" />
+        </receiver>
 
         <!-- adjustResize: the keyboard is an inset Compose pads for (search sits at the bottom), not a pan of the window -->
         <activity

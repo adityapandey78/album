@@ -52,6 +52,9 @@ data class ItemLabel(val mediaId: Long, val label: String, val confidence: Float
 @Entity(tableName = "texts")
 data class ItemText(@PrimaryKey @ColumnInfo(name = "rowid") val mediaId: Long, val text: String)
 
+/** Where an item was taken, for naming its place again. */
+data class ItemGps(val id: Long, val lat: Double, val lng: Double)
+
 /** The columns that decide whether an item needs analysing again. */
 data class IndexStamp(val id: Long, val modified: Long, val size: Long, val version: Int, val located: Boolean)
 
@@ -100,6 +103,19 @@ interface IndexDao {
         deleteTexts(ids)
         delete(ids)
     }
+
+    @Query("SELECT id, lat, lng FROM items WHERE lat IS NOT NULL AND lng IS NOT NULL")
+    suspend fun located(): List<ItemGps>
+
+    @Query("UPDATE items SET city = :city, admin1 = :admin1, countryCode = :countryCode, country = :country WHERE id = :id")
+    suspend fun setPlace(id: Long, city: String?, admin1: String?, countryCode: String?, country: String?)
+
+    @Transaction
+    suspend fun setPlaces(places: Map<Long, Place?>) = places.forEach { (id, p) -> setPlace(id, p?.city, p?.admin1, p?.countryCode, p?.country) }
+
+    /** Makes the next pass look for these items' location again (see planIndex). */
+    @Query("UPDATE items SET located = 0 WHERE id IN (:ids)")
+    suspend fun unlocate(ids: List<Long>)
 
     @Query("SELECT category, COUNT(*) AS count FROM items WHERE category IS NOT NULL GROUP BY category ORDER BY count DESC")
     fun categories(): Flow<List<CategoryCount>>

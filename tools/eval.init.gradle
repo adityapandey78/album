@@ -1,0 +1,7 @@
+// Gives the debug build its own package (com.aditya.album.eval) so the instrumented face evaluation can run next to
+// the installed release build without replacing it. Used only from the command line: -I tools/eval.init.gradle
+allprojects {
+    plugins.withId("com.android.application") {
+        android.buildTypes.debug.applicationIdSuffix = ".eval"
+    }
+}

@@ -67,8 +67,8 @@ private const val MAX_BARS = 30
  * cropped to fill the screen with a slow zoom, progress bars at the top, and at the bottom [title] on the first photo
  * (a memory's name) or else the photo's day. [eyebrow] sits beside the logo ("On this day · 2025"). Tap the left third
  * to go back, anywhere else to go on; press and hold to pause. Videos are skipped: they'd need their own length instead
- * of a fixed time. Drawn over everything with the system bars hidden. [onClose] gets the photo it ended on, so the
- * viewer can stay there: after the last photo, on close, or on back.
+ * of a fixed time. Drawn over everything with the system bars hidden. [onClose] gets the photo it ended on: after the
+ * last photo, on close, or on back.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable

@@ -13,8 +13,8 @@ android {
         applicationId = "com.aditya.album"
         minSdk = 33 // Android 13+: READ_MEDIA_* permissions and AGSL shaders, no legacy branches
         targetSdk = 37 // Android 17
-        versionCode = 9
-        versionName = "0.7.1"
+        versionCode = 10
+        versionName = "0.9.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // 64-bit ARM only: the phone and the emulator. Each extra ABI would add another 11 MB ML Kit library.
         ndk { abiFilters += "arm64-v8a" }
@@ -63,6 +63,7 @@ dependencies {
     implementation("androidx.room:room-runtime:2.8.5") // smart index database (labels, places), read as Flows
     ksp("androidx.room:room-compiler:2.8.5")
     implementation("androidx.work:work-runtime:2.12.0") // indexing as resumable background work that waits out low battery
+    implementation("androidx.glance:glance-appwidget:1.2.0") // the Memories home-screen widget
     implementation("androidx.exifinterface:exifinterface:1.4.2") // GPS from EXIF, including HEIF photos
     // On-device labels; model bundled in the APK, nothing downloaded. Version pinned: proguard-rules.pro strips its telemetry by obfuscated name.
     implementation("com.google.mlkit:image-labeling:17.0.9")

@@ -1,11 +1,9 @@
 package com.aditya.album
 
 import android.Manifest.permission.ACCESS_MEDIA_LOCATION
-import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.provider.MediaStore
 import android.text.format.Formatter
 import androidx.activity.compose.BackHandler
@@ -16,12 +14,17 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateRotation
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.draggable
@@ -44,23 +47,27 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableFloatState
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
@@ -73,6 +80,7 @@ import androidx.compose.ui.geometry.lerp
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
@@ -103,14 +111,10 @@ import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
 import kotlinx.coroutines.CoroutineScope
-import android.content.ClipData
-import android.content.ClipboardManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import me.saket.telephoto.zoomable.coil3.ZoomableAsyncImage
 import me.saket.telephoto.zoomable.rememberZoomableImageState
 import java.time.Instant
@@ -120,7 +124,11 @@ import java.time.format.DateTimeFormatter
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.cos
+import kotlin.math.floor
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 /** The dock floats this far above the navigation bar (the design's 28px). */
 private val dockGap = Space.s6 + Space.s1
@@ -134,6 +142,7 @@ internal val progressLine = 3.dp
 /**
  * Full-screen swipeable viewer. [items] is the list it was opened from (all photos, or one album).
  * [external] is a file another app opened: it may not be in MediaStore, so only Share, Edit and Details are offered.
+ * A two-finger twist turns a photo; let go past halfway to a quarter turn and it's rotated for real (see [rememberRotate]).
  */
 @Composable
 fun Viewer(
@@ -144,6 +153,7 @@ fun Viewer(
     onTrash: ((Media) -> Unit)? = null, // the app's shared trash-with-Undo; no Move to trash button without it
     openFrom: Rect? = null, // on-screen grid cell the photo was opened from, to fly out of it
     closeTo: (Long) -> Rect? = { null }, // on-screen grid cell of a photo, to fly back into it (null: fade out)
+    onMoveToSafe: ((Media) -> Unit)? = null, // the Private safe; no More row for it without one
 ) {
     if (items.isEmpty()) {
         LaunchedEffect(Unit) { onClose() } // last photo was deleted
@@ -170,8 +180,24 @@ fun Viewer(
     val edit = rememberEdit(onMessage = say)
     val clock = rememberClock()
     val placeOf = if (external) emptyMap() else rememberPlaces()
-    val hasPhotos = remember(items) { items.any { !it.isVideo } } // a slideshow needs at least one
-    var slideshowFrom by rememberSaveable { mutableStateOf<Long?>(null) }
+    // Rotate keeps quality, so it can always be taken back: Undo turns the photo back the other way
+    val rotated = { m: Media, quarters: Int ->
+        scope.launch {
+            val message = when (Math.floorMod(quarters, 4)) {
+                1 -> "Rotated right"
+                3 -> "Rotated left"
+                else -> "Rotated 180°"
+            }
+            if (snackbar.showSnackbar(message, "Undo", duration = SnackbarDuration.Short) == SnackbarResult.ActionPerformed) {
+                CrashLog.note("rotate undo")
+                rotate(m, -quarters) {}
+            }
+        }
+    }
+    // Text from the photo (TextLens), over the current photo. Swipes and twists wait while it's open.
+    var lensOn by remember(current.id) { mutableStateOf(false) }
+    val lens = if (lensOn) rememberTextLens(current) else null
+    var lensPanel by remember { mutableIntStateOf(0) } // px, to keep the snackbar above it
     // Motion photo: its video plays in place over the still, from the Live badge or a long-press
     val motion = rememberMotionVideo(current)
     var playMotion by remember(current.id) { mutableStateOf(false) }
@@ -217,8 +243,42 @@ fun Viewer(
         }
     }
 
+    // Two-finger twist: [twisting] while the fingers turn the photo (the pager and swipe-down wait), [turning] while a
+    // released twist settles and Rotate writes it (no new twist meanwhile)
+    var twisting by remember { mutableStateOf(false) }
+    var turning by remember { mutableStateOf(false) }
+    val settleTwist by rememberUpdatedState { m: Media, angle: MutableFloatState ->
+        twisting = false
+        turning = true
+        val quarters = nearestQuarter(angle.floatValue)
+        CrashLog.note("twist ${angle.floatValue.roundToInt()}° to $quarters")
+        scope.launch {
+            suspend fun springTo(target: Float) {
+                if (still) angle.floatValue = target
+                else animate(angle.floatValue, target, animationSpec = spring(dampingRatio = 0.8f, stiffness = Spring.StiffnessMediumLow)) { value, _ -> angle.floatValue = value }
+            }
+            springTo(quarters * 90f)
+            if (Math.floorMod(quarters, 4) == 0) {
+                angle.floatValue = 0f // a full turn looks the same as none
+                turning = false
+                return@launch
+            }
+            // Held at the quarter turn while Android asks and the file is written; the reloaded photo is then upright
+            rotate(m, quarters) { ok ->
+                turning = false
+                if (ok) {
+                    angle.floatValue = 0f
+                    rotated(m, quarters)
+                } else {
+                    scope.launch { springTo(0f) } // refused or cancelled: Rotate has said why
+                }
+            }
+        }
+    }
+
     BackHandler(onBack = close)
-    ImmersiveBars(visible = chrome && slideshowFrom == null)
+    BackHandler(enabled = lensOn) { lensOn = false }
+    ImmersiveBars(visible = chrome)
 
     Box(
         Modifier.fillMaxSize()
@@ -230,6 +290,7 @@ fun Viewer(
             // composed from the start so the full photo loads during the flight, shown once it lands
             Modifier.fillMaxSize().graphicsLayer { alpha = if (flying) 0f else 1f },
             beyondViewportPageCount = 1,
+            userScrollEnabled = lens == null && !twisting && !turning, // stays on a photo being turned until it's written
             key = { items[it].id },
         ) { page ->
             val m = items[page]
@@ -239,21 +300,38 @@ fun Viewer(
             val zoom = key(editVersion(m.uri)) { rememberZoomableImageState() }
             // zoomed in, vertical drags pan the photo (Telephoto) instead of closing it
             val zoomed by remember(zoom) { derivedStateOf { (zoom.zoomableState.zoomFraction ?: 0f) > 0.01f } }
+            val pageLens = lens?.takeIf { m.id == current.id }
+            // Degrees a twist has turned the photo, clockwise. A fresh one per edit: once rotated for real it's upright again.
+            val angle = remember(m.id, editVersion(m.uri)) { mutableFloatStateOf(0f) }
+            val canTwist = settled && !m.isVideo && !external && !flying && pageLens == null && !turning
             Box(
                 Modifier.fillMaxSize()
                     // before graphicsLayer, so drag deltas are measured on screen and not inside the moving page
-                    .draggable(drag, Orientation.Vertical, enabled = settled && !zoomed, onDragStopped = release)
+                    .draggable(drag, Orientation.Vertical, enabled = settled && !zoomed && !twisting && lens == null, onDragStopped = release)
+                    .then(
+                        if (!canTwist) Modifier else Modifier.twistGesture(angle, onTwist = { turned ->
+                            val shown = twistAngle(turned)
+                            if (shown != 0f) twisting = true
+                            if (reachesQuarter(angle.floatValue, shown)) haptics.tick()
+                            angle.floatValue = shown
+                        }, onEnd = { if (twisting) settleTwist(m, angle) }),
+                    )
+                    .then(if (pageLens == null) Modifier else Modifier.lensSelection(pageLens, { zoom.zoomableState.transformedContentBounds }, haptics))
                     .graphicsLayer {
                         if (!settled) return@graphicsLayer
                         translationY = dragY
-                        scaleX = 1f - 0.25f * pulled()
+                        val turned = angle.floatValue
+                        // turned, it shrinks to fit (or grows), ending at the size it has once rotated for real
+                        val fit = if (turned == 0f) 1f else twistScale(fitRect(m.width, m.height, size).size, size, turned)
+                        rotationZ = turned
+                        scaleX = (1f - 0.25f * pulled()) * fit
                         scaleY = scaleX
                     },
             ) {
                 if (m.isVideo) {
                     VideoPage(
                         m,
-                        active = settled && slideshowFrom == null,
+                        active = settled,
                         chrome = chrome,
                         muted = videoMuted,
                         onTap = { chrome = !chrome },
@@ -271,8 +349,8 @@ fun Viewer(
                         m.name,
                         Modifier.fillMaxSize(),
                         state = zoom,
-                        onClick = { chrome = !chrome },
-                        onLongClick = video?.let {
+                        onClick = { if (pageLens != null) pageLens.selection = null else chrome = !chrome },
+                        onLongClick = video?.takeIf { pageLens == null }?.let {
                             { _: Offset ->
                                 CrashLog.note("motion play (hold)")
                                 haptics.longPress()
@@ -282,6 +360,7 @@ fun Viewer(
                     )
                     }
                     if (video != null && playMotion) MotionPlayer(m.uri, video, motionMuted, onEnd = { playMotion = false })
+                    if (pageLens != null) TextLensHighlights(pageLens) { zoom.zoomableState.transformedContentBounds }
                 }
             }
         }
@@ -308,7 +387,7 @@ fun Viewer(
         }
 
         val fade = Modifier.graphicsLayer { alpha = 1f - pulled() }
-        AnimatedVisibility(chrome && !flying, Modifier.align(Alignment.TopCenter).then(fade), enter = fadeIn(), exit = fadeOut()) {
+        AnimatedVisibility(chrome && !flying && lens == null, Modifier.align(Alignment.TopCenter).then(fade), enter = fadeIn(), exit = fadeOut()) {
             Row(
                 Modifier.fillMaxWidth()
                     .background(Brush.verticalGradient(listOf(c.scrimPhoto, Color.Transparent)))
@@ -346,13 +425,10 @@ fun Viewer(
                         variant = IconButtonVariant.Photo,
                     )
                 }
-                if (!external && hasPhotos) {
-                    AlbumIconButton(Sym.MoreVert, "More", { showMore = true }, variant = IconButtonVariant.Photo)
-                }
             }
         }
 
-        AnimatedVisibility(chrome && !flying, Modifier.align(Alignment.BottomCenter).then(fade), enter = fadeIn(), exit = fadeOut()) {
+        AnimatedVisibility(chrome && !flying && lens == null, Modifier.align(Alignment.BottomCenter).then(fade), enter = fadeIn(), exit = fadeOut()) {
             Row(
                 Modifier.navigationBarsPadding().padding(bottom = dockGap).height(Space.bar).floating().padding(horizontal = Space.s2),
                 horizontalArrangement = Arrangement.spacedBy(Space.s1),
@@ -374,7 +450,7 @@ fun Viewer(
                         active = current.isFavorite,
                     )
                 }
-                AlbumIconButton(Sym.Tune, "Edit", { edit(current) })
+                AlbumIconButton(Sym.Edit, "Edit", { edit(current) })
                 AlbumIconButton(Sym.Info, "Details", {
                     CrashLog.note("details")
                     showInfo = true
@@ -386,41 +462,43 @@ fun Viewer(
                             trash(current)
                         })
                     }
+                    // Last, as in the design. A video has nothing in it but the safe.
+                    if (!current.isVideo || onMoveToSafe != null) {
+                        AlbumIconButton(Sym.MoreVert, "More", {
+                            CrashLog.note("more")
+                            showMore = true
+                        })
+                    }
                 }
             }
         }
 
-        SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = viewerSnackbarGap)) { AlbumSnackbar(it) }
-
-        slideshowFrom?.let { id ->
-            Slideshow(items, id, onClose = { endedOn ->
-                slideshowFrom = null
-                val page = items.indexOfFirst { it.id == endedOn }
-                if (page >= 0) scope.launch { pager.scrollToPage(page) }
-            })
+        if (lens != null) {
+            TextLensBar(onClose = { lensOn = false }, Modifier.align(Alignment.TopCenter))
+            TextLensPanel(lens, onCopied = { say("Copied") }, Modifier.align(Alignment.BottomCenter).onSizeChanged { lensPanel = it.height })
         }
+
+        val above = if (lens != null) Modifier.padding(bottom = with(density) { lensPanel.toDp() } + Space.s3)
+        else Modifier.navigationBarsPadding().padding(bottom = viewerSnackbarGap)
+        SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).then(above)) { AlbumSnackbar(it) }
     }
     if (showInfo) InfoSheet(current, placeOf[current.id]) { showInfo = false }
     if (showMore) {
         val title = if (current.taken > 0) "${dayTitle(current.day)} · ${clock(current.taken)}" else current.name
+        val m = current
         MoreSheet(
-            current,
+            m,
             title,
-            canSlideshow = hasPhotos,
-            onSlideshow = {
-                CrashLog.note("slideshow")
-                slideshowFrom = current.id
+            onText = {
+                CrashLog.note("text lens")
+                chrome = true
+                lensOn = true
             },
-            onRotate = { clockwise -> rotate(current, clockwise) },
-            onCopyText = {
-                CrashLog.note("copy text")
-                scope.launch {
-                    val text = withContext(Dispatchers.IO) { runCatching { SmartIndex.textOf(current.id) }.getOrNull() }
-                    if (text.isNullOrBlank()) say("No text found in this photo")
-                    else {
-                        context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Text from photo", text))
-                        say("Copied text from this photo")
-                    }
+            onRotate = { quarters -> rotate(m, quarters) { ok -> if (ok) rotated(m, quarters) } },
+            onMoveToSafe = onMoveToSafe?.let { safe ->
+                {
+                    CrashLog.note("move to safe")
+                    safe(m)
                 }
             },
             onDismiss = { showMore = false },
@@ -428,15 +506,14 @@ fun Viewer(
     }
 }
 
-/** The viewer's More sheet: actions used less often than the dock's. Rotate and Use as are for photos only. */
+/** The viewer's More sheet: actions used less often than the dock's. Text, Rotate and Use as are for photos only. */
 @Composable
 private fun MoreSheet(
     m: Media,
     title: String,
-    canSlideshow: Boolean,
-    onSlideshow: () -> Unit,
-    onRotate: (clockwise: Boolean) -> Unit,
-    onCopyText: () -> Unit,
+    onText: () -> Unit,
+    onRotate: (quarters: Int) -> Unit,
+    onMoveToSafe: (() -> Unit)?,
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -446,10 +523,11 @@ private fun MoreSheet(
             onDismiss()
             action()
         }
-        if (canSlideshow) MenuRow(Sym.Slideshow, "Slideshow", closing(onSlideshow))
         if (!m.isVideo) {
-            MenuRow(Sym.RotateRight, "Rotate right", closing { onRotate(true) }, sub = "Lossless, keeps quality")
-            MenuRow(Sym.RotateLeft, "Rotate left", closing { onRotate(false) })
+            // Read on the phone, offline: nothing leaves it
+            MenuRow(Sym.TextFields, "Text", closing(onText), sub = "Select and copy words in this photo")
+            MenuRow(Sym.RotateRight, "Rotate right", closing { onRotate(1) }, sub = "Lossless, keeps quality. Or twist with two fingers")
+            MenuRow(Sym.RotateLeft, "Rotate left", closing { onRotate(-1) })
             MenuRow(Sym.Wallpaper, "Use as", closing {
                 CrashLog.note("use as")
                 // Wallpaper, contact photo and the like. Some of those apps read the type from the "mimeType" extra.
@@ -459,9 +537,8 @@ private fun MoreSheet(
                     .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 context.startSafely(Intent.createChooser(attach, "Use as"))
             }, sub = "Wallpaper, contact photo")
-            // Words the smart index read from the photo (screenshots, bills, tickets); never leaves the phone
-            MenuRow(Sym.ContentCopy, "Copy text from photo", closing(onCopyText))
         }
+        onMoveToSafe?.let { MenuRow(Sym.Lock, "Move to Private safe", closing(it)) }
     }
 }
 
@@ -490,6 +567,69 @@ fun swipeOf(offset: Float, velocity: Float, distance: Float, speed: Float): Swip
     offset > 0 && (velocity > speed || offset > distance && velocity > -speed) -> Swipe.Close
     offset < 0 && (velocity < -speed || offset < -distance && velocity < speed) -> Swipe.Details
     else -> Swipe.None
+}
+
+// ---------- Twist ----------
+
+/** A twist starts turning the photo only past this many degrees, so a pinch (fingers always twist a little) never does. */
+private const val TWIST_START = 15f
+
+/** What a twist of [turned] degrees shows: nothing within [TWIST_START], then the rest, so the photo never jumps. */
+fun twistAngle(turned: Float): Float = when {
+    turned > TWIST_START -> turned - TWIST_START
+    turned < -TWIST_START -> turned + TWIST_START
+    else -> 0f
+}
+
+/** Quarter turns (clockwise positive) nearest [degrees]: where a released twist settles. */
+fun nearestQuarter(degrees: Float): Int = (degrees / 90f).roundToInt()
+
+/** Whether turning from [from] to [to] degrees reaches a quarter turn (0, ±90, ±180...), other than one it starts on. */
+fun reachesQuarter(from: Float, to: Float): Boolean = when {
+    to > from -> floor(to / 90f) > floor(from / 90f)
+    to < from -> ceil(to / 90f) < ceil(from / 90f)
+    else -> false
+}
+
+/**
+ * How much a photo drawn [photo] big inside [box] is scaled while turned [degrees], so it always fits: 1 upright, and at
+ * a quarter turn exactly the size it will have once rotated for real, so nothing jumps when it reloads.
+ */
+fun twistScale(photo: Size, box: Size, degrees: Float): Float {
+    if (photo.width <= 0f || photo.height <= 0f) return 1f
+    val radians = Math.toRadians(degrees.toDouble())
+    val cos = abs(cos(radians)).toFloat()
+    val sin = abs(sin(radians)).toFloat()
+    return minOf(box.width / (photo.width * cos + photo.height * sin), box.height / (photo.width * sin + photo.height * cos))
+}
+
+/**
+ * Follows two fingers turning: [onTwist] gets the degrees turned (clockwise positive) since the second finger went down,
+ * [onEnd] comes once fewer than two are left. It looks at touches before the photo does and takes none, so Telephoto's
+ * pinch and pan see every touch as usual. Restarts with a fresh [key].
+ */
+private fun Modifier.twistGesture(key: Any, onTwist: (Float) -> Unit, onEnd: () -> Unit) = pointerInput(key) {
+    awaitEachGesture {
+        awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+        var turned = 0f
+        var twoFingers = false
+        try {
+            do {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                if (event.changes.count { it.pressed } >= 2) {
+                    twoFingers = true
+                    turned += event.calculateRotation()
+                    onTwist(turned)
+                } else if (twoFingers) {
+                    twoFingers = false
+                    turned = 0f
+                    onEnd()
+                }
+            } while (event.changes.any { it.pressed })
+        } finally {
+            if (twoFingers) onEnd() // cancelled mid-twist: settle rather than leave the photo askew
+        }
+    }
 }
 
 // ---------- Video ----------
@@ -648,85 +788,6 @@ internal fun ImmersiveBars(visible: Boolean) {
             bars.show(WindowInsetsCompat.Type.systemBars())
             bars.isAppearanceLightStatusBars = !dark
             bars.isAppearanceLightNavigationBars = !dark
-        }
-    }
-}
-
-// ---------- Edit ----------
-
-private const val GOOGLE_PHOTOS = "com.google.android.apps.photos"
-
-/** ACTION_EDIT for [uri], for the app [pkg] (null: any editor). [write] lets the editor save over the original. */
-fun editIntent(uri: Uri, mime: String, write: Boolean, pkg: String?): Intent =
-    Intent(Intent.ACTION_EDIT).setDataAndType(uri, mime).setPackage(pkg).addFlags(
-        if (write) Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION else Intent.FLAG_GRANT_READ_URI_PERMISSION,
-    )
-
-/**
- * Starts [uri] in Google Photos' editor, else in any editor (Android asks which when there are several); false when no
- * app on the phone can edit it. Write access comes first so an edit can replace the original; where Album can't hand
- * that out (another app's file, a file from another app's provider) the editor gets read access and saves a copy.
- */
-private fun openEditor(uri: Uri, mime: String, start: (Intent) -> Unit): Boolean {
-    for (pkg in listOf(GOOGLE_PHOTOS, null)) {
-        for (write in listOf(true, false)) {
-            try {
-                // Not Intent.createChooser for the fallback: a chooser always opens, even empty, so it could never tell
-                // that no app can edit this. A plain implicit intent gets Android's own picker or ActivityNotFoundException.
-                start(editIntent(uri, mime, write, pkg))
-                return true
-            } catch (e: ActivityNotFoundException) {
-                break // not installed, or can't edit this type: try the next
-            } catch (e: SecurityException) {
-                CrashLog.note("edit: can't grant write access ($e)") // again, read-only
-            }
-        }
-    }
-    return false
-}
-
-/**
- * Returns a function that opens a photo or video in an editor ([openEditor]), saying so in [onMessage] when nothing on
- * the phone can edit it. If the editor saved over the file, every cached copy reloads once the person comes back.
- */
-@Composable
-private fun rememberEdit(onMessage: (String) -> Unit): (Media) -> Unit {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    // Saveable: Android may recreate the viewer while the editor is open
-    var editing by rememberSaveable { mutableStateOf<String?>(null) }
-    var before by rememberSaveable { mutableStateOf<Long?>(null) }
-    val editor = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        val uri = editing?.let(Uri::parse)
-        val generation = before
-        editing = null
-        // Only MediaStore files have a generation; anything else is never written back by an editor Album opens
-        if (uri == null || generation == null) return@rememberLauncherForActivityResult
-        scope.launch {
-            val resolver = context.contentResolver
-            // MediaStore rescans a file once the editor closes it; most editors save a copy instead, so this times out
-            val changed = withContext(Dispatchers.IO) {
-                withTimeoutOrNull(3_000) { Gallery.changes(resolver).first { runCatching { generationOf(resolver, uri) }.getOrNull() != generation } }
-            } != null
-            if (changed) {
-                CrashLog.note("edit saved over the original")
-                reloadEdited(context, uri)
-            }
-        }
-    }
-    return { m ->
-        CrashLog.note("edit")
-        scope.launch {
-            val resolver = context.contentResolver
-            val (mime, generation) = withContext(Dispatchers.IO) {
-                runCatching { resolver.getType(m.uri) }.getOrNull() to runCatching { generationOf(resolver, m.uri) }.getOrNull()
-            }
-            editing = m.uri.toString()
-            before = generation
-            if (!openEditor(m.uri, mime ?: if (m.isVideo) "video/*" else "image/*", editor::launch)) {
-                editing = null
-                onMessage("No app on this phone can edit this")
-            }
         }
     }
 }

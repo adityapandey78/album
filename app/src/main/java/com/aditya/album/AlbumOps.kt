@@ -81,11 +81,12 @@ enum class Transfer(val verb: String, val doing: String, val done: String) {
     Copy("copy", "Copying", "Copied"),
 }
 
-enum class AlbumSort(val label: String) {
-    Default("Default"),
-    Name("Name"),
-    Count("Most items"),
-    Updated("Recently updated"),
+/** How albums are ordered: [label] in the Sort sheet, [order] as All albums' heading. */
+enum class AlbumSort(val label: String, val order: String) {
+    Default("Default", "Camera first, then recent"),
+    Name("Name", "By name"),
+    Count("Most items", "Most items first"),
+    Updated("Recently updated", "Recently updated first"),
 }
 
 /** What the long-press menu on a folder album can do. */

@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Album</string>
+    <string name="memory_widget_description">A photo from this day in earlier years, a recent trip or a favourite</string>
     <color name="launcher_bg">#FF111110</color>
 
     <style name="Theme.Album" parent="android:Theme.DeviceDefault.DayNight">

@@ -30,7 +30,6 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -42,6 +41,7 @@ private const val BATCH = 16 // photos per database transaction; also how often 
 private const val CLUSTER_EVERY = 8 // batches between clustering runs, so People fills in during a long first pass
 private const val NEXT_AUTO = "next_auto"
 private const val DECODING = "decoding"
+private const val JOB = "People" // on the Organising card
 
 /**
  * Person pages open through the same album id as folders, [Special] albums, Explore pages and collections, in their
@@ -107,6 +107,15 @@ object People {
     }
     private val people by lazy { Room.databaseBuilder(app, PeopleDb::class.java, "people.db").build().dao() }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    /** Forgets the faces found in [ids] at once, for photos moved into the Private safe (names and corrections stay). */
+    suspend fun forget(ids: Collection<Long>) = withContext(Dispatchers.IO) {
+        if (!::app.isInitialized) return@withContext
+        ids.chunked(500).forEach { chunk -> // under SQLite's 999-variable limit
+            faces.deleteFaces(chunk)
+            faces.delete(chunk)
+        }
+    }
     private val clustering = Mutex() // the indexer and the user's corrections both re-cluster: one at a time
 
     // One background-priority thread for decoding, ML Kit and the embedding model, so the UI thread always wins the CPU.
@@ -122,6 +131,11 @@ object People {
 
     /** How far the current face scan has got, in photos. (0, 0) when there's nothing to do. */
     val progress: StateFlow<IndexProgress> = _progress.asStateFlow()
+
+    private fun progress(p: IndexProgress) {
+        _progress.value = p
+        IndexStatus.report(JOB, p.done, p.total)
+    }
 
     // Old cluster to new, when naming, hiding or correcting an automatic group made it a person, or a merge moved it.
     // An open page follows its group through the id change instead of closing for the moment the lists disagree.
@@ -304,7 +318,7 @@ object People {
                     skipCrashed(photos)
                     val plan = planIndex(photos, faces.stamps(), FACE_INDEX_VERSION, canLocate = false)
                     if (!partial) plan.remove.chunked(500).forEach { faces.delete(it) }
-                    _progress.value = IndexProgress(0, plan.analyse.size)
+                    progress(IndexProgress(0, plan.analyse.size))
                     plan.analyse.chunked(BATCH).forEachIndexed { i, batch ->
                         val results = batch.map { it to analyse(analyser, it.id) }
                         faces.save(
@@ -315,21 +329,21 @@ object People {
                         )
                         found += results.sumOf { it.second?.size ?: 0 }
                         unreadable += results.count { it.second == null }
-                        _progress.update { it.copy(done = it.done + batch.size) }
+                        progress(_progress.value.let { it.copy(done = it.done + batch.size) })
                         if (i % CLUSTER_EVERY == CLUSTER_EVERY - 1) clustering.withLock { recluster() }
                     }
                     scanned += plan.analyse.size
                 } while (plan.analyse.isNotEmpty()) // photos taken during the pass are picked up before it ends
-                analyser.dropped
+                analyser.dropped.toString() // {blurred=3, small=40, ...}
             }
         } finally {
             prefs.edit().remove(DECODING).commit() // finished or stopped by WorkManager: no photo to blame
+            progress(IndexProgress(0, 0))
         }
-        _progress.value = IndexProgress(0, 0)
         clustering.withLock { recluster() }
         if (scanned > 0) {
             val ms = (SystemClock.elapsedRealtime() - started) / scanned
-            CrashLog.note("faces: $scanned photos, $ms ms each, $found faces kept, $dropped dropped, $unreadable unreadable")
+            CrashLog.note("faces: $scanned photos, $ms ms each, $found faces kept, dropped $dropped, $unreadable unreadable")
         }
     }
 

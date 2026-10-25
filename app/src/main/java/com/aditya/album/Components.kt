@@ -40,6 +40,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
@@ -621,6 +625,7 @@ fun CollapsingBar(visible: Boolean, modifier: Modifier = Modifier, content: @Com
 
 /**
  * A bottom sheet on surface with radius-lg corners and a drag handle. Menus open here, never as drop-downs from the top.
+ * A tall sheet stops under the status bar.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -628,6 +633,11 @@ fun Sheet(onDismiss: () -> Unit, title: String? = null, content: @Composable Col
     val c = AlbumTheme.colors
     ModalBottomSheet(
         onDismissRequest = onDismiss,
+        // The status bar is kept clear outside the sheet, not by padding inside it: Material pads the content by the part
+        // of the status bar the sheet covers, so in a sheet within that distance of full height every drag changed its
+        // height, which moved where it rests, which changed the padding again, and the sheet shook (Jump to a date)
+        modifier = Modifier.windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top)),
+        contentWindowInsets = { WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom) },
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         sheetMaxWidth = 640.dp,
         shape = RoundedCornerShape(topStart = Space.radiusLg, topEnd = Space.radiusLg),

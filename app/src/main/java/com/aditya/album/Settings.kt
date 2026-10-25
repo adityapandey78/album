@@ -143,6 +143,7 @@ fun SettingsScreen(onBack: () -> Unit, columns: MutableIntState, onOpenTrash: ()
 
             Title("Behaviour")
             MediaManagementRow()
+            EditingAppRow(Modifier.bleed(Space.s1))
             SwitchRow(
                 "Haptic feedback", "Ticks on select, pinch and swipe.", a.haptics,
                 { v -> AppearancePrefs.update { it.copy(haptics = v) } }, icon = Sym.Vibration,
