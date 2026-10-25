@@ -1,5 +1,6 @@
 package com.aditya.album
 
+import android.content.Intent
 import android.text.format.Formatter
 import android.view.View
 import androidx.activity.compose.BackHandler
@@ -30,11 +31,18 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.RotateLeft
+import androidx.compose.material.icons.automirrored.outlined.RotateRight
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.Slideshow
+import androidx.compose.material.icons.outlined.Wallpaper
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -48,7 +56,9 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -56,9 +66,11 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -118,6 +130,7 @@ fun Viewer(
     }
     val context = LocalContext.current
     val density = LocalDensity.current
+    val haptics = LocalHapticFeedback.current
     val start = remember { items.indexOfFirst { it.id == startId }.coerceAtLeast(0) }
     val pager = rememberPagerState(start) { items.size }
     var chrome by remember { mutableStateOf(true) }
@@ -125,6 +138,13 @@ fun Viewer(
     val confirm = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {}
     val current = items[pager.currentPage.coerceAtMost(items.lastIndex)]
     val scope = rememberCoroutineScope()
+    val rotate = rememberRotate()
+    val hasPhotos = remember(items) { items.any { !it.isVideo } } // a slideshow needs at least one
+    var slideshowFrom by rememberSaveable { mutableStateOf<Long?>(null) }
+    // Motion photo: its video plays in place over the still, from the chip or a long-press
+    val motion = rememberMotionVideo(current)
+    var playMotion by remember(current.id) { mutableStateOf(false) }
+    var muted by remember { mutableStateOf(true) }
 
     // Opening and closing fly the photo between its grid cell and its full-screen place: 0 = in the cell, 1 = full screen.
     // The square cell crop grows into the whole photo (ContentScale.Crop on a rect that changes shape), so nothing stretches.
@@ -163,7 +183,7 @@ fun Viewer(
     }
 
     BackHandler(onBack = close)
-    ImmersiveBars(visible = chrome)
+    ImmersiveBars(visible = chrome && slideshowFrom == null)
 
     Box(
         Modifier.fillMaxSize()
@@ -179,7 +199,9 @@ fun Viewer(
         ) { page ->
             val m = items[page]
             val settled = pager.settledPage == page
-            val zoom = rememberZoomableImageState()
+            // Rotate edits the file in place under the same uri, and Telephoto keeps its decoded tiles and Exif per uri:
+            // a fresh state per edit makes it read the new orientation instead of showing the old one
+            val zoom = key(editVersion(m.uri)) { rememberZoomableImageState() }
             // zoomed in, vertical drags pan the photo (Telephoto) instead of closing it
             val zoomed by remember(zoom) { derivedStateOf { (zoom.zoomableState.zoomFraction ?: 0f) > 0.01f } }
             Box(
@@ -194,11 +216,30 @@ fun Viewer(
                     },
             ) {
                 if (m.isVideo) {
-                    VideoPage(m, active = settled, onControls = { chrome = it })
+                    VideoPage(m, active = settled && slideshowFrom == null, onControls = { chrome = it })
                 } else {
                     // the grid's thumbnail (same Coil memory-cache key, see ThumbKeyer) shows until the full photo is ready
-                    val request = remember(m.uri) { ImageRequest.Builder(context).data(m.uri).placeholderMemoryCacheKey(m.uri.toString()).build() }
-                    ZoomableAsyncImage(request, m.name, Modifier.fillMaxSize(), state = zoom, onClick = { chrome = !chrome })
+                    val request = remember(m.uri, editVersion(m.uri)) {
+                        ImageRequest.Builder(context).data(m.uri).placeholderMemoryCacheKey("${m.uri}#${editVersion(m.uri)}").build()
+                    }
+                    val video = motion?.takeIf { m.id == current.id }
+                    key(editVersion(m.uri)) { // rebuilt after an edit, like reopening the photo, so nothing stale is drawn
+                    ZoomableAsyncImage(
+                        request,
+                        m.name,
+                        Modifier.fillMaxSize(),
+                        state = zoom,
+                        onClick = { chrome = !chrome },
+                        onLongClick = video?.let {
+                            { _: Offset ->
+                                CrashLog.note("motion play (hold)")
+                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                playMotion = true
+                            }
+                        },
+                    )
+                    }
+                    if (video != null && playMotion) MotionPlayer(m.uri, video, muted, onEnd = { playMotion = false })
                 }
             }
         }
@@ -226,20 +267,54 @@ fun Viewer(
 
         val fade = Modifier.graphicsLayer { alpha = 1f - pulled() }
         AnimatedVisibility(chrome && !flying, Modifier.align(Alignment.TopCenter).then(fade), enter = fadeIn(), exit = fadeOut()) {
-            Row(
-                Modifier.fillMaxWidth().background(Color.Black.copy(alpha = 0.4f)).statusBarsPadding().padding(4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconButton(onClick = close) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back", tint = Color.White) }
-                if (current.taken > 0) {
-                    val time = Instant.ofEpochMilli(current.taken).atZone(ZoneId.systemDefault())
-                    Column {
-                        Text(time.format(dateFormat), color = Color.White, style = MaterialTheme.typography.titleMedium)
-                        Text(time.format(timeFormat), color = Color.White.copy(alpha = 0.8f), style = MaterialTheme.typography.bodySmall)
+            Column {
+                Row(
+                    Modifier.fillMaxWidth().background(Color.Black.copy(alpha = 0.4f)).statusBarsPadding().padding(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = close) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back", tint = Color.White) }
+                    if (current.taken > 0) {
+                        val time = Instant.ofEpochMilli(current.taken).atZone(ZoneId.systemDefault())
+                        Column(Modifier.weight(1f)) {
+                            Text(time.format(dateFormat), color = Color.White, style = MaterialTheme.typography.titleMedium)
+                            Text(time.format(timeFormat), color = Color.White.copy(alpha = 0.8f), style = MaterialTheme.typography.bodySmall)
+                        }
+                    } else {
+                        // files from other apps usually have no date, so show their name instead
+                        Text(
+                            current.name,
+                            Modifier.weight(1f),
+                            color = Color.White,
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
-                } else {
-                    // files from other apps usually have no date, so show their name instead
-                    Text(current.name, color = Color.White, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (!external && hasPhotos) {
+                        MoreMenu(
+                            current,
+                            onSlideshow = {
+                                CrashLog.note("slideshow")
+                                slideshowFrom = current.id
+                            },
+                            onRotate = { clockwise -> rotate(current, clockwise) },
+                        )
+                    }
+                }
+                if (motion != null) {
+                    MotionChip(
+                        playing = playMotion,
+                        muted = muted,
+                        onPlay = {
+                            CrashLog.note("motion play")
+                            playMotion = true
+                        },
+                        onMute = {
+                            CrashLog.note("motion sound ${if (muted) "on" else "off"}")
+                            muted = !muted
+                        },
+                        Modifier.padding(start = 12.dp, top = 8.dp),
+                    )
                 }
             }
         }
@@ -268,8 +343,51 @@ fun Viewer(
                 Action(Icons.Outlined.Info, "Details") { showInfo = true }
             }
         }
+
+        slideshowFrom?.let { id ->
+            Slideshow(items, id, onClose = { endedOn ->
+                slideshowFrom = null
+                val page = items.indexOfFirst { it.id == endedOn }
+                if (page >= 0) scope.launch { pager.scrollToPage(page) }
+            })
+        }
     }
     if (showInfo) InfoSheet(current) { showInfo = false }
+}
+
+/** The viewer's ⋮ menu: actions used less often than the bottom bar's. Rotate and Use as are for photos only. */
+@Composable
+private fun MoreMenu(m: Media, onSlideshow: () -> Unit, onRotate: (clockwise: Boolean) -> Unit) {
+    val context = LocalContext.current
+    var open by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { open = true }) { Icon(Icons.Outlined.MoreVert, "More", tint = Color.White) }
+        DropdownMenu(open, onDismissRequest = { open = false }) {
+            @Composable
+            fun Item(label: String, icon: ImageVector, onClick: () -> Unit) = DropdownMenuItem(
+                text = { Text(label) },
+                onClick = {
+                    open = false
+                    onClick()
+                },
+                leadingIcon = { Icon(icon, null) },
+            )
+            Item("Slideshow", Icons.Outlined.Slideshow, onSlideshow)
+            if (!m.isVideo) {
+                Item("Rotate left", Icons.AutoMirrored.Outlined.RotateLeft) { onRotate(false) }
+                Item("Rotate right", Icons.AutoMirrored.Outlined.RotateRight) { onRotate(true) }
+                Item("Use as", Icons.Outlined.Wallpaper) {
+                    CrashLog.note("use as")
+                    // Wallpaper, contact photo and the like. Some of those apps read the type from the "mimeType" extra.
+                    val attach = Intent(Intent.ACTION_ATTACH_DATA)
+                        .setDataAndType(m.uri, "image/*")
+                        .putExtra("mimeType", "image/*")
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    context.startSafely(Intent.createChooser(attach, "Use as"))
+                }
+            }
+        }
+    }
 }
 
 private val flight = tween<Float>(durationMillis = 280, easing = FastOutSlowInEasing)

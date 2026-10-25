@@ -2,6 +2,7 @@ package com.aditya.album
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
@@ -18,12 +20,19 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.VideoLibrary
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
@@ -54,16 +63,26 @@ fun Media.isIn(albumId: Long) = belongsTo(albumId, bucketId, isFavorite, isVideo
 fun specialCounts(media: List<Media>, trashed: Int): Map<Special, Int> =
     Special.entries.associateWith { s -> if (s == Special.Trash) trashed else media.count { it.isIn(s.id) } }
 
-/** Folder albums, with the special albums in a row on top. [onOpen] gets the album id (a folder's or a [Special]'s). */
+/**
+ * Special albums in a row on top, then collections, then folders with a New album tile at the end. [onOpen] gets the
+ * album id (a folder's, a [Special]'s or a collection's). Long-pressing a folder opens its menu, whose choices go to [onAction].
+ */
 @Composable
 fun AlbumsGrid(
     albums: List<Album>,
     specialCounts: Map<Special, Int>,
+    collections: List<CollectionAlbum>,
     state: LazyGridState,
     onOpen: (Long) -> Unit,
     contentPadding: PaddingValues,
+    onAction: (Album, AlbumAction) -> Unit,
+    onNewAlbum: () -> Unit,
 ) {
     val spec = LocalLook.current
+    val pinned by AlbumPrefs.pinned.collectAsState()
+    val hidden by AlbumPrefs.hidden.collectAsState()
+    val sort by AlbumPrefs.sort.collectAsState()
+    val ordered = remember(albums, sort, pinned) { albums.ordered(sort, pinned) }
     LazyVerticalGrid(
         GridCells.Fixed(3),
         Modifier.fillMaxSize().padding(horizontal = 12.dp),
@@ -104,8 +123,11 @@ fun AlbumsGrid(
                 }
             }
         }
-        items(albums, key = { it.id }) { album ->
-            Column(Modifier.clickable { onOpen(album.id) }) {
+        collectionsSection(collections, onOpen)
+        if (albums.isNotEmpty()) item(key = "folders", span = { GridItemSpan(maxLineSpan) }) { SectionHeader("Folders") }
+        items(ordered, key = { it.id }) { album ->
+            var menu by remember { mutableStateOf(false) }
+            Column(Modifier.combinedClickable(onLongClick = { menu = true }) { onOpen(album.id) }) {
                 AsyncImage(
                     Thumb(album.cover.uri),
                     contentDescription = null,
@@ -114,15 +136,25 @@ fun AlbumsGrid(
                         .background(MaterialTheme.colorScheme.surfaceVariant),
                     contentScale = ContentScale.Crop,
                 )
-                Text(
-                    album.name,
-                    Modifier.padding(top = 6.dp),
-                    style = MaterialTheme.typography.titleSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (album.key in pinned) Icon(Icons.Filled.PushPin, "Pinned", Modifier.padding(end = 2.dp).size(14.dp), tint = MaterialTheme.colorScheme.primary)
+                    Text(album.name, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
                 Text("${album.count}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (album.key in hidden) {
+                    Text("Hidden from Photos", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                AlbumMenu(menu, album.key in pinned, album.key in hidden, onDismiss = { menu = false }) {
+                    menu = false
+                    onAction(album, it)
+                }
             }
         }
+        item(key = "new") { NewAlbumTile(onNewAlbum) }
     }
+}
+
+@Composable
+fun SectionHeader(text: String) {
+    Text(text, Modifier.padding(top = 12.dp), style = MaterialTheme.typography.titleMedium)
 }

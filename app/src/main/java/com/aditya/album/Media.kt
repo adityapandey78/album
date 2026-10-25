@@ -190,8 +190,11 @@ fun shareIntent(items: Collection<Media>): Intent {
 
 // --- Grid thumbnails come from Android's own thumbnail cache: much faster than decoding a 50 MP photo.
 
-/** Coil model for a grid thumbnail. */
-data class Thumb(val uri: Uri)
+/**
+ * Coil model for a grid thumbnail. [version] goes up when Album edits the file in place (rotate); it's read in
+ * composition, so every thumbnail of that file reloads instead of keeping the old picture.
+ */
+data class Thumb(val uri: Uri, val version: Int = editVersion(uri))
 
 class ThumbFetcher(private val thumb: Thumb, private val options: Options) : Fetcher {
     override suspend fun fetch(): FetchResult {
@@ -207,5 +210,5 @@ class ThumbFetcher(private val thumb: Thumb, private val options: Options) : Fet
 
 /** Lets Coil keep thumbnails in its memory cache, so scrolling back is instant. */
 class ThumbKeyer : Keyer<Thumb> {
-    override fun key(data: Thumb, options: Options) = data.uri.toString()
+    override fun key(data: Thumb, options: Options) = "${data.uri}#${data.version}" // a rotated photo gets a fresh entry
 }

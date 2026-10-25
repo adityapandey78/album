@@ -14,6 +14,7 @@ After that, update from inside the app: **Settings → Check for updates**.
 
 | Version | Phase | What's in it |
 |---|---|---|
+| 0.5.0 | 1 | Albums: new, rename, delete, pin, sort, hide from Photos · move or copy photos between albums (dates and location kept, name clashes renamed, never overwritten) · collections: one photo in many albums without copies · calendar view with day thumbnails, tap a day to jump there · viewer ⋮ menu: slideshow, lossless rotate (changes 2 bytes, never re-saves the photo), motion photos (Google format), Use as wallpaper or contact |
 | 0.4.0 | 1 + 2 base | Fast scrollbar with date bubble, drag to select, select a day or all, remembered zoom level · photos fly out of and back into the grid, swipe down to close, swipe up for details · Favourites, Videos, Recently deleted (restore, delete forever), Undo, optional "no pop-ups" mode · open photos from other apps · on-device index for places (offline GeoNames) and things (ML Kit), shown in a later version |
 | 0.3.1 | 1 | Updates download through the browser, so Play Protect no longer flags Album |
 | 0.3.0 | 1 | Your real photos and videos: timeline with pinch zoom (2 to 7 columns, month view), albums, full-screen viewer with deep zoom, video player, share, favourite, delete to trash, details, multi-select |

@@ -32,9 +32,13 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.DriveFileMove
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Deselect
+import androidx.compose.material.icons.outlined.LibraryAdd
+import androidx.compose.material.icons.outlined.RemoveCircleOutline
 import androidx.compose.material.icons.outlined.SelectAll
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.Button
@@ -71,12 +75,16 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.unit.toSize
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material.icons.outlined.MoreVert
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        AlbumPrefs.load(this)
         setContent {
             var look by remember { mutableStateOf(Look.entries.find { it.name == prefs.getString("look", null) } ?: Look.Clean) }
             AlbumTheme(look) {
@@ -131,21 +139,27 @@ private fun AlbumShell(look: Look, onLook: (Look) -> Unit) {
 
     var tab by rememberSaveable { mutableStateOf(Tab.Photos) }
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
+    var calendarOpen by rememberSaveable { mutableStateOf(false) }
     var albumId by rememberSaveable { mutableStateOf<Long?>(null) }
     var viewerId by rememberSaveable { mutableStateOf<Long?>(null) }
     var selected by remember { mutableStateOf(emptySet<Long>()) }
 
     val loaded = Gallery.media.collectAsState().value
     val media = loaded.orEmpty()
+    val hidden by AlbumPrefs.hidden.collectAsState()
+    val photos = remember(media, hidden) { media.inPhotos(hidden) } // Photos leaves out folders hidden from it
     val trash = if (access != Access.None) rememberTrash().value else null
     val albums = remember(media) { albumsOf(media) }
     val specials = remember(media, trash) { specialCounts(media, trash.orEmpty().size) }
+    val collections = rememberCollections(media)
     val album = albums.find { it.id == albumId }
     val special = Special.entries.find { it.id == albumId }
-    val albumMedia = remember(media, albumId) { albumId?.let { id -> media.filter { it.isIn(id) } }.orEmpty() }
+    val collection = collections.find { it.albumId == albumId }
+    val albumMedia = remember(media, albumId, collection) { collection?.items ?: albumId?.let { id -> media.filter { it.isIn(id) } }.orEmpty() }
     val inTrash = tab == Tab.Albums && special == Special.Trash
-    val inAlbum = tab == Tab.Albums && (album != null || special != null) && !inTrash
-    val shown = if (inAlbum) albumMedia else media
+    val inAlbum = tab == Tab.Albums && (album != null || special != null || collection != null) && !inTrash
+    val openCollection = collection?.takeIf { inAlbum } // its selection removes from it instead of adding to one
+    val shown = if (inAlbum) albumMedia else photos
 
     // Grid states live here so scroll position and zoom survive the viewer, settings and tab switches.
     val photosGrid = rememberLazyGridState()
@@ -156,6 +170,10 @@ private fun AlbumShell(look: Look, onLook: (Look) -> Unit) {
 
     val snackbar = remember { SnackbarHostState() }
     val trashWithUndo = rememberTrashWithUndo(snackbar) { selected = emptySet() }
+    val albumActions = rememberAlbumActions { selected = emptySet() }
+    val addToCollection = rememberAddToCollection(snackbar)
+    val removeFromCollection = rememberRemoveFromCollection(snackbar)
+    var addingToCollection by remember { mutableStateOf<List<Long>?>(null) } // the selection, while the sheet is open
     // Photos deleted by another app leave the selection, so "N selected" and its actions stay truthful
     LaunchedEffect(shown) {
         val ids = shown.mapTo(HashSet()) { it.id }
@@ -200,15 +218,50 @@ private fun AlbumShell(look: Look, onLook: (Look) -> Unit) {
                                     context.startSafely(shareIntent(items))
                                 }
                             }) { Icon(Icons.Outlined.Share, "Share") }
-                            IconButton(onClick = {
+                            if (openCollection != null) {
+                                IconButton(onClick = {
+                                    removeFromCollection(openCollection, shown.filter { it.id in selected }.map { it.id })
+                                    selected = emptySet()
+                                }) { Icon(Icons.Outlined.RemoveCircleOutline, "Remove from collection") }
+                            } else {
+                                // Less frequent actions share one menu so the bar stays readable on a phone
+                                var more by remember { mutableStateOf(false) }
+                                IconButton(onClick = { more = true }) { Icon(Icons.Outlined.MoreVert, "More") }
+                                DropdownMenu(more, onDismissRequest = { more = false }) {
+                                    val pick = { action: () -> Unit -> more = false; action() }
+                                    DropdownMenuItem(
+                                        text = { Text("Move to album") },
+                                        leadingIcon = { Icon(Icons.AutoMirrored.Outlined.DriveFileMove, null) },
+                                        onClick = { pick { albumActions.moveOrCopy(shown.filter { it.id in selected }, Transfer.Move) } },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Copy to album") },
+                                        leadingIcon = { Icon(Icons.Outlined.ContentCopy, null) },
+                                        onClick = { pick { albumActions.moveOrCopy(shown.filter { it.id in selected }, Transfer.Copy) } },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Add to collection") },
+                                        leadingIcon = { Icon(Icons.Outlined.LibraryAdd, null) },
+                                        onClick = { pick { addingToCollection = shown.filter { it.id in selected }.map { it.id } } },
+                                    )
+                                }
+                            }
+                            if (openCollection == null) IconButton(onClick = {
                                 val items = shown.filter { it.id in selected }
                                 CrashLog.note("trash ${items.size}")
                                 trashWithUndo(items)
                             }) { Icon(Icons.Outlined.Delete, "Delete") }
                         }
-                        inAlbum -> TitleBar(album?.name ?: special?.title.orEmpty(), onBack = { albumId = null })
+                        inAlbum -> TitleBar(album?.name ?: special?.title ?: collection?.name.orEmpty(), onBack = { albumId = null })
                         else -> TitleBar(tab.name) {
                             val icons = LocalLook.current.icons
+                            if (tab == Tab.Photos && photos.isNotEmpty()) {
+                                IconButton(onClick = {
+                                    calendarOpen = true
+                                    CrashLog.note("open calendar")
+                                }) { Icon(icons.calendar, "Calendar") }
+                            }
+                            if (tab == Tab.Albums) AlbumSortButton()
                             IconButton(onClick = {}) { Icon(icons.search, "Search") }
                             IconButton(onClick = {
                                 settingsOpen = true
@@ -253,23 +306,38 @@ private fun AlbumShell(look: Look, onLook: (Look) -> Unit) {
                 access == Access.None -> PermissionScreen(Modifier.padding(padding)) { askAccess.launch(mediaPermissions) }
                 // Albums still opens when empty, so Recently deleted stays reachable after deleting everything
                 loaded != null && media.isEmpty() && tab != Tab.Albums -> Message("No photos or videos yet", Modifier.padding(padding))
-                tab == Tab.Photos -> MediaGrid(media, photosColumns, photosGrid, selected, open, select, padding, gridPosition)
-                inAlbum && loaded != null && albumMedia.isEmpty() -> Message(special?.emptyText.orEmpty(), Modifier.padding(padding))
+                tab == Tab.Photos -> MediaGrid(photos, photosColumns, photosGrid, selected, open, select, padding, gridPosition)
+                inAlbum && loaded != null && albumMedia.isEmpty() -> Message(special?.emptyText ?: EMPTY_COLLECTION, Modifier.padding(padding))
                 inAlbum -> MediaGrid(albumMedia, albumColumns, albumGrid, selected, open, select, padding, gridPosition)
-                tab == Tab.Albums -> AlbumsGrid(albums, specials, albumsGrid, onOpen = {
-                    CrashLog.note("open album ${Special.entries.find { s -> s.id == it }?.name ?: "folder"}")
+                tab == Tab.Albums -> AlbumsGrid(albums, specials, collections, albumsGrid, onOpen = {
+                    CrashLog.note("open album ${Special.entries.find { s -> s.id == it }?.name ?: if (collectionIdOf(it) != null) "collection" else "folder"}")
                     albumId = it
-                }, padding)
+                }, padding, albumActions::onAlbum, albumActions::newAlbum)
                 else -> Message("People, places and things arrive in Phase 2 and 3", Modifier.padding(padding))
             }
         }
+        AlbumActionsHost(albumActions, media, albums, snackbar)
         if (inTrash) TrashScreen(trash, onBack = { albumId = null })
+        if (calendarOpen) {
+            CalendarScreen(photos, onBack = { calendarOpen = false }) { day ->
+                // At 7 columns the grid has month headers only, so the day's month goes to the top
+                headerPosition(photos, day, byMonth = photosColumns.intValue >= MONTH_COLUMNS) { it.day }?.let { photosGrid.requestScrollToItem(it) }
+                calendarOpen = false
+            }
+        }
+        addingToCollection?.let { ids ->
+            AddToCollectionSheet(ids.size, collections, onDismiss = { addingToCollection = null }, onPick = { id, name ->
+                addToCollection(id, name, ids)
+                addingToCollection = null
+                selected = emptySet()
+            })
+        }
         viewerId?.let {
             Viewer(
                 shown,
                 it,
                 onClose = { viewerId = null },
-                onTrash = { m -> trashWithUndo(listOf(m)) },
+                onTrash = if (openCollection == null) { m -> trashWithUndo(listOf(m)) } else null,
                 openFrom = openedFrom,
                 closeTo = cellOnScreen,
             )

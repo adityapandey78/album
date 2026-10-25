@@ -2,16 +2,19 @@ package com.aditya.album
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.outlined.CalendarMonth
 import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.Photo
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.Photo
 import androidx.compose.material.icons.rounded.PhotoLibrary
@@ -60,6 +63,7 @@ class AppIcons(
     val explore: ImageVector,
     val search: ImageVector,
     val settings: ImageVector,
+    val calendar: ImageVector,
 )
 
 // Variable fonts (one file per family), bundled so they work offline.
@@ -76,15 +80,24 @@ private val jakarta = family(R.font.plus_jakarta_sans)
 fun specOf(look: Look) = when (look) {
     Look.Clean -> LookSpec(
         inter, gridGap = 2.dp, cellCorner = 0.dp, titleSize = 22.sp,
-        AppIcons(Icons.Outlined.Photo, Icons.Outlined.PhotoLibrary, Icons.Outlined.Explore, Icons.Outlined.Search, Icons.Outlined.Settings),
+        AppIcons(
+            Icons.Outlined.Photo, Icons.Outlined.PhotoLibrary, Icons.Outlined.Explore, Icons.Outlined.Search, Icons.Outlined.Settings,
+            Icons.Outlined.CalendarMonth,
+        ),
     )
     Look.Bold -> LookSpec(
         outfit, gridGap = 4.dp, cellCorner = 8.dp, titleSize = 28.sp,
-        AppIcons(Icons.Rounded.Photo, Icons.Rounded.PhotoLibrary, Icons.Rounded.Explore, Icons.Rounded.Search, Icons.Rounded.Settings),
+        AppIcons(
+            Icons.Rounded.Photo, Icons.Rounded.PhotoLibrary, Icons.Rounded.Explore, Icons.Rounded.Search, Icons.Rounded.Settings,
+            Icons.Rounded.CalendarMonth,
+        ),
     )
     Look.You -> LookSpec(
         jakarta, gridGap = 3.dp, cellCorner = 4.dp, titleSize = 24.sp,
-        AppIcons(Icons.Filled.Photo, Icons.Filled.PhotoLibrary, Icons.Filled.Explore, Icons.Filled.Search, Icons.Filled.Settings),
+        AppIcons(
+            Icons.Filled.Photo, Icons.Filled.PhotoLibrary, Icons.Filled.Explore, Icons.Filled.Search, Icons.Filled.Settings,
+            Icons.Filled.CalendarMonth,
+        ),
     )
 }
 

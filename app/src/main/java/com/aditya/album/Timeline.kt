@@ -71,8 +71,11 @@ import kotlinx.coroutines.launch
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 
-/** Column counts you can pinch between. 7 switches the headers from days to months. */
-private val columnSteps = listOf(2, 3, 4, 5, 7)
+/** From this column count up, the grid's headers are months instead of days. */
+const val MONTH_COLUMNS = 7
+
+/** Column counts you can pinch between. */
+private val columnSteps = listOf(2, 3, 4, 5, MONTH_COLUMNS)
 const val DEFAULT_COLUMNS = 4
 
 class Section<T>(val key: Long, val label: String, val items: List<T>)
@@ -83,7 +86,7 @@ fun <T> sections(media: List<T>, byMonth: Boolean, today: Long = LocalDate.now()
     val dayFormat = DateTimeFormatter.ofPattern("EEE, d MMM")
     val oldDayFormat = DateTimeFormatter.ofPattern("d MMM yyyy")
     val monthFormat = DateTimeFormatter.ofPattern("MMMM yyyy")
-    fun keyOf(m: T) = dayOf(m).let { day -> if (byMonth) LocalDate.ofEpochDay(day).let { it.year * 12L + it.monthValue } else day }
+    fun keyOf(m: T) = sectionKey(dayOf(m), byMonth)
     fun labelOf(m: T): String {
         val day = dayOf(m)
         val date = LocalDate.ofEpochDay(day)
@@ -106,6 +109,8 @@ fun <T> sections(media: List<T>, byMonth: Boolean, today: Long = LocalDate.now()
     return out
 }
 
+private fun sectionKey(day: Long, byMonth: Boolean) = if (byMonth) LocalDate.ofEpochDay(day).let { it.year * 12L + it.monthValue } else day
+
 /**
  * Maps a flat grid position (each section is a header item followed by its cells) back to its section and photo.
  * Built once per sections change, so the fast scroller and drag-select can look up positions every frame in O(log n).
@@ -126,6 +131,25 @@ class GridIndex(sectionSizes: List<Int>) {
 
     /** Index into the flat photo list of the cell at grid position [position]. */
     fun mediaAt(position: Int): Int = position - sectionAt(position) - 1
+}
+
+/**
+ * Grid position of the header of the section holding [day] (its month's when [byMonth]) in a grid of newest-first
+ * [media] laid out like [MediaGrid], or null if no photo is in that section. Lets the calendar scroll Photos to a day.
+ */
+fun <T> headerPosition(media: List<T>, day: Long, byMonth: Boolean, dayOf: (T) -> Long): Int? {
+    val target = sectionKey(day, byMonth)
+    var headers = 0
+    var previous: Long? = null
+    media.forEachIndexed { i, m ->
+        val key = sectionKey(dayOf(m), byMonth)
+        if (key != previous) {
+            if (key == target) return i + headers
+            headers++
+            previous = key
+        }
+    }
+    return null
 }
 
 /**
@@ -175,7 +199,7 @@ fun MediaGrid(
 ) {
     val spec = LocalLook.current
     val haptics = LocalHapticFeedback.current
-    val byMonth = columns.intValue >= 7
+    val byMonth = columns.intValue >= MONTH_COLUMNS
     val sections = remember(media, byMonth) { sections(media, byMonth) { it.day } }
     val index = remember(sections) { GridIndex(sections.map { it.items.size }) }
     val selecting = selected.isNotEmpty()

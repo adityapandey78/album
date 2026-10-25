@@ -20,6 +20,7 @@ class AlbumApp : Application(), SingletonImageLoader.Factory, Configuration.Prov
             StrictMode.setVmPolicy(StrictMode.VmPolicy.Builder().detectAll().penaltyLog().build())
         }
         SmartIndex.start(this)
+        Collections.start(this)
     }
 
     // WorkManager starts on first use (the smart index, off the main thread) instead of at every launch. See the manifest.

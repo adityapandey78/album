@@ -37,6 +37,25 @@ class TimelineTest {
         assertEquals(listOf(0, 1, 2, 3, 4, 5), listOf(1, 2, 4, 6, 7, 8).map { index.mediaAt(it) })
     }
 
+    @Test fun headerPositionOfADay() {
+        // Today x2, yesterday, a day last year: H0 c c | H1 c | H2 c
+        val days = listOf(today, today, today - 1, today - 400)
+        assertEquals(0, headerPosition(days, today, byMonth = false) { it })
+        assertEquals(3, headerPosition(days, today - 1, byMonth = false) { it })
+        assertEquals(5, headerPosition(days, today - 400, byMonth = false) { it })
+        assertEquals(null, headerPosition(days, today - 2, byMonth = false) { it })
+    }
+
+    @Test fun headerPositionOfADayInMonthView() {
+        // 25 Oct, 5 Oct, 30 Sep: H(Oct) c c | H(Sep) c
+        val days = listOf(today, today - 20, today - 25)
+        assertEquals(0, headerPosition(days, today - 20, byMonth = true) { it })
+        assertEquals(3, headerPosition(days, today - 25, byMonth = true) { it })
+        assertEquals(3, headerPosition(days, today - 50, byMonth = true) { it }) // 5 Sep has no photo, but September does
+        assertEquals(null, headerPosition(days, today - 60, byMonth = true) { it }) // nothing in August
+        assertEquals(null, headerPosition(emptyList<Long>(), today, byMonth = true) { it })
+    }
+
     private val ids = (0L..9L).toList()
 
     @Test fun dragSelectsTheRangeEitherWayAndShrinksBack() {

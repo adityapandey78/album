@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Cloud backup is off (allowBackup="false"). Moving to a new phone still copies app data, but the collections and smart
+     index databases store MediaStore ids, which differ on the new phone: they'd point at the wrong photos, so they stay behind. -->
+<data-extraction-rules>
+    <device-transfer>
+        <exclude domain="database" path="." />
+    </device-transfer>
+</data-extraction-rules>
