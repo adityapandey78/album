@@ -875,6 +875,10 @@ fun BottomBar(
 
 class SelAction(val sym: Sym, val label: String, val danger: Boolean = false, val onClick: () -> Unit)
 
+/** [SelectionBar]'s height (count row, gap, action bar), and the room a grid leaves under its last row for it. */
+val SelectionBarHeight = Space.target + Space.s2 + Space.bar
+val SelectionClearance = SelectionBarHeight + Space.s4 + Space.s8
+
 /**
  * Replaces the bottom bar while selecting: the count and Select all above, labelled actions below, all within one thumb's
  * reach. Pass null [onSelectAll] to hide it. A danger action sits on a danger-soft capsule so it reads on any photo.

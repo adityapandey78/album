@@ -6,14 +6,20 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -114,8 +120,8 @@ private const val TILT_DEGREES = 8f
  * Clean up, pushed over the tabs: a chip per category with its count, and the chosen categories' photos in a grid, where
  * each group's original or best shot carries a badge. "Start swipe to clean" goes through them one card at a time. Nothing
  * is deleted while swiping: on leaving, every card swiped to Trash goes in one Trash request, with one Snackbar and Undo.
- * Exact copies and copies can also go in one tap, behind a ConfirmBar. Either way, an original that stays takes over its
- * copies' favourites and collections. [category] (a [CleanupKind] name, as Storage passes) opens on that category alone;
+ * Exact copies and copies can also go in one tap, behind a ConfirmBar, and any photos can be picked by hand (Select, or a
+ * long-press) and moved together. Every way, an original that stays takes over its copies' favourites and collections. [category] (a [CleanupKind] name, as Storage passes) opens on that category alone;
  * otherwise on the suggestions.
  */
 @Composable
@@ -142,6 +148,17 @@ fun CleanupScreen(media: List<Media>, onBack: () -> Unit, onOpen: (Media) -> Uni
         session = null
         keeps = emptyList()
     }
+    // Picking by hand: Select in the top bar, or a long-press on a tile. Ids, so it survives the activity being recreated.
+    var selectMode by rememberSaveable { mutableStateOf(false) }
+    var selected by rememberSaveable { mutableStateOf(emptyList<Long>()) }
+    val picked = remember(selected, byId) { selected.mapNotNull(byId::get) } // leaves out photos gone meanwhile
+    val pickedIds = remember(selected) { selected.toHashSet() }
+    val selecting = selectMode || picked.isNotEmpty()
+    fun clearSelection() {
+        selectMode = false
+        selected = emptyList()
+    }
+    val haptics = rememberHaptics()
     // One trip to Trash, while Android asks about favourites and then about Trash: every item going, and the copies among
     // them with each one's original, in the same order. Ids, so a step in between survives the activity being recreated.
     var confirming by rememberSaveable { mutableStateOf<String?>(null) } // the kind whose ConfirmBar is up
@@ -156,6 +173,7 @@ fun CleanupScreen(media: List<Media>, onBack: () -> Unit, onOpen: (Media) -> Uni
     // The review ends once Android has moved the photos: declining its pop-up keeps every decision to try again
     val trash = rememberTrashWithUndo(snackbar) {
         endSession()
+        clearSelection()
         val moved = copies
         val kept = originals
         forget()
@@ -209,7 +227,13 @@ fun CleanupScreen(media: List<Media>, onBack: () -> Unit, onOpen: (Media) -> Uni
         CrashLog.note("cleanup trash ${out.size}")
         send(out)
     }
-    val leave = { if (session != null) finish() else onBack() }
+    val leave = {
+        when {
+            selecting -> clearSelection()
+            session != null -> finish()
+            else -> onBack()
+        }
+    }
     BackHandler(onBack = leave)
 
     val ids = session
@@ -219,12 +243,18 @@ fun CleanupScreen(media: List<Media>, onBack: () -> Unit, onOpen: (Media) -> Uni
         result == null -> "Looking through your photos"
         else -> "${itemCount(suggested.size)} · frees ${size(suggested.sumOf { byId[it.id]?.size ?: 0L })}"
     }
-    val showStart = ids == null && queue.isNotEmpty()
+    val showStart = ids == null && queue.isNotEmpty() && !selecting
+    // Select all picks what the chosen categories suggest removing: copies but not their originals, never a best shot
+    val allPicked = suggested.isNotEmpty() && suggested.all { it.id in pickedIds }
     val bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
 
     Box(Modifier.fillMaxSize().background(c.canvas)) {
         Column(Modifier.fillMaxSize()) {
-            Box(Modifier.statusBarsPadding()) { CollapsedTopBar("Clean up", subtitle = subtitle, onBack = leave) }
+            Box(Modifier.statusBarsPadding()) {
+                CollapsedTopBar("Clean up", subtitle = subtitle, onBack = leave) {
+                    if (ids == null && result != null && !selecting) AlbumIconButton(Sym.CheckCircle, "Select", { selectMode = true })
+                }
+            }
             val r = result
             when {
                 ids != null -> SwipeSession(
@@ -247,8 +277,24 @@ fun CleanupScreen(media: List<Media>, onBack: () -> Unit, onOpen: (Media) -> Uni
                     r, summary, kinds, byId,
                     onToggle = { kind -> chosen = if (kind.name in chosen) chosen - kind.name else chosen + kind.name },
                     onMove = { confirming = it.name },
-                    onOpen = onOpen,
-                    bottomPadding = bottom + if (showStart) Space.target + Space.s8 else Space.s8,
+                    selecting = selecting,
+                    selected = pickedIds,
+                    onTap = { m ->
+                        when {
+                            !selecting -> onOpen(m)
+                            m.id in pickedIds -> selected = selected - m.id
+                            else -> selected = selected + m.id
+                        }
+                    },
+                    onHold = { m ->
+                        haptics.longPress()
+                        if (m.id !in pickedIds) selected = selected + m.id
+                    },
+                    bottomPadding = bottom + when {
+                        selecting -> SelectionClearance
+                        showStart -> Space.target + Space.s8
+                        else -> Space.s8
+                    },
                     size = ::size,
                 )
             }
@@ -267,10 +313,39 @@ fun CleanupScreen(media: List<Media>, onBack: () -> Unit, onOpen: (Media) -> Uni
                 Sym.Swipe,
             )
         }
+        AnimatedVisibility(
+            selecting && ids == null,
+            Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = Space.s4),
+            enter = if (AlbumTheme.spec.still) fadeIn(tween(0)) else slideInVertically { it } + fadeIn(),
+            exit = if (AlbumTheme.spec.still) fadeOut(tween(0)) else slideOutVertically { it } + fadeOut(),
+        ) {
+            SelectionBar(
+                picked.size,
+                listOf(
+                    SelAction(Sym.Delete, "Move to Trash", danger = true) {
+                        if (picked.isNotEmpty() && context.canSend(picked.size, MAX_REQUEST, "delete")) {
+                            CrashLog.note("cleanup trash picked ${picked.size}")
+                            send(picked)
+                        }
+                    },
+                ),
+                onClose = ::clearSelection,
+                onSelectAll = if (suggested.isEmpty()) null else ({
+                    selected = if (allPicked) emptyList() else (selected + suggested.map { it.id }).distinct()
+                }),
+                allLabel = if (allPicked) "Clear all" else "Select all",
+            )
+        }
         SnackbarHost(
             snackbar,
             Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
-                .padding(bottom = Space.s4 + if (showStart) Space.target + Space.s3 else 0.dp),
+                .padding(
+                    bottom = Space.s4 + when {
+                        selecting -> SelectionBarHeight + Space.s2
+                        showStart -> Space.target + Space.s3
+                        else -> 0.dp
+                    },
+                ),
         ) { AlbumSnackbar(it) }
     }
 
@@ -330,10 +405,14 @@ private fun CleanupGrid(
     byId: Map<Long, Media>,
     onToggle: (CleanupKind) -> Unit,
     onMove: (CleanupKind) -> Unit,
-    onOpen: (Media) -> Unit,
+    selecting: Boolean,
+    selected: Set<Long>,
+    onTap: (Media) -> Unit,
+    onHold: (Media) -> Unit,
     bottomPadding: Dp,
     size: (Long) -> String,
 ) {
+    val tiles = TilePicking(selecting, selected, onTap, onHold)
     val spec = AlbumTheme.spec
     val counts = summary?.kinds.orEmpty()
     // Chips for categories with something in them, and any chosen one, so it can be unchosen
@@ -375,7 +454,9 @@ private fun CleanupGrid(
                             Text(kind.label, style = AlbumTheme.type.titleMd, color = c.ink)
                             if (n != null) Text("${itemCount(n.count)} · frees ${size(n.bytes)}", style = AlbumTheme.type.caption, color = c.inkMuted)
                         }
-                        if (kind == CleanupKind.Exact || kind == CleanupKind.Copies) AlbumButton("Move to Trash", { onMove(kind) }, icon = Sym.Delete)
+                        if (!selecting && (kind == CleanupKind.Exact || kind == CleanupKind.Copies)) {
+                            AlbumButton("Move to Trash", { onMove(kind) }, icon = Sym.Delete)
+                        }
                     }
                     Text(noteOf(kind), style = AlbumTheme.type.caption, color = c.inkMuted)
                 }
@@ -384,28 +465,37 @@ private fun CleanupGrid(
                 CleanupKind.Exact, CleanupKind.Copies, CleanupKind.Similar -> {
                     val keep = if (kind == CleanupKind.Similar) "Best shot" else "Original"
                     result.groups(kind).forEach { group ->
-                        val tiles = group.ids.mapNotNull(byId::get).takeIf { it.size > 1 } ?: return@forEach
+                        val members = group.ids.mapNotNull(byId::get).takeIf { it.size > 1 } ?: return@forEach
                         // Each group starts on a row of its own
                         item(key = "gap:$kind:${group.keep}", span = { GridItemSpan(maxLineSpan) }) { Spacer(Modifier.height(Space.s2)) }
-                        cleanupTiles(kind, tiles, onOpen) { m -> if (m.id == group.keep) keep to BadgeTone.Flash else null }
+                        cleanupTiles(kind, members, tiles) { m -> if (m.id == group.keep) keep to BadgeTone.Flash else null }
                     }
                 }
-                CleanupKind.BigVideos -> cleanupTiles(kind, result.bigVideos.mapNotNull(byId::get), onOpen) { m -> size(m.size) to BadgeTone.Photo }
-                else -> cleanupTiles(kind, result.candidates(kind).mapNotNull(byId::get), onOpen) { null }
+                CleanupKind.BigVideos -> cleanupTiles(kind, result.bigVideos.mapNotNull(byId::get), tiles) { m -> size(m.size) to BadgeTone.Photo }
+                else -> cleanupTiles(kind, result.candidates(kind).mapNotNull(byId::get), tiles) { null }
             }
         }
     }
 }
 
-// Keys carry the kind: a blurry similar shot is a tile in both sections
-private fun LazyGridScope.cleanupTiles(kind: CleanupKind, tiles: List<Media>, onOpen: (Media) -> Unit, badge: (Media) -> Pair<String, BadgeTone>?) {
+/** How the grid's tiles answer touch: a tap opens, or picks while [selecting]; a long-press ([onHold]) starts picking. */
+private class TilePicking(val selecting: Boolean, val selected: Set<Long>, val onTap: (Media) -> Unit, val onHold: (Media) -> Unit)
+
+// Keys carry the kind: a blurry similar shot is a tile in both sections (picked in both, since picking goes by photo)
+private fun LazyGridScope.cleanupTiles(kind: CleanupKind, tiles: List<Media>, picking: TilePicking, badge: (Media) -> Pair<String, BadgeTone>?) {
     items(tiles, key = { "$kind:${it.id}" }) { m ->
         val b = badge(m)
         MediaTile(
-            m, selecting = false, selected = false,
-            Modifier.aspectRatio(1f).clickable(onClickLabel = "Open") { onOpen(m) },
+            m, picking.selecting, m.id in picking.selected,
+            Modifier.aspectRatio(1f).combinedClickable(
+                onClickLabel = if (picking.selecting) null else "Open",
+                onLongClickLabel = "Select",
+                onLongClick = { picking.onHold(m) },
+                hapticFeedbackEnabled = false, // Haptics follows Album's own haptics switch
+            ) { picking.onTap(m) },
             badge = b?.first,
             badgeTone = b?.second ?: BadgeTone.Photo,
+            checkSize = checkSizeFor(DEFAULT_COLUMNS),
         )
     }
 }

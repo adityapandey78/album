@@ -147,10 +147,6 @@ fun rememberTrashWithUndo(snackbar: SnackbarHostState, onTrashed: () -> Unit = {
     }
 }
 
-// The SelectionBar's height (count row, gap, action bar), and the room the grid leaves under its last row for it
-private val selectionBar = Space.target + Space.s2 + Space.bar
-private val selectionClearance = selectionBar + Space.s4 + Space.s8
-
 /**
  * Recently deleted, pushed over the tabs. Long-press to select, then restore or delete forever from the SelectionBar;
  * Empty trash sits at the top right. Deleting forever is held to confirm, since nothing brings it back.
@@ -196,7 +192,7 @@ fun TrashScreen(items: List<Trashed>?, onBack: () -> Unit) {
                 else -> LazyVerticalGrid(
                     GridCells.Fixed(DEFAULT_COLUMNS),
                     Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(top = Space.s3, bottom = bottom + if (selecting) selectionClearance else Space.s8),
+                    contentPadding = PaddingValues(top = Space.s3, bottom = bottom + if (selecting) SelectionClearance else Space.s8),
                     horizontalArrangement = Arrangement.spacedBy(spec.gutter),
                     verticalArrangement = Arrangement.spacedBy(spec.gutter),
                 ) {
@@ -259,7 +255,7 @@ fun TrashScreen(items: List<Trashed>?, onBack: () -> Unit) {
         SnackbarHost(
             snackbar,
             Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
-                .padding(bottom = Space.s4 + if (selecting) selectionBar + Space.s2 else 0.dp),
+                .padding(bottom = Space.s4 + if (selecting) SelectionBarHeight + Space.s2 else 0.dp),
         ) { AlbumSnackbar(it) }
     }
 

@@ -305,10 +305,6 @@ private fun LockedSafe(onBack: () -> Unit) {
     }
 }
 
-// The SelectionBar's height (count row, gap, action bar), and the room the grid leaves under its last row for it
-private val selectionBar = Space.target + Space.s2 + Space.bar
-private val selectionClearance = selectionBar + Space.s4 + Space.s8
-
 // A few thumbnails decrypt at a time, like the grid's (see Media.kt), so a fling doesn't starve the UI threads
 private val safeLoads = Dispatchers.IO.limitedParallelism(4)
 
@@ -349,7 +345,7 @@ private fun OpenSafe(key: ByteArray, onBack: () -> Unit) {
                 else -> LazyVerticalGrid(
                     GridCells.Fixed(DEFAULT_COLUMNS),
                     Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(top = Space.s3, bottom = bottom + if (selecting) selectionClearance else Space.s8),
+                    contentPadding = PaddingValues(top = Space.s3, bottom = bottom + if (selecting) SelectionClearance else Space.s8),
                     horizontalArrangement = Arrangement.spacedBy(spec.gutter),
                     verticalArrangement = Arrangement.spacedBy(spec.gutter),
                 ) {
@@ -398,7 +394,7 @@ private fun OpenSafe(key: ByteArray, onBack: () -> Unit) {
         SnackbarHost(
             snackbar,
             Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
-                .padding(bottom = Space.s4 + if (selecting) selectionBar + Space.s2 else 0.dp),
+                .padding(bottom = Space.s4 + if (selecting) SelectionBarHeight + Space.s2 else 0.dp),
         ) { AlbumSnackbar(it) }
 
         viewing?.let { id ->
