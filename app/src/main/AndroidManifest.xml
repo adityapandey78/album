@@ -17,6 +17,11 @@
     <uses-permission android:name="android.permission.MANAGE_MEDIA" />
     <!-- Where photos were taken (EXIF GPS), for Places. Turned into a town name on the phone, never sent anywhere. -->
     <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />
+    <!-- A big organising pass (first index, faces, clean-up scan) keeps running after Album leaves the screen, with a quiet
+         notification, instead of a slice per visit. Media processing on Android 15+, data sync before. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- Private safe: asks for the fingerprint (or the screen lock) through Android's own prompt before it opens. -->
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <!-- Added by WorkManager and ML Kit's telemetry; nothing here watches the network (no network constraints, telemetry cut below). -->
@@ -55,6 +60,12 @@
             tools:node="merge">
             <meta-data android:name="androidx.work.WorkManagerInitializer" tools:node="remove" />
         </provider>
+
+        <!-- WorkManager's own service, which runs those long passes; declared here only to give it its types -->
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="mediaProcessing|dataSync"
+            tools:node="merge" />
 
         <receiver
             android:name=".InstallResultReceiver"

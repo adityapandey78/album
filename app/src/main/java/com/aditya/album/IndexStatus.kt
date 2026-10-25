@@ -44,10 +44,18 @@ object IndexStatus {
     fun report(job: String, done: Int, total: Int) = jobs.update { if (done >= total) it - job else it + (job to IndexProgress(done, total)) }
 }
 
-/** The card's meta line, e.g. "1,234 of 3,490 · People, places and things": all jobs' items together, names A to Z. */
+/**
+ * How far organising is, 0 to 1: the average of the jobs' own progress. Each job counts over the whole library (a
+ * resumed pass starts where it left off), so adding their counts would count every photo once per job.
+ */
+fun indexingFraction(jobs: Map<String, IndexProgress>): Float =
+    jobs.values.filter { it.total > 0 }.map { it.done.toFloat() / it.total }.average().takeUnless { it.isNaN() }?.toFloat() ?: 0f
+
+/** The card's meta line, e.g. "62% done · People, places and things": names A to Z. Never 100% while a job runs. */
 fun indexingMeta(jobs: Map<String, IndexProgress>): String {
     val names = jobs.keys.sorted().mapIndexed { i, name -> if (i == 0) name else name.replaceFirstChar { it.lowercase() } }
-    return "%,d of %,d · %s".format(jobs.values.sumOf { it.done }, jobs.values.sumOf { it.total }, names.joinToString(", "))
+    val percent = (indexingFraction(jobs) * 100).toInt().coerceAtMost(99)
+    return "$percent% done · ${names.joinToString(", ")}"
 }
 
 /**
@@ -69,14 +77,13 @@ fun IndexingCard(modifier: Modifier = Modifier) {
         enter = if (still) fadeIn(tween(0)) else fadeIn(tween(180)) + expandVertically(tween(220)),
         exit = if (still) fadeOut(tween(0)) else fadeOut(tween(150)) + shrinkVertically(tween(220)),
     ) {
-        val total = now.values.sumOf { it.total }
         Column(
             Modifier.fillMaxWidth().background(c.surface, RoundedCornerShape(Space.radiusMd)).semantics(mergeDescendants = true) {}.padding(Space.s4),
             verticalArrangement = Arrangement.spacedBy(Space.s2),
         ) {
             Text("Organising your photos", style = AlbumTheme.type.label, color = c.ink)
             Text(indexingMeta(now), style = AlbumTheme.type.meta, color = c.inkMuted)
-            ProgressLine(if (total == 0) 0f else now.values.sumOf { it.done } / total.toFloat(), Modifier.padding(top = Space.s1))
+            ProgressLine(indexingFraction(now), Modifier.padding(top = Space.s1))
         }
     }
 }

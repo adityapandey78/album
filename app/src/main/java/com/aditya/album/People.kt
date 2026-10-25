@@ -302,7 +302,7 @@ object People {
     }
 
     /** One scanning pass: drops faces of deleted photos, then scans new and changed photos in batches, newest first. */
-    internal suspend fun run() = withContext(background) {
+    internal suspend fun run(onLongPass: suspend () -> Unit = {}) = withContext(background) {
         if (!has(READ_MEDIA_IMAGES) && !has(READ_MEDIA_VISUAL_USER_SELECTED)) return@withContext
         // With "Select photos" access MediaStore lists only the picked ones: never treat the rest as deleted
         val partial = !has(READ_MEDIA_IMAGES)
@@ -318,8 +318,10 @@ object People {
                     skipCrashed(photos)
                     val plan = planIndex(photos, faces.stamps(), FACE_INDEX_VERSION, canLocate = false)
                     if (!partial) plan.remove.chunked(500).forEach { faces.delete(it) }
-                    progress(IndexProgress(0, plan.analyse.size))
+                    // Counted over the whole library, so a pass that resumes shows where it is, not a fresh start from 0
+                    progress(IndexProgress(photos.size - plan.analyse.size, photos.size))
                     plan.analyse.chunked(BATCH).forEachIndexed { i, batch ->
+                        if (plan.analyse.size - i * BATCH >= LONG_PASS) onLongPass()
                         val results = batch.map { it to analyse(analyser, it.id) }
                         faces.save(
                             results.map { (photo, _) -> ScannedPhoto(photo.id, photo.modified, photo.size, FACE_INDEX_VERSION) },
@@ -390,8 +392,10 @@ object People {
 
 /** Runs [People.run] under WorkManager: resumes after process death, waits while the battery is low. */
 class FaceWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+    private val longPass = LongPassGate(this)
+
     override suspend fun doWork(): Result = try {
-        People.run()
+        People.run(onLongPass = longPass::tick)
         Result.success()
     } catch (e: CancellationException) {
         throw e // stopped by WorkManager (battery low): finished batches are saved, the rest runs next time

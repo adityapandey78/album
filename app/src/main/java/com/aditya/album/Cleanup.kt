@@ -365,7 +365,7 @@ object Cleanup {
     }
 
     /** One pass: drops rows of deleted media, then measures new and changed files in batches, newest first. */
-    internal suspend fun run() = withContext(background) {
+    internal suspend fun run(onLongPass: suspend () -> Unit = {}) = withContext(background) {
         if (!has(READ_MEDIA_IMAGES) && !has(READ_MEDIA_VIDEO) && !has(READ_MEDIA_VISUAL_USER_SELECTED)) return@withContext
         // With "Select photos" access MediaStore lists only the picked ones: never treat the rest as deleted
         val partial = !has(READ_MEDIA_IMAGES) && !has(READ_MEDIA_VIDEO)
@@ -379,12 +379,14 @@ object Cleanup {
                 val plan = planCleanup(found, rows, CLEANUP_VERSION)
                 if (!partial) plan.remove.chunked(500).forEach { dao.remove(it) }
                 val known = rows.associateBy { it.id }
-                var done = 0
-                IndexStatus.report(JOB, 0, plan.work.size)
-                for (batch in plan.work.chunked(BATCH)) {
+                // Counted over the whole library, so a pass that resumes shows where it is, not a fresh start from 0
+                var done = found.size - plan.work.size
+                IndexStatus.report(JOB, done, found.size)
+                for ((i, batch) in plan.work.chunked(BATCH).withIndex()) {
+                    if (plan.work.size - i * BATCH >= LONG_PASS) onLongPass()
                     dao.save(batch.map { measure(it, known[it.item.id]) })
                     done += batch.size
-                    IndexStatus.report(JOB, done, plan.work.size)
+                    IndexStatus.report(JOB, done, found.size)
                 }
                 measured += plan.work.size
                 if (plan.work.isNotEmpty()) passes.update { it + 1 }
@@ -457,8 +459,10 @@ object Cleanup {
 
 /** Runs [Cleanup.run] under WorkManager: resumes after process death, waits while the battery is low. */
 class CleanupWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+    private val longPass = LongPassGate(this)
+
     override suspend fun doWork(): Result = try {
-        Cleanup.run()
+        Cleanup.run(onLongPass = longPass::tick)
         Result.success()
     } catch (e: CancellationException) {
         throw e // stopped by WorkManager (battery low): finished batches are saved, the rest runs next time

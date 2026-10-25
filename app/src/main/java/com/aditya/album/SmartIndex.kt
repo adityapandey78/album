@@ -183,7 +183,7 @@ object SmartIndex {
     fun textOf(mediaId: Long): String? = dao.text(mediaId)
 
     /** One indexing pass: drops rows of deleted media, then analyses new and changed items in batches, newest first. */
-    internal suspend fun run() = withContext(background) {
+    internal suspend fun run(onLongPass: suspend () -> Unit = {}) = withContext(background) {
         if (!has(READ_MEDIA_IMAGES) && !has(READ_MEDIA_VIDEO) && !has(READ_MEDIA_VISUAL_USER_SELECTED)) return@withContext
         val canLocate = has(ACCESS_MEDIA_LOCATION)
         // With "Select photos" access MediaStore lists only the picked ones: never treat the rest as deleted
@@ -210,8 +210,10 @@ object SmartIndex {
                 }
                 val plan = planIndex(found, dao.stamps(), INDEX_VERSION, canLocate)
                 if (!partial) plan.remove.chunked(500).forEach { dao.remove(it) }
-                progress(IndexProgress(0, plan.analyse.size))
-                for (batch in plan.analyse.chunked(BATCH)) {
+                // Counted over the whole library, so a pass that resumes shows where it is, not a fresh start from 0
+                progress(IndexProgress(found.size - plan.analyse.size, found.size))
+                for ((i, batch) in plan.analyse.chunked(BATCH).withIndex()) {
+                    if (plan.analyse.size - i * BATCH >= LONG_PASS) onLongPass()
                     val results = batch.map { item ->
                         try {
                             analyse(item, labeler, reader, canLocate, places, readText = item.id != crashed)
@@ -372,8 +374,10 @@ object SmartIndex {
 
 /** Runs [SmartIndex.run] under WorkManager: resumes after process death, waits while the battery is low. */
 class IndexWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+    private val longPass = LongPassGate(this)
+
     override suspend fun doWork(): Result = try {
-        SmartIndex.run()
+        SmartIndex.run(onLongPass = longPass::tick)
         Result.success()
     } catch (e: CancellationException) {
         throw e // stopped by WorkManager (battery low): finished batches are saved, the rest runs next time
