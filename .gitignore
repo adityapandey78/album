@@ -21,3 +21,6 @@ google-services.json
 *.aab
 output-metadata.json
 !releases/*.apk
+
+# Claude Code worktrees and local settings
+.claude/

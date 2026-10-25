@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
+import android.widget.Toast
 
 /** One photo or video from Android's media index (MediaStore). Read-only: the app never edits files directly. */
 data class Media(
@@ -77,7 +78,8 @@ object Gallery {
     }
 
     // ponytail: full re-query on every change (~100-300 ms for 20k items on IO). Switch to MediaStore.getGeneration deltas if it shows in profiles.
-    private fun changes(resolver: ContentResolver) = callbackFlow {
+    /** Emits once now, then after every MediaStore change (including trash, restore and delete). Also drives [rememberTrash]. */
+    fun changes(resolver: ContentResolver) = callbackFlow {
         val observer = object : ContentObserver(null) {
             override fun onChange(selfChange: Boolean) {
                 trySend(Unit)
@@ -93,26 +95,25 @@ object Gallery {
             FileColumns._ID, FileColumns.MEDIA_TYPE, FileColumns.DATE_TAKEN, FileColumns.DATE_MODIFIED,
             FileColumns.WIDTH, FileColumns.HEIGHT, FileColumns.DURATION, FileColumns.BUCKET_ID,
             FileColumns.BUCKET_DISPLAY_NAME, FileColumns.IS_FAVORITE, FileColumns.SIZE,
-            FileColumns.DISPLAY_NAME, FileColumns.RELATIVE_PATH,
+            FileColumns.DISPLAY_NAME, FileColumns.RELATIVE_PATH, FileColumns.ORIENTATION,
         )
-        val selection = "${FileColumns.MEDIA_TYPE} IN (${FileColumns.MEDIA_TYPE_IMAGE}, ${FileColumns.MEDIA_TYPE_VIDEO})"
         val zone = ZoneId.systemDefault()
         val out = ArrayList<Media>()
-        resolver.query(MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL), projection, selection, null, null)?.use { c ->
+        resolver.query(MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL), projection, PHOTOS_AND_VIDEOS, null, null)?.use { c ->
             while (c.moveToNext()) {
                 val id = c.getLong(0)
                 val isVideo = c.getInt(1) == FileColumns.MEDIA_TYPE_VIDEO
                 // DATE_TAKEN can be missing (screenshots from some apps, downloads): fall back to file time
                 val taken = c.getLong(2).takeIf { it > 0 } ?: (c.getLong(3) * 1000)
-                val base = if (isVideo) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
                 out += Media(
                     id = id,
-                    uri = ContentUris.withAppendedId(base, id),
+                    uri = mediaUri(id, isVideo),
                     isVideo = isVideo,
                     taken = taken,
                     day = Instant.ofEpochMilli(taken).atZone(zone).toLocalDate().toEpochDay(),
-                    width = c.getInt(4),
-                    height = c.getInt(5),
+                    // cameras often store portrait shots as landscape pixels plus a 90/270 rotation tag
+                    width = if (c.getInt(13) % 180 == 90) c.getInt(5) else c.getInt(4),
+                    height = if (c.getInt(13) % 180 == 90) c.getInt(4) else c.getInt(5),
                     durationMs = c.getLong(6),
                     bucketId = c.getLong(7),
                     bucketName = c.getString(8) ?: "Other",
@@ -128,13 +129,42 @@ object Gallery {
     }
 }
 
+/** SQL selection for photos and videos: the Files collection also holds audio and documents. */
+const val PHOTOS_AND_VIDEOS = "${FileColumns.MEDIA_TYPE} IN (${FileColumns.MEDIA_TYPE_IMAGE}, ${FileColumns.MEDIA_TYPE_VIDEO})"
+
+/** Images or Video collection URI for a row. MediaStore's trash, delete and favourite requests need these, not Files URIs. */
+fun mediaUri(id: Long, isVideo: Boolean): Uri =
+    ContentUris.withAppendedId(if (isVideo) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+
 /** Albums = folders, Camera first, then the most recently updated. [media] must be newest first. */
 fun albumsOf(media: List<Media>): List<Album> =
     media.groupBy { it.bucketId }
         .map { (id, items) -> Album(id, items.first().bucketName, items.first(), items.size) }
         .sortedWith(compareByDescending<Album> { it.name == "Camera" }.thenByDescending { it.cover.taken })
 
-// --- Actions. Each goes through Android's own confirmation, so the app can't silently delete or change anything.
+// --- Actions. Each is a MediaStore request, so Android asks first, unless the user has given Album
+// Media management access in Settings (then it completes without a pop-up, which is why trash offers Undo).
+
+/** Android 16+ throws for MediaStore requests over 2,000 items, and every request crashes when empty. */
+const val MAX_REQUEST = 2000
+
+/** Share sheets fail on very long URI lists (the binder limit), so sharing stops well below that. */
+const val MAX_SHARE = 500
+
+/** Whether [count] items can go in one request or share, capped at [max]; if not, says why in a short message. */
+fun Context.canSend(count: Int, max: Int, verb: String): Boolean {
+    if (count in 1..max) return true
+    if (count > max) Toast.makeText(this, "You can $verb up to ${"%,d".format(max)} items at a time", Toast.LENGTH_SHORT).show()
+    return false
+}
+
+/** Starts [intent], or says so if no app on the phone can handle it, instead of crashing. */
+fun Context.startSafely(intent: Intent) {
+    runCatching { startActivity(intent) }.onFailure {
+        CrashLog.note("no activity for ${intent.action}: $it")
+        Toast.makeText(this, "No app on this phone can do that", Toast.LENGTH_SHORT).show()
+    }
+}
 
 fun trashRequest(resolver: ContentResolver, items: Collection<Media>): PendingIntent =
     MediaStore.createTrashRequest(resolver, items.map { it.uri }, true)

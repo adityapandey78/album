@@ -4,11 +4,12 @@ import android.app.Application
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.os.StrictMode
+import androidx.work.Configuration
 import coil3.ImageLoader
 import coil3.PlatformContext
 import coil3.SingletonImageLoader
 
-class AlbumApp : Application(), SingletonImageLoader.Factory {
+class AlbumApp : Application(), SingletonImageLoader.Factory, Configuration.Provider {
     override fun onCreate() {
         super.onCreate()
         CrashLog.install(this)
@@ -18,7 +19,11 @@ class AlbumApp : Application(), SingletonImageLoader.Factory {
             StrictMode.setThreadPolicy(StrictMode.ThreadPolicy.Builder().detectAll().penaltyLog().build())
             StrictMode.setVmPolicy(StrictMode.VmPolicy.Builder().detectAll().penaltyLog().build())
         }
+        SmartIndex.start(this)
     }
+
+    // WorkManager starts on first use (the smart index, off the main thread) instead of at every launch. See the manifest.
+    override val workManagerConfiguration get() = Configuration.Builder().build()
 
     override fun newImageLoader(context: PlatformContext) = ImageLoader.Builder(context)
         .components {

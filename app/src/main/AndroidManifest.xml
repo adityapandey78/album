@@ -1,14 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Internet is used ONLY by Settings > Check for updates (GitHub). The gallery itself never goes online. -->
+    <!-- Internet is used ONLY by Settings > Check for updates (GitHub). The gallery itself never goes online.
+         No REQUEST_INSTALL_PACKAGES on purpose: Play Protect flags apps that install APKs as harmful. -->
     <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
-    <!-- Read-only access to photos and videos. Changes (delete, favourite) always go through Android's own confirmation. -->
+    <!-- Read-only access to photos and videos. Changes (delete, favourite) always go through MediaStore requests. -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+    <!-- Off until the user turns on "Media management" in Android settings (Settings > Delete and favourite without pop-ups).
+         Then those requests complete without Android's pop-up; Album offers Undo for trash and asks itself before deleting forever. -->
+    <uses-permission android:name="android.permission.MANAGE_MEDIA" />
+    <!-- Where photos were taken (EXIF GPS), for Places. Turned into a town name on the phone, never sent anywhere. -->
+    <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />
+    <!-- Added by WorkManager and ML Kit's telemetry; nothing here watches the network (no network constraints, telemetry cut below). -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" tools:node="remove" />
 
     <application
         android:name=".AlbumApp"
@@ -16,6 +24,20 @@
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:theme="@style/Theme.Album">
+
+        <!-- ML Kit sends usage telemetry (Firelog) through Google's datatransport. Without its backend and schedulers,
+             events are dropped before they are stored or sent. Its Play services telemetry is stripped in proguard-rules.pro. -->
+        <service android:name="com.google.android.datatransport.runtime.backends.TransportBackendDiscovery" tools:node="remove" />
+        <service android:name="com.google.android.datatransport.runtime.scheduling.jobscheduling.JobInfoSchedulerService" tools:node="remove" />
+        <receiver android:name="com.google.android.datatransport.runtime.scheduling.jobscheduling.AlarmManagerSchedulerBroadcastReceiver" tools:node="remove" />
+
+        <!-- WorkManager starts on first use (AlbumApp.workManagerConfiguration) instead of on the main thread at every launch. -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            tools:node="merge">
+            <meta-data android:name="androidx.work.WorkManagerInitializer" tools:node="remove" />
+        </provider>
 
         <activity
             android:name=".MainActivity"
@@ -26,8 +48,18 @@
             </intent-filter>
         </activity>
 
-        <receiver
-            android:name=".InstallResultReceiver"
-            android:exported="false" />
+        <!-- "Open with Album" for photos and videos from other apps. Shows just that file, with Share and Details. -->
+        <activity
+            android:name=".ExternalViewerActivity"
+            android:exported="true"
+            android:theme="@style/Theme.Album.Viewer">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="video/*" />
+            </intent-filter>
+        </activity>
     </application>
 </manifest>

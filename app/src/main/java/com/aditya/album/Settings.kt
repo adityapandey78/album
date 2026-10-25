@@ -2,7 +2,6 @@ package com.aditya.album
 
 import android.content.Intent
 import android.net.Uri
-import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -24,7 +23,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
@@ -89,6 +87,9 @@ fun SettingsScreen(look: Look, onLook: (Look) -> Unit, onBack: () -> Unit) {
             }
         }
 
+        SectionTitle("Confirmations")
+        ManageMediaRow()
+
         SectionTitle("Updates")
         UpdateSection()
 
@@ -121,6 +122,16 @@ fun SettingsScreen(look: Look, onLook: (Look) -> Unit, onBack: () -> Unit) {
         if (context.isDebuggable()) {
             TextButton(onClick = { error("Test crash from Settings") }) { Text("Test crash (debug builds only)") }
         }
+
+        SectionTitle("About")
+        // GeoNames' CC BY 4.0 licence asks for credit people can see, not only in the repo
+        Text(
+            "Place names from GeoNames (geonames.org), CC BY 4.0. Fonts under the SIL Open Font License. " +
+                "Everything Album learns about your photos stays on this phone.",
+            Modifier.padding(bottom = 32.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -131,57 +142,42 @@ private fun UpdateSection() {
     val current = remember { Updater.currentVersion(context) }
     var status by remember { mutableStateOf("You have version $current") }
     var release by remember { mutableStateOf<Updater.Release?>(null) }
-    var progress by remember { mutableStateOf<Float?>(null) }
     var busy by remember { mutableStateOf(false) }
 
-    Text(Updater.installMessage ?: status, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Text(status, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     release?.notes?.takeIf { it.isNotBlank() }?.let {
         Text(it, Modifier.padding(top = 4.dp), style = MaterialTheme.typography.bodySmall)
     }
-    progress?.let { LinearProgressIndicator(progress = { it }, Modifier.fillMaxWidth().padding(top = 12.dp)) }
 
     val available = release
     OutlinedButton(
         modifier = Modifier.padding(top = 12.dp),
         enabled = !busy,
         onClick = {
+            if (available != null) {
+                // The browser downloads the APK; tapping it in the download notification opens Android's installer.
+                CrashLog.note("update to ${available.version}")
+                context.startSafely(Intent(Intent.ACTION_VIEW, Uri.parse(available.url)))
+                status = "Downloading ${available.version} in your browser. When it finishes, tap Open, then Update."
+                return@OutlinedButton
+            }
             scope.launch {
                 busy = true
-                Updater.installMessage = null
-                if (available == null) {
-                    CrashLog.note("check for updates")
-                    status = "Checking…"
-                    status = runCatching { withContext(Dispatchers.IO) { Updater.latest() } }.fold(
-                        onSuccess = { latest ->
-                            when {
-                                latest == null -> "No downloadable update found"
-                                Updater.isNewer(latest.version, current) -> {
-                                    release = latest
-                                    "Version ${latest.version} is available (you have $current)"
-                                }
-                                else -> "You're on the latest version ($current)"
+                CrashLog.note("check for updates")
+                status = "Checking…"
+                status = runCatching { withContext(Dispatchers.IO) { Updater.latest() } }.fold(
+                    onSuccess = { latest ->
+                        when {
+                            latest == null -> "No downloadable update found"
+                            Updater.isNewer(latest.version, current) -> {
+                                release = latest
+                                "Version ${latest.version} is available (you have $current)"
                             }
-                        },
-                        onFailure = { "Couldn't reach GitHub. Check your internet and try again." },
-                    )
-                } else if (!context.packageManager.canRequestPackageInstalls()) {
-                    // One-time Android permission: "Allow from this source" for Album
-                    context.startActivity(
-                        Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}")),
-                    )
-                    status = "Turn on \"Allow from this source\", come back, and tap Update again"
-                } else {
-                    CrashLog.note("update to ${available.version}")
-                    status = "Downloading ${available.version}…"
-                    progress = 0f
-                    status = runCatching {
-                        withContext(Dispatchers.IO) { Updater.downloadAndInstall(context, available) { progress = it } }
-                    }.fold(
-                        onSuccess = { "Confirm on the next screen. Album will close and update." },
-                        onFailure = { "Update failed: ${it.message}" },
-                    )
-                    progress = null
-                }
+                            else -> "You're on the latest version ($current)"
+                        }
+                    },
+                    onFailure = { "Couldn't reach GitHub. Check your internet and try again." },
+                )
                 busy = false
             }
         },

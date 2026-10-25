@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("com.google.devtools.ksp") // Room's code generator
 }
 
 android {
@@ -11,9 +12,11 @@ android {
         applicationId = "com.aditya.album"
         minSdk = 33 // Android 13+: READ_MEDIA_* permissions and AGSL shaders, no legacy branches
         targetSdk = 37 // Android 17
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 5
+        versionName = "0.4.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // 64-bit ARM only: the phone and the emulator. Each extra ABI would add another 11 MB ML Kit library.
+        ndk { abiFilters += "arm64-v8a" }
     }
 
     // Permanent release key. Path and password live in ~/.gradle/gradle.properties, never in git.
@@ -32,13 +35,16 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.findByName("release")
         }
     }
 
     buildFeatures { compose = true }
 }
+
+// Smart index schemas, kept in git so later tables (faces, text, embeddings) can ship as Room auto-migrations.
+ksp { arg("room.schemaLocation", "$projectDir/schemas") }
 
 dependencies {
     implementation(platform("androidx.compose:compose-bom:2026.09.00"))
@@ -50,6 +56,12 @@ dependencies {
     implementation("me.saket.telephoto:zoomable-image-coil3:0.19.0") // pinch zoom with tiled loading for 50 MP photos
     implementation("androidx.media3:media3-exoplayer:1.11.1")
     implementation("androidx.media3:media3-ui:1.11.1")
+    implementation("androidx.room:room-runtime:2.8.5") // smart index database (labels, places), read as Flows
+    ksp("androidx.room:room-compiler:2.8.5")
+    implementation("androidx.work:work-runtime:2.12.0") // indexing as resumable background work that waits out low battery
+    implementation("androidx.exifinterface:exifinterface:1.4.2") // GPS from EXIF, including HEIF photos
+    // On-device labels; model bundled in the APK, nothing downloaded. Version pinned: proguard-rules.pro strips its telemetry by obfuscated name.
+    implementation("com.google.mlkit:image-labeling:17.0.9")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
     // On-device UI tests (gestures): ./gradlew connectedDebugAndroidTest

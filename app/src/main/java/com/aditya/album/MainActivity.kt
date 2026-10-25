@@ -1,9 +1,9 @@
 package com.aditya.album
 
+import android.Manifest.permission.ACCESS_MEDIA_LOCATION
 import android.Manifest.permission.READ_MEDIA_IMAGES
 import android.Manifest.permission.READ_MEDIA_VIDEO
 import android.Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
-import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -16,7 +16,6 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -26,6 +25,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -34,6 +34,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Deselect
+import androidx.compose.material.icons.outlined.SelectAll
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
@@ -42,13 +44,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -63,6 +66,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.edit
 import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.unit.toSize
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -100,6 +108,7 @@ private val mediaPermissions = buildList {
     add(READ_MEDIA_IMAGES)
     add(READ_MEDIA_VIDEO)
     if (Build.VERSION.SDK_INT >= 34) add(READ_MEDIA_VISUAL_USER_SELECTED)
+    add(ACCESS_MEDIA_LOCATION) // lets the smart index read where photos were taken (EXIF GPS), for Places
 }.toTypedArray()
 
 @Composable
@@ -112,6 +121,13 @@ private fun AlbumShell(look: Look, onLook: (Look) -> Unit) {
     }
     val askAccess = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { access = accessOf(context) }
     LaunchedEffect(access) { if (access != Access.None) Gallery.start(context) }
+    // Phones upgrading from v0.3 already had photo access before Places existed, so ask for photo locations too.
+    // No dialog: Android grants ACCESS_MEDIA_LOCATION silently to apps that hold photo access.
+    LaunchedEffect(access) {
+        if (access != Access.None && context.checkSelfPermission(ACCESS_MEDIA_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            askAccess.launch(arrayOf(ACCESS_MEDIA_LOCATION))
+        }
+    }
 
     var tab by rememberSaveable { mutableStateOf(Tab.Photos) }
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
@@ -121,25 +137,45 @@ private fun AlbumShell(look: Look, onLook: (Look) -> Unit) {
 
     val loaded = Gallery.media.collectAsState().value
     val media = loaded.orEmpty()
+    val trash = if (access != Access.None) rememberTrash().value else null
     val albums = remember(media) { albumsOf(media) }
+    val specials = remember(media, trash) { specialCounts(media, trash.orEmpty().size) }
     val album = albums.find { it.id == albumId }
-    val albumMedia = remember(media, albumId) { media.filter { it.bucketId == albumId } }
-    val inAlbum = tab == Tab.Albums && album != null
+    val special = Special.entries.find { it.id == albumId }
+    val albumMedia = remember(media, albumId) { albumId?.let { id -> media.filter { it.isIn(id) } }.orEmpty() }
+    val inTrash = tab == Tab.Albums && special == Special.Trash
+    val inAlbum = tab == Tab.Albums && (album != null || special != null) && !inTrash
     val shown = if (inAlbum) albumMedia else media
 
     // Grid states live here so scroll position and zoom survive the viewer, settings and tab switches.
     val photosGrid = rememberLazyGridState()
-    val photosColumns = rememberSaveable { mutableIntStateOf(DEFAULT_COLUMNS) }
+    val photosColumns = rememberColumns("columns_photos")
     val albumsGrid = rememberLazyGridState()
     val albumGrid = rememberLazyGridState()
-    val albumColumns = rememberSaveable { mutableIntStateOf(DEFAULT_COLUMNS) }
+    val albumColumns = rememberColumns("columns_album")
 
-    val confirm = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {
-        if (it.resultCode == Activity.RESULT_OK) selected = emptySet()
+    val snackbar = remember { SnackbarHostState() }
+    val trashWithUndo = rememberTrashWithUndo(snackbar) { selected = emptySet() }
+    // Photos deleted by another app leave the selection, so "N selected" and its actions stay truthful
+    LaunchedEffect(shown) {
+        val ids = shown.mapTo(HashSet()) { it.id }
+        if (!ids.containsAll(selected)) selected = selected.filterTo(HashSet()) { it in ids }
     }
     val selecting = selected.isNotEmpty()
-    val toggle = { m: Media -> selected = if (m.id in selected) selected - m.id else selected + m.id }
+    val select = { ids: Set<Long> -> selected = ids }
+    // Where the visible grid sits on screen, so a photo can fly out of its cell into the viewer and back into it
+    var gridOrigin by remember { mutableStateOf(Offset.Zero) }
+    var openedFrom by remember { mutableStateOf<Rect?>(null) }
+    val gridPosition = Modifier.onGloballyPositioned { gridOrigin = it.positionInWindow() }
+    val cellOnScreen = { id: Long ->
+        val info = (if (inAlbum) albumGrid else photosGrid).layoutInfo
+        info.visibleItemsInfo.find { it.key == id }?.let { cell ->
+            // cell offsets start after the top content padding; viewportStartOffset is minus that padding
+            Rect(gridOrigin + Offset(cell.offset.x.toFloat(), (cell.offset.y - info.viewportStartOffset).toFloat()), cell.size.toSize())
+        }
+    }
     val open = { m: Media ->
+        openedFrom = cellOnScreen(m.id)
         CrashLog.note("open ${if (m.isVideo) "video" else "photo"}")
         viewerId = m.id
     }
@@ -152,17 +188,25 @@ private fun AlbumShell(look: Look, onLook: (Look) -> Unit) {
                 Column(Modifier.background(MaterialTheme.colorScheme.background).statusBarsPadding()) {
                     when {
                         selecting -> TitleBar("${selected.size} selected", backIcon = Icons.Outlined.Close, onBack = { selected = emptySet() }) {
-                            val items = media.filter { it.id in selected }
+                            val all = shown.all { it.id in selected }
                             IconButton(onClick = {
-                                CrashLog.note("share ${items.size}")
-                                context.startActivity(shareIntent(items))
+                                CrashLog.note(if (all) "clear all" else "select all")
+                                selected = toggleAll(selected, shown.map { it.id })
+                            }) { Icon(if (all) Icons.Outlined.Deselect else Icons.Outlined.SelectAll, if (all) "Clear all" else "Select all") }
+                            IconButton(onClick = {
+                                val items = shown.filter { it.id in selected } // at tap time, not on every selection change
+                                if (context.canSend(items.size, MAX_SHARE, "share")) {
+                                    CrashLog.note("share ${items.size}")
+                                    context.startSafely(shareIntent(items))
+                                }
                             }) { Icon(Icons.Outlined.Share, "Share") }
                             IconButton(onClick = {
+                                val items = shown.filter { it.id in selected }
                                 CrashLog.note("trash ${items.size}")
-                                confirm.launch(IntentSenderRequest.Builder(trashRequest(context.contentResolver, items)).build())
+                                trashWithUndo(items)
                             }) { Icon(Icons.Outlined.Delete, "Delete") }
                         }
-                        inAlbum -> TitleBar(album?.name.orEmpty(), onBack = { albumId = null })
+                        inAlbum -> TitleBar(album?.name ?: special?.title.orEmpty(), onBack = { albumId = null })
                         else -> TitleBar(tab.name) {
                             val icons = LocalLook.current.icons
                             IconButton(onClick = {}) { Icon(icons.search, "Search") }
@@ -203,26 +247,41 @@ private fun AlbumShell(look: Look, onLook: (Look) -> Unit) {
                     }
                 }
             },
+            snackbarHost = { SnackbarHost(snackbar) },
         ) { padding ->
             when {
                 access == Access.None -> PermissionScreen(Modifier.padding(padding)) { askAccess.launch(mediaPermissions) }
-                loaded != null && media.isEmpty() -> Message("No photos or videos yet", Modifier.padding(padding))
-                tab == Tab.Photos -> MediaGrid(media, photosColumns, photosGrid, selected, open, toggle, padding)
-                inAlbum -> MediaGrid(albumMedia, albumColumns, albumGrid, selected, open, toggle, padding)
-                tab == Tab.Albums -> AlbumsGrid(albums, albumsGrid, onOpen = {
-                    CrashLog.note("open album")
-                    albumId = it.id
+                // Albums still opens when empty, so Recently deleted stays reachable after deleting everything
+                loaded != null && media.isEmpty() && tab != Tab.Albums -> Message("No photos or videos yet", Modifier.padding(padding))
+                tab == Tab.Photos -> MediaGrid(media, photosColumns, photosGrid, selected, open, select, padding, gridPosition)
+                inAlbum && loaded != null && albumMedia.isEmpty() -> Message(special?.emptyText.orEmpty(), Modifier.padding(padding))
+                inAlbum -> MediaGrid(albumMedia, albumColumns, albumGrid, selected, open, select, padding, gridPosition)
+                tab == Tab.Albums -> AlbumsGrid(albums, specials, albumsGrid, onOpen = {
+                    CrashLog.note("open album ${Special.entries.find { s -> s.id == it }?.name ?: "folder"}")
+                    albumId = it
                 }, padding)
                 else -> Message("People, places and things arrive in Phase 2 and 3", Modifier.padding(padding))
             }
         }
-        viewerId?.let { Viewer(shown, it, onClose = { viewerId = null }) }
+        if (inTrash) TrashScreen(trash, onBack = { albumId = null })
+        viewerId?.let {
+            Viewer(
+                shown,
+                it,
+                onClose = { viewerId = null },
+                onTrash = { m -> trashWithUndo(listOf(m)) },
+                openFrom = openedFrom,
+                closeTo = cellOnScreen,
+            )
+            // The Scaffold's snackbar sits under the viewer, so the viewer gets its own host for Undo
+            SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 64.dp))
+        }
         if (settingsOpen) SettingsScreen(look, onLook, onBack = { settingsOpen = false })
     }
 }
 
 @Composable
-private fun TitleBar(
+fun TitleBar(
     title: String,
     backIcon: androidx.compose.ui.graphics.vector.ImageVector = Icons.AutoMirrored.Outlined.ArrowBack,
     onBack: (() -> Unit)? = null,
@@ -288,7 +347,7 @@ private fun PermissionScreen(modifier: Modifier, onAllow: () -> Unit) {
 }
 
 @Composable
-private fun Message(text: String, modifier: Modifier) {
+fun Message(text: String, modifier: Modifier) {
     Box(modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
         Text(text, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
     }

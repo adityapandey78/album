@@ -1,0 +1,10 @@
+Place names: GeoNames (https://www.geonames.org)
+
+app/src/main/assets/geonames/cities.tsv is built from the GeoNames files cities5000.zip, admin1CodesASCII.txt and
+countryInfo.txt (https://download.geonames.org/export/dump/), licensed under the Creative Commons Attribution 4.0
+International License: https://creativecommons.org/licenses/by/4.0/
+
+Changes made by tools/geonames.py: neighbourhoods and historical, abandoned or destroyed places were left out,
+coordinates were rounded to 4 decimal places, and state and country names were joined onto each town.
+
+The data is provided "as is", without warranty of any kind.

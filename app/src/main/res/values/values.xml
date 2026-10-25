@@ -7,4 +7,9 @@
         <item name="android:windowActionBar">false</item>
         <item name="android:windowNoTitle">true</item>
     </style>
+
+    <!-- Black from the first frame, so opening a photo from another app never flashes white. -->
+    <style name="Theme.Album.Viewer">
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
 </resources>

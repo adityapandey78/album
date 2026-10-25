@@ -3,7 +3,10 @@ package com.aditya.album
 import android.net.Uri
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.testTag
@@ -65,5 +68,37 @@ class MediaGridTest {
         compose.onNodeWithText("Yesterday").assertExists()
         compose.onAllNodes(hasClickAction())[0].performClick() // first cell = newest photo
         compose.runOnIdle { assertEquals(0L, opened?.id) }
+    }
+
+    @Test fun longPressAndDragSelectsARangeAndLiftingDoesNotTapIt() {
+        var selected by mutableStateOf(emptySet<Long>())
+        compose.setContent {
+            AlbumTheme(Look.Clean) {
+                MediaGrid(media, mutableIntStateOf(DEFAULT_COLUMNS), rememberLazyGridState(), selected, {}, { selected = it }, PaddingValues(), Modifier.testTag("grid"))
+            }
+        }
+        val origin = compose.onNodeWithTag("grid").fetchSemanticsNode().boundsInRoot.topLeft
+        fun centreOfCell(i: Int) = compose.onAllNodes(hasClickAction())[i].fetchSemanticsNode().boundsInRoot.center - origin
+        // Measured before selecting, while the headers aren't clickable yet. Today holds ids 0..5, four per row.
+        val first = centreOfCell(0)
+        val third = centreOfCell(2)
+        val sixth = centreOfCell(5)
+
+        compose.onNodeWithTag("grid").performTouchInput {
+            down(first)
+            repeat(10) { moveBy(Offset.Zero, delayMillis = 60) } // hold past the long-press timeout
+            moveTo(sixth)
+            up()
+        }
+        compose.runOnIdle { assertEquals((0L..5L).toSet(), selected) }
+
+        // Dragging back from a selected photo clears the range again
+        compose.onNodeWithTag("grid").performTouchInput {
+            down(sixth)
+            repeat(10) { moveBy(Offset.Zero, delayMillis = 60) }
+            moveTo(third)
+            up()
+        }
+        compose.runOnIdle { assertEquals(setOf(0L, 1L), selected) }
     }
 }
