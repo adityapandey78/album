@@ -3,21 +3,11 @@ package com.aditya.album
 import android.content.ContentResolver
 import android.net.Uri
 import android.os.ParcelFileDescriptor
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.VolumeOff
-import androidx.compose.material.icons.automirrored.outlined.VolumeUp
-import androidx.compose.material.icons.outlined.MotionPhotosOn
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -29,9 +19,8 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -108,29 +97,14 @@ private fun readMotionVideo(resolver: ContentResolver, uri: Uri): LongRange? {
     return motionVideoRange(String(head, Charsets.ISO_8859_1), size) // one char per byte: binary data can't break the decode
 }
 
-/** "Motion" badge: tapping it plays the video. While it plays, a second button turns the sound on or off. */
+/** The "Live" badge of a motion photo: tapping it plays the video, as holding the photo does. */
 @Composable
-fun MotionChip(playing: Boolean, muted: Boolean, onPlay: () -> Unit, onMute: () -> Unit, modifier: Modifier = Modifier) {
-    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
-        Row(
-            Modifier.clip(CircleShape).background(Color.Black.copy(alpha = 0.4f)).clickable(onClickLabel = "Play", onClick = onPlay)
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(Icons.Outlined.MotionPhotosOn, null, Modifier.padding(end = 6.dp).size(18.dp), tint = Color.White)
-            Text("Motion", color = Color.White, style = MaterialTheme.typography.labelLarge)
-        }
-        if (playing) {
-            IconButton(onClick = onMute) {
-                Icon(
-                    if (muted) Icons.AutoMirrored.Outlined.VolumeOff else Icons.AutoMirrored.Outlined.VolumeUp,
-                    if (muted) "Turn sound on" else "Turn sound off",
-                    Modifier.clip(CircleShape).background(Color.Black.copy(alpha = 0.4f)).padding(6.dp),
-                    tint = Color.White,
-                )
-            }
-        }
-    }
+fun LiveBadge(onPlay: () -> Unit, modifier: Modifier = Modifier) {
+    // The badge itself is small; the touch target around it is the full 48dp
+    Box(
+        modifier.heightIn(min = Space.target).clip(CircleShape).clickable(role = Role.Button, onClickLabel = "Play", onClick = onPlay),
+        contentAlignment = Alignment.Center,
+    ) { Badge("Live", tone = BadgeTone.Photo, icon = Sym.MotionPhotosOn) }
 }
 
 /** Plays bytes [video] of [uri] over the still, then calls [onEnd] so the still shows again. Muted unless [muted] is false. */

@@ -154,6 +154,9 @@ object SmartIndex {
     /** Photos with a word starting with [prefix] in them. [prefix] must be letters and digits only (no FTS syntax). */
     fun idsWithText(prefix: String): Set<Long> = dao.idsWithText("$prefix*").toSet()
 
+    /** Text read from photo [mediaId], or null when it has none (or isn't indexed yet). Blocking: call off the main thread. */
+    fun textOf(mediaId: Long): String? = dao.text(mediaId)
+
     /** One indexing pass: drops rows of deleted media, then analyses new and changed items in batches, newest first. */
     internal suspend fun run() = withContext(background) {
         if (!has(READ_MEDIA_IMAGES) && !has(READ_MEDIA_VIDEO) && !has(READ_MEDIA_VISUAL_USER_SELECTED)) return@withContext

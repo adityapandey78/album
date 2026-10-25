@@ -12,95 +12,155 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedContentTransitionScope
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.EnterExitState
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.animateDp
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.windowInsetsTopHeight
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.ArrowBack
-import androidx.compose.material.icons.automirrored.outlined.DriveFileMove
-import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.ContentCopy
-import androidx.compose.material.icons.outlined.Delete
-import androidx.compose.material.icons.outlined.Deselect
-import androidx.compose.material.icons.outlined.LibraryAdd
-import androidx.compose.material.icons.outlined.RemoveCircleOutline
-import androidx.compose.material.icons.outlined.SelectAll
-import androidx.compose.material.icons.outlined.Share
-import androidx.compose.material3.Button
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.Scaffold
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.SnapshotStateList
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.toMutableStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.core.content.edit
-import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.isSpecified
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.Outline
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.toSize
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material.icons.outlined.MoreVert
-import androidx.compose.material.icons.outlined.PersonRemove
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import java.text.NumberFormat
+import kotlin.math.hypot
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
         AlbumPrefs.load(this)
+        AppearancePrefs.load(this)
         setContent {
-            var look by remember { mutableStateOf(Look.entries.find { it.name == prefs.getString("look", null) } ?: Look.Clean) }
-            AlbumTheme(look) {
-                AlbumShell(look, onLook = {
-                    look = it
-                    prefs.edit { putString("look", it.name) }
-                    CrashLog.note("look ${it.name}")
-                })
+            val appearance by AppearancePrefs.appearance.collectAsState()
+            // Status bar icons follow Album's theme, not the phone's: a Light theme on a dark phone still needs dark icons
+            val dark = resolvedTheme(appearance.theme) != ThemeMode.Light
+            LaunchedEffect(dark) {
+                val bars = if (dark) SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+                else SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT)
+                enableEdgeToEdge(bars, bars)
             }
+            AlbumTheme(appearance) { AlbumShell() }
         }
     }
 }
 
-private enum class Tab { Photos, Albums, Explore }
+private enum class Tab(val sym: Sym, val label: String) {
+    Library(Sym.PhotoLibrary, "Library"),
+    Collections(Sym.CollectionsBookmark, "Collections"),
+    ForYou(Sym.Favorite, "For you"),
+}
+
+/** A screen opened over the tabs. Deeper screens slide in from the right and Back pops them in order. */
+private sealed class Route(val key: String) {
+    /** An album: a folder, Favourites or Videos, a collection, a place, a thing or a person. */
+    data class Open(val id: Long) : Route("open:$id")
+    data object Places : Route("places")
+    data object People : Route("people")
+    data object Trash : Route("trash")
+    data object Search : Route("search")
+    data object Settings : Route("settings")
+
+    companion object {
+        fun of(key: String): Route? = key.removePrefix("open:").toLongOrNull()?.takeIf { key.startsWith("open:") }?.let(::Open)
+            ?: listOf(Places, People, Trash, Search, Settings).find { it.key == key }
+    }
+}
+
+// Saved as keys so the open screens come back after Android recreates the activity
+private val StackSaver = listSaver<SnapshotStateList<Route>, String>(
+    save = { stack -> stack.map { it.key } },
+    restore = { keys -> keys.mapNotNull(Route::of).toMutableStateList() },
+)
 
 /** Full = all photos. Partial = Android 14+ "Select photos" (only the ones you picked). */
 private enum class Access { None, Partial, Full }
@@ -121,9 +181,17 @@ private val mediaPermissions = buildList {
     add(ACCESS_MEDIA_LOCATION) // lets the smart index read where photos were taken (EXIF GPS), for Places
 }.toTypedArray()
 
+/** What an open album page shows, reported up so the viewer and the selection bar work on the same photos. */
+private class PageInfo(val key: String, val items: List<Media>, val collection: CollectionAlbum?, val person: PersonAlbum?)
+
+/** A memory or album playing as a story. */
+private class Story(val items: List<Media>, val title: String?, val eyebrow: String?)
+
 @Composable
-private fun AlbumShell(look: Look, onLook: (Look) -> Unit) {
+private fun AlbumShell() {
     val context = LocalContext.current
+    val spec = AlbumTheme.spec
+    val c = spec.colors
     var access by remember { mutableStateOf(accessOf(context)) }
     LifecycleResumeEffect(Unit) {
         access = accessOf(context) // the user may have changed it in system settings
@@ -139,270 +207,389 @@ private fun AlbumShell(look: Look, onLook: (Look) -> Unit) {
         }
     }
 
-    var tab by rememberSaveable { mutableStateOf(Tab.Photos) }
-    var settingsOpen by rememberSaveable { mutableStateOf(false) }
-    var calendarOpen by rememberSaveable { mutableStateOf(false) }
-    var searchOpen by rememberSaveable { mutableStateOf(false) }
-    var peopleOpen by rememberSaveable { mutableStateOf(false) } // Explore's "See all" people
-    var albumId by rememberSaveable { mutableStateOf<Long?>(null) }
-    var exploreId by rememberSaveable { mutableStateOf<Long?>(null) } // a place, thing or utility opened from Explore
-    var allPlaces by rememberSaveable { mutableStateOf(false) } // Explore's "See all" places
+    var tab by rememberSaveable { mutableStateOf(Tab.Library) }
+    val stack = rememberSaveable(saver = StackSaver) { mutableStateListOf<Route>() }
+    val top = stack.lastOrNull()
+    var pushing by remember { mutableStateOf(true) } // direction of the last stack change, for the slide and the dim
+    val push = { r: Route ->
+        // A second tap on the same card during the slide (the screen beneath still shows part way) opens nothing new
+        if (stack.lastOrNull() != r) {
+            pushing = true
+            stack.add(r)
+            CrashLog.note("open ${r.key.substringBefore(':')}")
+        }
+    }
+    val pop = {
+        pushing = false
+        stack.removeLastOrNull()
+        Unit
+    }
+    // Recently deleted opens as its own screen wherever its id comes from
+    val openId = { id: Long -> push(if (id == Special.Trash.id) Route.Trash else Route.Open(id)) }
+
     var viewerId by rememberSaveable { mutableStateOf<Long?>(null) }
     var selected by remember { mutableStateOf(emptySet<Long>()) }
+    var selectMode by remember { mutableStateOf(false) } // Select in a top bar: selecting, with nothing picked yet
+    val clearSelection = {
+        selected = emptySet()
+        selectMode = false
+    }
+    var calendarOpen by rememberSaveable { mutableStateOf(false) }
+    var jumpDay by rememberSaveable { mutableStateOf<Long?>(null) } // a day picked in the calendar, until the Library is there
+    var libraryMenu by remember { mutableStateOf(false) }
+    var albumMenu by remember { mutableStateOf<List<Media>?>(null) } // the selection, while "Add to" is open
+    var addingToCollection by remember { mutableStateOf<List<Long>?>(null) }
+    var story by remember { mutableStateOf<Story?>(null) }
+    var barHidden by remember { mutableStateOf(false) }
 
     val loaded = Gallery.media.collectAsState().value
     val media = loaded.orEmpty()
     val hidden by AlbumPrefs.hidden.collectAsState()
-    val photos = remember(media, hidden) { media.inPhotos(hidden) } // Photos leaves out folders hidden from it
+    val photos = remember(media, hidden) { media.inPhotos(hidden) } // the Library leaves out folders hidden from it
     val trash = if (access != Access.None) rememberTrash().value else null
     val albums = remember(media) { albumsOf(media) }
     val specials = remember(media, trash) { specialCounts(media, trash.orEmpty().size) }
     val collections = rememberCollections(media)
-    // Albums and Explore each keep their own open album, so switching tabs comes back to it
-    val openId = when (tab) {
-        Tab.Albums -> albumId
-        Tab.Explore -> exploreId
-        Tab.Photos -> null
-    }
-    val album = albums.find { it.id == openId }
-    val special = Special.entries.find { it.id == openId }
-    val collection = collections.find { it.albumId == openId }
-    val smart = openId?.let { rememberSmartAlbum(it) }
-    val person = rememberPerson(openId) // person pages open from Explore
-    val albumMedia = remember(media, openId, collection, smart, person) {
-        collection?.items ?: smart?.items ?: person?.items ?: openId?.let { id -> media.filter { it.isIn(id) } }.orEmpty()
-    }
-    val inTrash = special == Special.Trash
-    val inAlbum = (album != null || special != null || collection != null || smart != null || person != null) && !inTrash
-    val closeAlbum = { if (tab == Tab.Explore) exploreId = null else albumId = null }
-    // Search replaces the top bar and the page underneath it, and its results are what selection and the viewer work on
-    val search = if (searchOpen) rememberSearch(photos, collections) else null
-    // Only while that page is what's on screen: search results get the normal selection actions, not Remove or Not <name>
-    val openCollection = collection?.takeIf { inAlbum && search == null } // its selection removes from it instead of adding to one
-    val openPerson = person?.takeIf { inAlbum && search == null }
-    // An open album or person that stops existing (merged, emptied, deleted) closes after a moment for its data to load,
-    // instead of lingering as an id that could reopen something else later
-    LaunchedEffect(openId, inAlbum, inTrash) {
-        if (openId != null && !inAlbum && !inTrash) {
-            delay(1_500)
-            closeAlbum()
-        }
-    }
-    val shown = search?.items ?: if (inAlbum) albumMedia else photos
 
-    // Grid states live here so scroll position and zoom survive the viewer, settings and tab switches.
+    // Pages report what they show, so the viewer and the selection bar act on the photos on screen
+    var page by remember { mutableStateOf<PageInfo?>(null) }
+    var searchState by remember { mutableStateOf<SearchState?>(null) }
+    val shown = when (top) {
+        is Route.Open -> page?.takeIf { it.key == top.key }?.items.orEmpty()
+        Route.Search -> searchState?.items.orEmpty()
+        null -> if (tab == Tab.Library) photos else emptyList()
+        else -> emptyList()
+    }
+    val openCollection = page?.takeIf { top is Route.Open && it.key == top.key }?.collection
+    val openPerson = page?.takeIf { top is Route.Open && it.key == top.key }?.person
+
+    // Grid states live here so scroll position and zoom survive the viewer, tab switches and the screens above them
     val photosGrid = rememberLazyGridState()
     val photosColumns = rememberColumns("columns_photos")
-    val albumsGrid = rememberLazyGridState()
-    val albumGrid = rememberLazyGridState()
-    val exploreGrid = rememberLazyGridState()
-    val placesGrid = rememberLazyGridState()
-    val exploreAlbumGrid = rememberLazyGridState() // apart from albumGrid, so each tab's open album keeps its place
-    val openGrid = if (tab == Tab.Explore) exploreAlbumGrid else albumGrid
-    val openFromExplore = { id: Long ->
-        exploreAlbumGrid.requestScrollToItem(0) // a new album starts at the top, not where the last one was left
-        exploreId = id
-    }
     val albumColumns = rememberColumns("columns_album")
+    // One per open album, dropped when it closes. Not snapshot state: only read when a photo opens or closes.
+    val albumGrids = remember { HashMap<String, LazyGridState>() }
     val searchGrid = rememberLazyGridState()
     val searchColumns = rememberColumns("columns_search")
+    val collectionsGrid = rememberLazyGridState()
+    val forYouList = rememberLazyListState()
     val peopleGrid = rememberLazyGridState()
+    val placesGrid = rememberLazyGridState()
+    LaunchedEffect(stack.toList()) { albumGrids.keys.retainAll(stack.mapTo(HashSet()) { it.key }) }
 
     val snackbar = remember { SnackbarHostState() }
-    val trashWithUndo = rememberTrashWithUndo(snackbar) { selected = emptySet() }
-    val albumActions = rememberAlbumActions { selected = emptySet() }
+    val trashWithUndo = rememberTrashWithUndo(snackbar) { clearSelection() }
+    val albumActions = rememberAlbumActions { clearSelection() }
     val addToCollection = rememberAddToCollection(snackbar)
     val removeFromCollection = rememberRemoveFromCollection(snackbar)
-    val notPerson = rememberNotPerson(snackbar) { exploreId = it }
-    var addingToCollection by remember { mutableStateOf<List<Long>?>(null) } // the selection, while the sheet is open
+    val notPerson = rememberNotPerson(snackbar) { id -> if (stack.lastOrNull() is Route.Open) stack[stack.lastIndex] = Route.Open(id) }
+    val favourite = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { clearSelection() }
+    val scope = rememberCoroutineScope()
+    val haptics = rememberHaptics()
+
+    // Selection belongs to one screen: switching tabs or opening and closing screens ends it
+    LaunchedEffect(tab, top?.key) { clearSelection() }
     // Photos deleted by another app leave the selection, so "N selected" and its actions stay truthful
     LaunchedEffect(shown) {
+        if (selected.isEmpty()) return@LaunchedEffect // the usual case: no set of the whole library on every navigation
         val ids = shown.mapTo(HashSet()) { it.id }
         if (!ids.containsAll(selected)) selected = selected.filterTo(HashSet()) { it in ids }
     }
-    val selecting = selected.isNotEmpty()
-    val select = { ids: Set<Long> -> selected = ids }
+    LaunchedEffect(tab, top) { barHidden = false }
+    val selecting = selectMode || selected.isNotEmpty()
+    val select = { ids: Set<Long> ->
+        selected = ids
+        if (ids.isEmpty()) selectMode = false // unpicking the last one ends selecting, as in the design
+    }
+    val startSelecting = {
+        selectMode = true
+        CrashLog.note("select")
+    }
+
     // Where the visible grid sits on screen, so a photo can fly out of its cell into the viewer and back into it
     var gridOrigin by remember { mutableStateOf(Offset.Zero) }
     var openedFrom by remember { mutableStateOf<Rect?>(null) }
     val gridPosition = Modifier.onGloballyPositioned { gridOrigin = it.positionInWindow() }
     val cellOnScreen = cell@{ id: Long ->
-        // the grid that's on screen; none for screens without one (Explore's own page), so the viewer fades instead
-        val grid = when {
-            search != null -> searchGrid
-            inAlbum -> openGrid
-            tab == Tab.Photos -> photosGrid
-            else -> return@cell null
-        }
-        val info = grid.layoutInfo
-        info.visibleItemsInfo.find { it.key == id }?.let { cell ->
-            // cell offsets start after the top content padding; viewportStartOffset is minus that padding
-            Rect(gridOrigin + Offset(cell.offset.x.toFloat(), (cell.offset.y - info.viewportStartOffset).toFloat()), cell.size.toSize())
-        }
+        // the grid that's on screen; none for screens without one, so the viewer fades instead
+        val grid = when (top) {
+            Route.Search -> searchGrid
+            is Route.Open -> albumGrids[top.key]
+            null -> if (tab == Tab.Library) photosGrid else null
+            else -> null
+        } ?: return@cell null
+        cellBounds(grid, id)?.translate(gridOrigin) // grid coordinates, in every gallery style
     }
     val open = { m: Media ->
         openedFrom = cellOnScreen(m.id)
         CrashLog.note("open ${if (m.isVideo) "video" else "photo"}")
         viewerId = m.id
     }
-    BackHandler(selecting) { selected = emptySet() }
-    BackHandler(inAlbum && !selecting) { closeAlbum() }
-    BackHandler(tab == Tab.Explore && allPlaces && !inAlbum) { allPlaces = false }
-    BackHandler(search != null && !selecting) { searchOpen = false }
+    BackHandler(selecting) { clearSelection() }
+    BackHandler(top != null && !selecting) { pop() }
 
-    Box(Modifier.fillMaxSize()) {
-        Scaffold(
-            topBar = {
-                Column(Modifier.background(MaterialTheme.colorScheme.background).statusBarsPadding()) {
-                    when {
-                        selecting -> TitleBar("${selected.size} selected", backIcon = Icons.Outlined.Close, onBack = { selected = emptySet() }) {
-                            val all = shown.all { it.id in selected }
-                            IconButton(onClick = {
-                                CrashLog.note(if (all) "clear all" else "select all")
-                                selected = toggleAll(selected, shown.map { it.id })
-                            }) { Icon(if (all) Icons.Outlined.Deselect else Icons.Outlined.SelectAll, if (all) "Clear all" else "Select all") }
-                            IconButton(onClick = {
-                                val items = shown.filter { it.id in selected } // at tap time, not on every selection change
-                                if (context.canSend(items.size, MAX_SHARE, "share")) {
-                                    CrashLog.note("share ${items.size}")
-                                    context.startSafely(shareIntent(items))
-                                }
-                            }) { Icon(Icons.Outlined.Share, "Share") }
-                            if (openPerson != null) IconButton(onClick = {
-                                notPerson(openPerson, shown.filter { it.id in selected }.map { it.id })
-                                selected = emptySet()
-                            }) { Icon(Icons.Outlined.PersonRemove, notPersonLabel(openPerson)) }
-                            if (openCollection != null) {
-                                IconButton(onClick = {
-                                    removeFromCollection(openCollection, shown.filter { it.id in selected }.map { it.id })
-                                    selected = emptySet()
-                                }) { Icon(Icons.Outlined.RemoveCircleOutline, "Remove from collection") }
-                            } else {
-                                // Less frequent actions share one menu so the bar stays readable on a phone
-                                var more by remember { mutableStateOf(false) }
-                                IconButton(onClick = { more = true }) { Icon(Icons.Outlined.MoreVert, "More") }
-                                DropdownMenu(more, onDismissRequest = { more = false }) {
-                                    val pick = { action: () -> Unit -> more = false; action() }
-                                    DropdownMenuItem(
-                                        text = { Text("Move to album") },
-                                        leadingIcon = { Icon(Icons.AutoMirrored.Outlined.DriveFileMove, null) },
-                                        onClick = { pick { albumActions.moveOrCopy(shown.filter { it.id in selected }, Transfer.Move) } },
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Copy to album") },
-                                        leadingIcon = { Icon(Icons.Outlined.ContentCopy, null) },
-                                        onClick = { pick { albumActions.moveOrCopy(shown.filter { it.id in selected }, Transfer.Copy) } },
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Add to collection") },
-                                        leadingIcon = { Icon(Icons.Outlined.LibraryAdd, null) },
-                                        onClick = { pick { addingToCollection = shown.filter { it.id in selected }.map { it.id } } },
-                                    )
-                                }
-                            }
-                            if (openCollection == null) IconButton(onClick = {
-                                val items = shown.filter { it.id in selected }
-                                CrashLog.note("trash ${items.size}")
-                                trashWithUndo(items)
-                            }) { Icon(Icons.Outlined.Delete, "Delete") }
-                        }
-                        search != null -> SearchBar(search, onBack = { searchOpen = false })
-                        openPerson != null -> PersonTitleBar(openPerson, onBack = closeAlbum) { exploreId = it } // merging opens the merged person
-                        inAlbum -> TitleBar(album?.name ?: special?.title ?: collection?.name ?: smart?.title.orEmpty(), onBack = closeAlbum)
-                        tab == Tab.Explore && allPlaces -> TitleBar("Places", onBack = { allPlaces = false })
-                        else -> TitleBar(tab.name) {
-                            val icons = LocalLook.current.icons
-                            if (tab == Tab.Photos && photos.isNotEmpty()) {
-                                IconButton(onClick = {
-                                    calendarOpen = true
-                                    CrashLog.note("open calendar")
-                                }) { Icon(icons.calendar, "Calendar") }
-                            }
-                            if (tab == Tab.Albums) AlbumSortButton()
-                            IconButton(onClick = {
-                                searchOpen = true
-                                CrashLog.note("open search")
-                            }) { Icon(icons.search, "Search") }
-                            IconButton(onClick = {
-                                settingsOpen = true
-                                CrashLog.note("open settings")
-                            }) { Icon(icons.settings, "Settings") }
-                        }
+    // The bottom bar sinks on a fast scroll down and comes back on any scroll up
+    val barOnScroll = remember {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (available.y < -24f) barHidden = true else if (available.y > 4f) barHidden = false
+                return Offset.Zero
+            }
+        }
+    }
+
+    val density = LocalDensity.current
+    val statusBar = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val navBar = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    // Scrolling content clears the floating bar: bar height plus space-8, above the gesture area
+    val tabPadding = PaddingValues(top = statusBar, bottom = navBar + Space.s4 + Space.bar + Space.s8)
+    var revealFrom by remember { mutableStateOf(Offset.Unspecified) }
+
+    Box(Modifier.fillMaxSize().background(c.canvas)) {
+        if (access == Access.None) {
+            PermissionScreen { askAccess.launch(mediaPermissions) }
+            return@Box
+        }
+
+        @Composable
+        fun TabPage(t: Tab) {
+            Box(Modifier.fillMaxSize().background(c.canvas).nestedScroll(barOnScroll)) {
+                when (t) {
+                    Tab.Library -> LibraryPage(
+                        // only the grid on top reports where it is: a covered Library sits 25% to the left
+                        photos, loaded != null, photosColumns, photosGrid, selected, open, select, tabPadding,
+                        if (top == null) gridPosition else Modifier,
+                        jumpDay = jumpDay,
+                        onJumped = { jumpDay = null },
+                        partial = access == Access.Partial,
+                        onAllowAll = { askAccess.launch(mediaPermissions) },
+                        selectMode = selectMode,
+                        onStartSelecting = startSelecting,
+                        onCalendar = {
+                            calendarOpen = true
+                            CrashLog.note("open calendar")
+                        },
+                        onMore = { libraryMenu = true },
+                    )
+                    Tab.Collections -> CollectionsScreen(
+                        albums, specials, collections, collectionsGrid, tabPadding,
+                        onOpen = { id ->
+                            CrashLog.note("open album ${Special.entries.find { it.id == id }?.name ?: if (collectionIdOf(id) != null) "collection" else "other"}")
+                            openId(id)
+                        },
+                        onAllPlaces = { push(Route.Places) },
+                        onAllPeople = { push(Route.People) },
+                        onAction = albumActions::onAlbum,
+                        onNewAlbum = albumActions::newAlbum,
+                        onSettings = { push(Route.Settings) },
+                    )
+                    Tab.ForYou -> ForYouScreen(photos, forYouList, tabPadding) { title, eyebrow, items ->
+                        CrashLog.note("play memory")
+                        story = Story(items, title, eyebrow)
                     }
-                    if (access == Access.Partial && !selecting) PartialAccessBanner { askAccess.launch(mediaPermissions) }
-                }
-            },
-            bottomBar = {
-                if (!selecting && search == null) {
-                    val icons = LocalLook.current.icons
-                    NavigationBar {
-                        Tab.entries.forEach { t ->
-                            NavigationBarItem(
-                                selected = tab == t,
-                                onClick = {
-                                    if (tab == t && t == Tab.Albums) albumId = null // tapping Albums again goes back to the list
-                                    if (tab == t && t == Tab.Explore) {
-                                        exploreId = null
-                                        allPlaces = false
-                                    }
-                                    tab = t
-                                    CrashLog.note("tab ${t.name}")
-                                },
-                                icon = {
-                                    Icon(
-                                        when (t) {
-                                            Tab.Photos -> icons.photos
-                                            Tab.Albums -> icons.albums
-                                            Tab.Explore -> icons.explore
-                                        },
-                                        null,
-                                    )
-                                },
-                                label = { Text(t.name) },
-                            )
-                        }
-                    }
-                }
-            },
-            snackbarHost = { SnackbarHost(snackbar) },
-        ) { padding ->
-            when {
-                access == Access.None -> PermissionScreen(Modifier.padding(padding)) { askAccess.launch(mediaPermissions) }
-                search != null -> SearchContent(search, searchColumns, searchGrid, selected, open, select, padding, gridPosition)
-                // Albums still opens when empty, so Recently deleted stays reachable after deleting everything
-                loaded != null && media.isEmpty() && tab != Tab.Albums -> Message("No photos or videos yet", Modifier.padding(padding))
-                tab == Tab.Photos -> MediaGrid(photos, photosColumns, photosGrid, selected, open, select, padding, gridPosition)
-                inAlbum && loaded != null && albumMedia.isEmpty() -> Message(special?.emptyText ?: smart?.emptyText ?: EMPTY_COLLECTION, Modifier.padding(padding))
-                inAlbum -> MediaGrid(albumMedia, albumColumns, openGrid, selected, open, select, padding, gridPosition)
-                tab == Tab.Albums -> AlbumsGrid(albums, specials, collections, albumsGrid, onOpen = {
-                    CrashLog.note("open album ${Special.entries.find { s -> s.id == it }?.name ?: if (collectionIdOf(it) != null) "collection" else "folder"}")
-                    albumId = it
-                }, padding, albumActions::onAlbum, albumActions::newAlbum)
-                allPlaces -> PlacesScreen(placesGrid, padding, openFromExplore)
-                else -> ExploreScreen(albums, specials, exploreGrid, padding, openFromExplore, onAllPlaces = { allPlaces = true }) {
-                    PeopleSection(onOpenPerson = openFromExplore, onSeeAll = { peopleOpen = true })
                 }
             }
         }
+
+        // The tabs stay composed under deeper screens, so Back to them is instant: no grid layout rebuilt, the scroll where
+        // it was. While covered they slip 25% left and dim under the scrim, and TalkBack skips them.
+        val covered = top != null
+        val under by animateFloatAsState(
+            if (covered) 1f else 0f,
+            if (spec.still) snap() else tween(if (covered) 400 else 280, easing = screenEase),
+            label = "under",
+        )
+        Box(
+            Modifier.fillMaxSize()
+                .graphicsLayer { translationX = -size.width / 4 * under }
+                .drawWithContent {
+                    drawContent()
+                    if (under > 0f) drawRect(c.scrim, alpha = under / 2)
+                }
+                .then(if (covered) Modifier.clearAndSetSemantics {} else Modifier),
+        ) { Tabs(tab, spec, revealFrom, onTab = { tab = it }) { TabPage(it) } }
+
+        // Deeper screens slide over the tabs and over each other
+        AnimatedContent(
+            top,
+            Modifier.fillMaxSize(),
+            transitionSpec = { stackTransition(spec.still, pushing, initialState, targetState) },
+            contentKey = { it?.key },
+            label = "screens",
+        ) { route ->
+            val dim by transition.animateFloat(label = "dim") { s ->
+                // the screen beneath a pushed one dims under the scrim, at half strength
+                when (s) {
+                    EnterExitState.Visible -> 0f
+                    EnterExitState.PreEnter -> if (pushing || spec.still) 0f else 0.5f
+                    EnterExitState.PostExit -> if (pushing && !spec.still) 0.5f else 0f
+                }
+            }
+            if (route == null) return@AnimatedContent // the tabs underneath show through
+            Box(
+                Modifier.fillMaxSize()
+                    .background(c.canvas)
+                    .pointerInput(Unit) {} // a tap on empty space must not reach the tabs underneath
+                    .drawWithContent {
+                        drawContent()
+                        if (dim > 0f) drawRect(c.scrim, alpha = dim)
+                    },
+            ) {
+                when (route) {
+                    is Route.Open -> AlbumPage(
+                        route, media, albums, collections, loaded != null, albumColumns,
+                        albumGrids.getOrPut(route.key) { LazyGridState() }, selected, open, select,
+                        tabPadding, gridPosition,
+                        onBack = pop,
+                        onOpenPerson = { id -> stack[stack.lastIndex] = Route.Open(id) }, // merging leaves you on the merged person
+                        onPlay = { items, title -> story = Story(items, title, null) },
+                        selectMode = selectMode,
+                        onStartSelecting = startSelecting,
+                        report = { page = it },
+                    )
+                    Route.Places -> PlacesScreen(placesGrid, onBack = pop, onOpen = openId)
+                    Route.People -> PeopleScreen(peopleGrid, onBack = pop, onOpenPerson = openId)
+                    Route.Trash -> TrashScreen(trash, onBack = pop)
+                    Route.Settings -> SettingsScreen(onBack = pop, columns = photosColumns, onOpenTrash = { push(Route.Trash) })
+                    Route.Search -> {
+                        val s = rememberSearch(photos, collections)
+                        DisposableEffect(s) {
+                            searchState = s
+                            onDispose { if (searchState === s) searchState = null }
+                        }
+                        SearchPage(s, searchColumns, searchGrid, selected, open, select, selecting, onBack = pop, gridPosition)
+                    }
+                }
+            }
+        }
+
+        // The status bar always sits on canvas, so photos never scroll under its icons
+        Box(Modifier.fillMaxWidth().windowInsetsTopHeight(WindowInsets.statusBars).background(c.canvas))
+
+        // Bottom chrome: the selection bar replaces the bottom bar in place; deeper screens let it sink away
+        val barShown = top == null && !selecting && !barHidden
+        Box(Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = Space.s4)) {
+            AnimatedVisibility(barShown, enter = rise(spec.still), exit = sink(spec.still)) {
+                BottomBar(
+                    Tab.entries.map { NavItem(it.sym, it.label) },
+                    tab.ordinal,
+                    onSelect = { i, center ->
+                        val t = Tab.entries[i]
+                        if (t == tab) {
+                            // Tapping the current tab scrolls it back to the top
+                            scope.launch {
+                                when (t) {
+                                    Tab.Library -> if (spec.still) photosGrid.scrollToItem(0) else photosGrid.animateScrollToItem(0)
+                                    Tab.Collections -> if (spec.still) collectionsGrid.scrollToItem(0) else collectionsGrid.animateScrollToItem(0)
+                                    Tab.ForYou -> if (spec.still) forYouList.scrollToItem(0) else forYouList.animateScrollToItem(0)
+                                }
+                            }
+                        } else {
+                            haptics.tick()
+                            revealFrom = center
+                            tab = t
+                            CrashLog.note("tab ${t.name}")
+                        }
+                    },
+                    onSearch = {
+                        push(Route.Search)
+                        CrashLog.note("open search")
+                    },
+                )
+            }
+            AnimatedVisibility(selecting, enter = rise(spec.still), exit = sink(spec.still)) {
+                SelectionActions(
+                    selected, shown, openCollection, openPerson, context,
+                    onClear = { clearSelection() },
+                    onSelectAll = {
+                        CrashLog.note(if (shown.all { it.id in selected }) "clear all" else "select all")
+                        selected = toggleAll(selected, shown.map { it.id })
+                    },
+                    onAlbum = { albumMenu = it },
+                    onFavourite = { items ->
+                        if (context.canSend(items.size, MAX_REQUEST, "favourite")) {
+                            val on = !items.all { it.isFavorite } // like the heart in the viewer: all on, or all off
+                            CrashLog.note("favourite ${items.size} $on")
+                            favourite.launch(IntentSenderRequest.Builder(favoriteRequest(context.contentResolver, items, on)).build())
+                        }
+                    },
+                    onRemove = { col, ids ->
+                        removeFromCollection(col, ids)
+                        clearSelection()
+                    },
+                    onNotPerson = { person, ids ->
+                        notPerson(person, ids)
+                        clearSelection()
+                    },
+                    onTrash = { items ->
+                        CrashLog.note("trash ${items.size}")
+                        trashWithUndo(items)
+                    },
+                )
+            }
+        }
+        // Snackbars rise just above whatever bar is at the bottom
+        SnackbarHost(
+            snackbar,
+            Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
+                .padding(bottom = Space.s4 + if (barShown || top == Route.Search) Space.bar + Space.s3 else if (selecting) Space.bar * 2 + Space.s4 else 0.dp),
+        ) { AlbumSnackbar(it) }
+
         AlbumActionsHost(albumActions, media, albums, snackbar)
-        if (inTrash) TrashScreen(trash, onBack = closeAlbum)
-        // Steps aside while a person page is open, so Back from that page lands here again
-        if (peopleOpen && tab == Tab.Explore && !inAlbum) PeopleScreen(peopleGrid, onBack = { peopleOpen = false }, onOpenPerson = openFromExplore)
         if (calendarOpen) {
-            CalendarScreen(photos, onBack = { calendarOpen = false }) { day ->
-                // At 7 columns the grid has month headers only, so the day's month goes to the top
-                headerPosition(photos, day, byMonth = photosColumns.intValue >= MONTH_COLUMNS) { it.day }?.let { photosGrid.requestScrollToItem(it) }
-                calendarOpen = false
+            CalendarSheet(
+                photos,
+                onDismiss = { calendarOpen = false },
+                onDay = { day ->
+                    calendarOpen = false
+                    tab = Tab.Library
+                    jumpDay = day // the grid scrolls the day's header to the top and glows it once
+                },
+                onOpen = { m ->
+                    calendarOpen = false
+                    open(m)
+                },
+            )
+        }
+        if (libraryMenu) {
+            LibraryMenu(
+                photosColumns.intValue,
+                onDismiss = { libraryMenu = false },
+                onCalendar = {
+                    libraryMenu = false
+                    calendarOpen = true
+                },
+                onSettings = {
+                    libraryMenu = false
+                    push(Route.Settings)
+                },
+            )
+        }
+        albumMenu?.let { items ->
+            Sheet(onDismiss = { albumMenu = null }, title = "Add ${countOf(items.size, "item")} to") {
+                MenuRow(Sym.DriveFileMove, "Move to album", { albumMenu = null; albumActions.moveOrCopy(items, Transfer.Move) }, sub = "The files move to that folder")
+                MenuRow(Sym.ContentCopy, "Copy to album", { albumMenu = null; albumActions.moveOrCopy(items, Transfer.Copy) }, sub = "A copy goes to that folder")
+                MenuRow(Sym.LibraryAdd, "Add to collection", { albumMenu = null; addingToCollection = items.map { it.id } }, sub = "No copies: one photo can be in many collections")
             }
         }
         addingToCollection?.let { ids ->
             AddToCollectionSheet(ids.size, collections, onDismiss = { addingToCollection = null }, onPick = { id, name ->
                 addToCollection(id, name, ids)
                 addingToCollection = null
-                selected = emptySet()
+                clearSelection()
             })
         }
-        viewerId?.let {
+        story?.let { s ->
+            Slideshow(s.items, s.items.first().id, onClose = { story = null }, title = s.title, eyebrow = s.eyebrow)
+        }
+        // A recreated activity (rotation, dark mode, split screen) restores viewerId before the open album or search has
+        // reported its photos; waiting for them keeps the viewer from closing itself on an empty list
+        val shownReady = when (top) {
+            is Route.Open -> page?.key == top.key
+            Route.Search -> searchState?.result != null
+            else -> loaded != null
+        }
+        viewerId?.takeIf { shownReady }?.let {
             Viewer(
                 shown,
                 it,
@@ -411,82 +598,317 @@ private fun AlbumShell(look: Look, onLook: (Look) -> Unit) {
                 openFrom = openedFrom,
                 closeTo = cellOnScreen,
             )
-            // The Scaffold's snackbar sits under the viewer, so the viewer gets its own host for Undo
-            SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 64.dp))
+            // The main snackbar sits under the viewer, so the viewer gets its own host for Undo
+            SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = viewerSnackbarGap)) { AlbumSnackbar(it) }
         }
-        if (settingsOpen) SettingsScreen(look, onLook, onBack = { settingsOpen = false })
     }
+}
+
+// ---------- Motion ----------
+
+private val enterEase = CubicBezierEasing(0.05f, 0.7f, 0.1f, 1f) // tab content settling in
+private val exitEase = CubicBezierEasing(0.3f, 0f, 0.8f, 0.15f) // anything leaving: quick to get out of the way
+private val screenEase = CubicBezierEasing(0.2f, 0.9f, 0.25f, 1f) // screens and sheets arriving
+
+/** Deeper screens slide over from the right (the one beneath slips 25% left and dims), Back reverses it; search fades. */
+private fun AnimatedContentTransitionScope<Route?>.stackTransition(still: Boolean, pushing: Boolean, from: Route?, to: Route?): ContentTransform = when {
+    still -> fadeIn(tween(120)) togetherWith fadeOut(tween(100))
+    from == Route.Search || to == Route.Search -> fadeIn(tween(220, easing = screenEase)) togetherWith fadeOut(tween(150))
+    pushing -> slideInHorizontally(tween(400, easing = screenEase)) { it } togetherWith
+        slideOutHorizontally(tween(400, easing = screenEase)) { -it / 4 }
+    else -> (slideInHorizontally(tween(280, easing = screenEase)) { -it / 4 } togetherWith
+        slideOutHorizontally(tween(280, easing = exitEase)) { it }).apply { targetContentZIndex = -1f } // the leaving screen stays on top
+}.using(SizeTransform(clip = false))
+
+private fun rise(still: Boolean) = if (still) fadeIn(tween(120)) else slideInVertically(tween(300, easing = screenEase)) { it } + fadeIn(tween(150))
+private fun sink(still: Boolean) = if (still) fadeOut(tween(100)) else slideOutVertically(tween(220, easing = exitEase)) { it } + fadeOut(tween(220))
+
+/** The three tabs, switched with the tab motion picked in Settings > Motion (Depth by default). */
+@Composable
+private fun Tabs(tab: Tab, spec: AlbumSpec, revealFrom: Offset, onTab: (Tab) -> Unit, page: @Composable (Tab) -> Unit) {
+    val motion = spec.appearance.tabMotion
+    if (motion == TabMotion.Pager && !spec.still) {
+        // Whole pages that also follow a sideways swipe
+        val pager = rememberPagerState(initialPage = tab.ordinal) { Tab.entries.size }
+        LaunchedEffect(tab) { if (pager.currentPage != tab.ordinal) pager.animateScrollToPage(tab.ordinal) }
+        LaunchedEffect(pager) { snapshotFlow { pager.settledPage }.collect { onTab(Tab.entries[it]) } }
+        HorizontalPager(pager, Modifier.fillMaxSize(), key = { it }) { page(Tab.entries[it]) }
+        return
+    }
+    AnimatedContent(
+        tab,
+        Modifier.fillMaxSize(),
+        transitionSpec = { tabTransition(motion, spec.still, targetState.ordinal - initialState.ordinal) },
+        label = "tabs",
+    ) { t ->
+        val effect = when {
+            spec.still -> Modifier
+            motion == TabMotion.Blur -> {
+                // the old page dissolves out of focus, the new one sharpens in
+                val radius by transition.animateDp({ tween(340, easing = enterEase) }, label = "blur") { if (it == EnterExitState.Visible) 0.dp else 18.dp }
+                if (radius > 0.dp) Modifier.blur(radius) else Modifier
+            }
+            motion == TabMotion.Reveal -> {
+                // the new page grows out of the tapped tab as a circle
+                val grow by transition.animateFloat({ tween(480, easing = screenEase) }, label = "reveal") { if (it == EnterExitState.PreEnter) 0f else 1f }
+                if (grow < 1f && transition.targetState == EnterExitState.Visible) Modifier.clip(RevealShape(revealFrom, grow)) else Modifier
+            }
+            else -> Modifier
+        }
+        Box(Modifier.fillMaxSize().then(effect)) { page(t) }
+    }
+}
+
+private fun tabTransition(motion: TabMotion, still: Boolean, dir: Int): ContentTransform = when {
+    still -> fadeIn(tween(120)) togetherWith fadeOut(tween(100))
+    // The new page settles in from slightly larger; the old one recedes
+    motion == TabMotion.Depth -> (fadeIn(tween(360, 40, enterEase)) + scaleIn(tween(360, 40, enterEase), initialScale = 1.06f)) togetherWith
+        (fadeOut(tween(200, easing = exitEase)) + scaleOut(tween(200, easing = exitEase), targetScale = 0.94f))
+    motion == TabMotion.Blur -> (fadeIn(tween(340, 30, enterEase)) + scaleIn(tween(340, 30, enterEase), initialScale = 1.02f)) togetherWith
+        fadeOut(tween(200, easing = FastOutLinearInEasing))
+    // No transition between pages, only a short settle of the new content
+    motion == TabMotion.Instant -> (fadeIn(tween(240, easing = enterEase), initialAlpha = 0.5f) + slideInVertically(tween(240, easing = enterEase)) { 28 }) togetherWith
+        fadeOut(snap())
+    motion == TabMotion.Reveal -> EnterTransition.None togetherWith
+        (fadeOut(tween(480), targetAlpha = 0.6f) + scaleOut(tween(480), targetScale = 0.96f))
+    // Slide: content moves the way the bottom-bar pill moved, 8% of the width
+    else -> (slideInHorizontally(tween(300, 40, enterEase)) { it * dir / 12 } + fadeIn(tween(300, 40, enterEase))) togetherWith
+        (slideOutHorizontally(tween(160, easing = exitEase)) { -it * dir / 12 } + fadeOut(tween(160, easing = exitEase)))
+}
+
+/** A circle around [center] that covers the whole screen at [progress] 1, starting from a 24dp disc at 0. */
+private class RevealShape(private val center: Offset, private val progress: Float) : Shape {
+    override fun createOutline(size: androidx.compose.ui.geometry.Size, layoutDirection: LayoutDirection, density: Density): Outline {
+        val from = with(density) { 24.dp.toPx() }
+        val c = if (center.isSpecified) center else Offset(size.width / 2, size.height)
+        val far = listOf(Offset.Zero, Offset(size.width, 0f), Offset(0f, size.height), Offset(size.width, size.height))
+            .maxOf { hypot(it.x - c.x, it.y - c.y) }
+        val r = from + (far - from) * progress
+        return Outline.Generic(Path().apply { addOval(Rect(c, r)) })
+    }
+}
+
+// ---------- Pages ----------
+
+@Composable
+private fun LibraryPage(
+    photos: List<Media>,
+    loaded: Boolean,
+    columns: androidx.compose.runtime.MutableIntState,
+    grid: LazyGridState,
+    selected: Set<Long>,
+    onOpen: (Media) -> Unit,
+    onSelect: (Set<Long>) -> Unit,
+    padding: PaddingValues,
+    gridPosition: Modifier,
+    jumpDay: Long?,
+    onJumped: () -> Unit,
+    selectMode: Boolean,
+    partial: Boolean,
+    onAllowAll: () -> Unit,
+    onStartSelecting: () -> Unit,
+    onCalendar: () -> Unit,
+    onMore: () -> Unit,
+) {
+    val videos = remember(photos) { photos.count { it.isVideo } }
+    val subtitle = "${countOf(photos.size - videos, "photo")} · ${countOf(videos, "video")}"
+    val actions: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {
+        if (photos.isNotEmpty()) {
+            AlbumIconButton(Sym.CheckCircle, "Select", onStartSelecting)
+            AlbumIconButton(Sym.CalendarMonth, "Jump to a date", onCalendar)
+        }
+        AlbumIconButton(Sym.MoreVert, "More", onMore)
+    }
+    if (loaded && photos.isEmpty()) {
+        Column(Modifier.fillMaxSize().padding(padding)) {
+            LargeTopBar("Library", actions = actions)
+            if (partial) PartialAccessBanner(onAllowAll)
+            EmptyState(Sym.PhotoLibrary, "No photos or videos yet", "Photos you take or save appear here.")
+        }
+        return
+    }
+    Box(Modifier.fillMaxSize()) {
+        MediaGrid(
+            photos, columns, grid, selected, onOpen, onSelect, padding, gridPosition,
+            jumpTo = jumpDay,
+            onJumped = onJumped,
+            selectMode = selectMode,
+            header = {
+                Column {
+                    LargeTopBar("Library", subtitle = subtitle, actions = actions)
+                    if (partial) PartialAccessBanner(onAllowAll)
+                }
+            },
+        )
+        // derived, so scrolling recomposes only when the title scrolls in or out, never per row
+        val collapsed by remember(grid) { derivedStateOf { grid.firstVisibleItemIndex > 0 } }
+        CollapsingBar(collapsed, Modifier.statusBarsPadding()) {
+            CollapsedTopBar("Library", subtitle = subtitle, actions = actions)
+        }
+    }
+}
+
+/** An album, special album, collection, place, thing or person, over the tabs. */
+@Composable
+private fun AlbumPage(
+    route: Route.Open,
+    media: List<Media>,
+    albums: List<Album>,
+    collections: List<CollectionAlbum>,
+    loaded: Boolean,
+    columns: androidx.compose.runtime.MutableIntState,
+    grid: LazyGridState,
+    selected: Set<Long>,
+    onOpen: (Media) -> Unit,
+    onSelect: (Set<Long>) -> Unit,
+    padding: PaddingValues,
+    gridPosition: Modifier,
+    onBack: () -> Unit,
+    onOpenPerson: (Long) -> Unit,
+    onPlay: (List<Media>, String) -> Unit,
+    selectMode: Boolean,
+    onStartSelecting: () -> Unit,
+    report: (PageInfo) -> Unit,
+) {
+    val id = route.id
+    val album = albums.find { it.id == id }
+    val special = Special.entries.find { it.id == id }
+    val collection = collections.find { it.albumId == id }
+    val smart = rememberSmartAlbum(id)
+    val person = rememberPerson(id)
+    val items = remember(media, id, collection, smart, person) {
+        collection?.items ?: smart?.items ?: person?.items ?: media.filter { it.isIn(id) }
+    }
+    DisposableEffect(route.key, items, collection, person) {
+        report(PageInfo(route.key, items, collection, person))
+        onDispose {}
+    }
+    // An album that stops existing (merged, emptied, deleted) closes after a moment for its data to load, instead of
+    // lingering as an id that could reopen something else later
+    val exists = album != null || special != null || collection != null || smart != null || person != null
+    LaunchedEffect(exists) {
+        if (!exists) {
+            delay(1_500)
+            onBack()
+        }
+    }
+    val title = album?.name ?: special?.title ?: collection?.name ?: smart?.title ?: person?.let(::personTitle).orEmpty()
+    val folder = album?.cover?.path?.trimEnd('/')
+    val subtitle = listOfNotNull(countOf(items.size, "item"), folder).joinToString(" · ")
+    val actions: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {
+        if (items.isNotEmpty()) {
+            AlbumIconButton(Sym.CheckCircle, "Select", onStartSelecting)
+            AlbumIconButton(Sym.Slideshow, "Slideshow", { onPlay(items, title) })
+        }
+    }
+    if (loaded && items.isEmpty()) {
+        Column(Modifier.fillMaxSize().padding(padding)) {
+            LargeTopBar(title, onBack = onBack)
+            EmptyState(Sym.PhotoLibrary, "Nothing here yet", special?.emptyText ?: smart?.emptyText ?: EMPTY_COLLECTION)
+        }
+        return
+    }
+    Box(Modifier.fillMaxSize()) {
+        MediaGrid(
+            items, columns, grid, selected, onOpen, onSelect, padding, gridPosition,
+            selectMode = selectMode,
+            header = {
+                if (person != null) PersonHeader(person, onBack, onOpenPerson)
+                else LargeTopBar(title, subtitle = subtitle, onBack = onBack, actions = actions)
+            },
+        )
+        val collapsed by remember(grid) { derivedStateOf { grid.firstVisibleItemIndex > 0 } }
+        CollapsingBar(collapsed, Modifier.statusBarsPadding()) {
+            CollapsedTopBar(title, subtitle = subtitle, onBack = onBack, actions = actions)
+        }
+    }
+}
+
+/** The selection bar's actions for the screen on show: in a collection Remove replaces Delete; on a person, Not them. */
+@Composable
+private fun SelectionActions(
+    selected: Set<Long>,
+    shown: List<Media>,
+    collection: CollectionAlbum?,
+    person: PersonAlbum?,
+    context: Context,
+    onClear: () -> Unit,
+    onSelectAll: () -> Unit,
+    onAlbum: (List<Media>) -> Unit,
+    onFavourite: (List<Media>) -> Unit,
+    onRemove: (CollectionAlbum, List<Long>) -> Unit,
+    onNotPerson: (PersonAlbum, List<Long>) -> Unit,
+    onTrash: (List<Media>) -> Unit,
+) {
+    // Read at tap time, not on every selection change. With nothing picked yet (Select), the actions wait.
+    val items = { shown.filter { it.id in selected } }
+    fun act(label: String, sym: Sym, danger: Boolean = false, run: () -> Unit) = SelAction(sym, label, danger) { if (selected.isNotEmpty()) run() }
+    val actions = buildList {
+        add(act("Share", Sym.Share) {
+            val list = items()
+            if (context.canSend(list.size, MAX_SHARE, "share")) {
+                CrashLog.note("share ${list.size}")
+                context.startSafely(shareIntent(list))
+            }
+        })
+        if (collection != null) add(act("Remove", Sym.RemoveCircle) { onRemove(collection, items().map { it.id }) })
+        else add(act("Album", Sym.Add) { onAlbum(items()) })
+        add(act("Favourite", Sym.Favorite) { onFavourite(items()) })
+        if (person != null) add(act("Not them", Sym.PersonRemove) { onNotPerson(person, items().map { it.id }) })
+        if (collection == null) add(act("Delete", Sym.Delete, danger = true) { onTrash(items()) })
+    }
+    SelectionBar(
+        selected.size, actions, onClear,
+        onSelectAll = onSelectAll,
+        allLabel = if (shown.isNotEmpty() && shown.all { it.id in selected }) "Clear all" else "Select all",
+    )
 }
 
 @Composable
-fun TitleBar(
-    title: String,
-    backIcon: androidx.compose.ui.graphics.vector.ImageVector = Icons.AutoMirrored.Outlined.ArrowBack,
-    onBack: (() -> Unit)? = null,
-    actions: @Composable RowScope.() -> Unit = {},
-) {
-    Row(
-        Modifier.fillMaxWidth().padding(start = if (onBack == null) 16.dp else 4.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        onBack?.let { IconButton(onClick = it) { Icon(backIcon, "Back") } }
-        Text(
-            title,
-            Modifier.weight(1f),
-            fontSize = if (onBack == null) LocalLook.current.titleSize else 22.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        actions()
+private fun LibraryMenu(columns: Int, onDismiss: () -> Unit, onCalendar: () -> Unit, onSettings: () -> Unit) {
+    val a = AlbumTheme.spec.appearance
+    Sheet(onDismiss = onDismiss, title = "Library") {
+        MenuRow(Sym.CalendarMonth, "Jump to a date", onCalendar, sub = "Calendar with your photos on each day")
+        MenuRow(Sym.GridView, "Gallery style", onSettings, sub = "${a.gallery.label} · $columns columns")
+        MenuRow(Sym.Palette, "Appearance", onSettings, sub = "Theme, accent and look")
+        MenuRow(Sym.Settings, "Settings", onSettings)
     }
 }
 
+/** A calm note at the top of the Library: Album only sees the photos picked in Android 14's "Select photos". */
 @Composable
 private fun PartialAccessBanner(onAllowAll: () -> Unit) {
+    val c = AlbumTheme.colors
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
-            .background(MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.shapes.medium)
-            .padding(start = 16.dp, end = 4.dp),
+        Modifier.fillMaxWidth().padding(horizontal = Space.s4, vertical = Space.s1)
+            .background(c.surfaceHigh, RoundedCornerShape(Space.radiusMd)).padding(start = Space.s4, end = Space.s1),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            "Album can only see the photos you picked.",
-            Modifier.weight(1f),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSecondaryContainer,
-        )
-        TextButton(onClick = onAllowAll) { Text("Allow all") }
+        Text("Album can only see the photos you picked.", Modifier.weight(1f), style = AlbumTheme.type.body, color = c.ink)
+        AlbumButton("Allow all", onAllowAll, variant = ButtonVariant.Quiet)
     }
 }
 
 @Composable
-private fun PermissionScreen(modifier: Modifier, onAllow: () -> Unit) {
+private fun PermissionScreen(onAllow: () -> Unit) {
     val context = LocalContext.current
-    Column(
-        modifier.fillMaxSize().padding(32.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Icon(LocalLook.current.icons.photos, null, Modifier.size(56.dp), tint = MaterialTheme.colorScheme.primary)
-        Text("See your photos here", style = MaterialTheme.typography.titleLarge)
-        Text(
+    Column(Modifier.fillMaxSize().padding(Space.s8), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+        LogoMark(size = 56.dp)
+        EmptyState(
+            Sym.PhotoLibrary,
+            "See your photos here",
             "Album needs access to your photos and videos. Everything stays on this phone.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-        )
-        Button(onClick = onAllow) { Text("Allow access") }
-        // If you tapped "Don't allow" twice, Android stops asking; this opens the app's settings page instead.
-        TextButton(onClick = {
-            context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null)))
-        }) { Text("Open settings") }
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(Space.s2)) {
+                AlbumButton("Allow access", onAllow, variant = ButtonVariant.Primary)
+                // If you tapped "Don't allow" twice, Android stops asking; this opens the app's settings page instead.
+                AlbumButton("Open settings", {
+                    context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null)))
+                }, variant = ButtonVariant.Quiet)
+            }
+        }
     }
 }
 
-@Composable
-fun Message(text: String, modifier: Modifier) {
-    Box(modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
-        Text(text, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
-    }
-}
+/** "1 item", "1,234 photos": the count grouped the way the phone's locale writes numbers. */
+fun countOf(n: Int, noun: String) = "${NumberFormat.getIntegerInstance().format(n)} $noun${if (n == 1) "" else "s"}"

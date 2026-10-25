@@ -7,7 +7,6 @@ import android.content.Context
 import android.net.Uri
 import android.provider.MediaStore
 import android.system.Os
-import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -58,9 +57,10 @@ fun editVersion(uri: Uri) = edits[uri] ?: 0
 /**
  * Returns a function that turns a photo a quarter clockwise (true) or anticlockwise without re-encoding it: only the
  * Exif orientation tag changes, after Android's write permission (no pop-up with Media management access).
+ * [onMessage] says why when a photo can't be turned (the viewer shows it in its snackbar).
  */
 @Composable
-fun rememberRotate(): (Media, Boolean) -> Unit {
+fun rememberRotate(onMessage: (String) -> Unit): (Media, Boolean) -> Unit {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     // Saveable so they survive the activity being recreated while Android's pop-up is open
@@ -74,7 +74,7 @@ fun rememberRotate(): (Media, Boolean) -> Unit {
         if (result.resultCode != Activity.RESULT_OK || uri == null) return@rememberLauncherForActivityResult
         busy = true
         scope.launch {
-            if (!rotate(context, uri, clockwise)) Toast.makeText(context, "Couldn't rotate this photo", Toast.LENGTH_SHORT).show()
+            if (!rotate(context, uri, clockwise)) onMessage("Couldn't rotate this photo")
             busy = false
         }
     }
@@ -87,7 +87,7 @@ fun rememberRotate(): (Media, Boolean) -> Unit {
             val refusal = withContext(Dispatchers.IO) { whyNotRotatable(context.contentResolver, m.uri) }
             if (refusal != null) {
                 CrashLog.note("rotate refused: $refusal")
-                Toast.makeText(context, refusal, Toast.LENGTH_SHORT).show()
+                onMessage(refusal)
                 pending = null
                 return@launch
             }
@@ -111,12 +111,15 @@ private suspend fun rotate(context: Context, uri: Uri, clockwise: Boolean): Bool
     People.rotated(ContentUris.parseId(uri), clockwise)
     // MediaStore rescans the file once it's closed (orientation, size, Android's thumbnail): reload after that
     withTimeoutOrNull(3_000) { Gallery.changes(resolver).first { generationOf(resolver, uri) != before } }
-    withContext(Dispatchers.Main) {
-        // the thumbnail and the full photo are both cached under the uri string (ThumbKeyer, Coil's UriKeyer)
-        SingletonImageLoader.get(context).memoryCache?.let { cache -> cache.keys.filter { it.key == uri.toString() || it.key.startsWith("$uri#") }.forEach(cache::remove) }
-        edits[uri] = editVersion(uri) + 1
-    }
+    withContext(Dispatchers.Main) { reloadEdited(context, uri) }
     true
+}
+
+/** Drops every cached copy of [uri], which changed on disk, so each thumbnail and viewer page of it reloads. Main thread. */
+fun reloadEdited(context: Context, uri: Uri) {
+    // the thumbnail and the full photo are both cached under the uri string (ThumbKeyer, Coil's UriKeyer)
+    SingletonImageLoader.get(context).memoryCache?.let { cache -> cache.keys.filter { it.key == uri.toString() || it.key.startsWith("$uri#") }.forEach(cache::remove) }
+    edits[uri] = editVersion(uri) + 1
 }
 
 /** Why [uri] can't be turned by patching its orientation tag in place, or null if it can. */
@@ -169,5 +172,6 @@ private fun writeOrientation(resolver: ContentResolver, uri: Uri, clockwise: Boo
     check(saved == target) { "orientation reads back as $saved, not $target" }
 }
 
-private fun generationOf(resolver: ContentResolver, uri: Uri): Long? =
+/** MediaStore's change counter for [uri]: it goes up each time the file is rescanned after a change. */
+fun generationOf(resolver: ContentResolver, uri: Uri): Long? =
     resolver.query(uri, arrayOf(MediaStore.MediaColumns.GENERATION_MODIFIED), null, null, null)?.use { if (it.moveToFirst()) it.getLong(0) else null }

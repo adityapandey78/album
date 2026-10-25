@@ -1,11 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Album</string>
-    <color name="launcher_bg">#FF4F46E5</color>
+    <color name="launcher_bg">#FF111110</color>
 
     <style name="Theme.Album" parent="android:Theme.DeviceDefault.DayNight">
         <item name="android:windowActionBar">false</item>
         <item name="android:windowNoTitle">true</item>
+        <!-- The launch splash: the icon on #111110 (design system: Logo), gone with the first frame of the grid -->
+        <item name="android:windowSplashScreenBackground">@color/launcher_bg</item>
     </style>
 
     <!-- Black from the first frame, so opening a photo from another app never flashes white. -->

@@ -45,7 +45,7 @@ fun MacrobenchmarkScope.dragFastScroller() {
 
 /** Opens the first photo (fly-in), swipes to the next two and goes back to the grid (fly-back). */
 fun MacrobenchmarkScope.openAndClosePhoto() {
-    grid().findObject(By.clickable(true)).click()
+    grid().findObject(By.res("media_tile")).click() // not just any clickable: the title bar's buttons come first
     device.waitForIdle()
     val y = device.displayHeight / 2
     repeat(2) {

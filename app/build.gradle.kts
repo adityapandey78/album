@@ -13,8 +13,8 @@ android {
         applicationId = "com.aditya.album"
         minSdk = 33 // Android 13+: READ_MEDIA_* permissions and AGSL shaders, no legacy branches
         targetSdk = 37 // Android 17
-        versionCode = 8
-        versionName = "0.7.0"
+        versionCode = 9
+        versionName = "0.7.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // 64-bit ARM only: the phone and the emulator. Each extra ABI would add another 11 MB ML Kit library.
         ndk { abiFilters += "arm64-v8a" }
@@ -54,7 +54,6 @@ ksp { arg("room.schemaLocation", "$projectDir/schemas") }
 dependencies {
     implementation(platform("androidx.compose:compose-bom:2026.09.00"))
     implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended:1.7.8")
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.0")
     implementation("io.coil-kt.coil3:coil-compose:3.6.3") // grid thumbnails + memory cache

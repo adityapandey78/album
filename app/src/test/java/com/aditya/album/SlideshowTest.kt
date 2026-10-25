@@ -21,4 +21,19 @@ class SlideshowTest {
         assertNull(next("vv", 0))
         assertNull(next("", 0))
     }
+
+    private fun story(videos: String, start: Int) = storySlides(videos.indices.toList(), start) { videos[it] == 'v' }
+
+    @Test fun storyRunsFromTheStartPhotoToTheEndWithoutVideos() {
+        assertEquals(listOf(1, 3, 4), story("ppvpp", 1))
+        assertEquals(listOf(3, 4), story("ppvpp", 2)) // started on a video: from the next photo
+    }
+
+    @Test fun storyFromAVideoAfterTheLastPhotoStartsOver() {
+        assertEquals(listOf(0, 2), story("pvpv", 3))
+    }
+
+    @Test fun noStoryWithoutPhotos() {
+        assertEquals(emptyList<Int>(), story("vv", 0))
+    }
 }

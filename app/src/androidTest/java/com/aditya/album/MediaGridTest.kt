@@ -2,7 +2,9 @@ package com.aditya.album
 
 import android.net.Uri
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -19,6 +21,7 @@ import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.pinch
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -39,7 +42,7 @@ class MediaGridTest {
     @Test fun pinchStepsOneColumnLevelPerGesture() {
         val columns = mutableIntStateOf(DEFAULT_COLUMNS)
         compose.setContent {
-            AlbumTheme(Look.Clean) {
+            AlbumTheme(Appearance()) {
                 MediaGrid(media, columns, rememberLazyGridState(), emptySet(), {}, {}, PaddingValues(), Modifier.testTag("grid"))
             }
         }
@@ -49,18 +52,18 @@ class MediaGridTest {
         grid.performTouchInput { pinch(center - Offset(150f, 0f), center - Offset(450f, 0f), center + Offset(150f, 0f), center + Offset(450f, 0f)) }
         compose.runOnIdle { assertEquals(3, columns.intValue) }
 
-        // Fingers together (zoom out) three times: 3 -> 4 -> 5 -> 7, and 7 switches to month headers
-        repeat(3) {
+        // Fingers together (zoom out) four times: 3 -> 4 -> 5 -> 7 -> month view, which has month headers
+        repeat(4) {
             grid.performTouchInput { pinch(center - Offset(450f, 0f), center - Offset(150f, 0f), center + Offset(450f, 0f), center + Offset(150f, 0f)) }
         }
-        compose.runOnIdle { assertEquals(7, columns.intValue) }
+        compose.runOnIdle { assertEquals(MONTH_COLUMNS, columns.intValue) }
         compose.onNodeWithText(LocalDate.now().format(java.time.format.DateTimeFormatter.ofPattern("MMMM yyyy"))).assertExists()
     }
 
     @Test fun showsTodayHeaderAndOpensTappedPhoto() {
         var opened: Media? = null
         compose.setContent {
-            AlbumTheme(Look.Clean) {
+            AlbumTheme(Appearance()) {
                 MediaGrid(media, mutableIntStateOf(DEFAULT_COLUMNS), rememberLazyGridState(), emptySet(), { opened = it }, {}, PaddingValues())
             }
         }
@@ -73,7 +76,7 @@ class MediaGridTest {
     @Test fun longPressAndDragSelectsARangeAndLiftingDoesNotTapIt() {
         var selected by mutableStateOf(emptySet<Long>())
         compose.setContent {
-            AlbumTheme(Look.Clean) {
+            AlbumTheme(Appearance()) {
                 MediaGrid(media, mutableIntStateOf(DEFAULT_COLUMNS), rememberLazyGridState(), selected, {}, { selected = it }, PaddingValues(), Modifier.testTag("grid"))
             }
         }
@@ -100,5 +103,40 @@ class MediaGridTest {
             up()
         }
         compose.runOnIdle { assertEquals(setOf(0L, 1L), selected) }
+    }
+
+    @Test fun justifiedRowsOpenTheTappedPhotoAndKnowWhereItIs() {
+        val state = LazyGridState()
+        var opened: Media? = null
+        compose.setContent {
+            AlbumTheme(Appearance(gallery = GalleryStyle.Justified)) {
+                MediaGrid(media, mutableIntStateOf(DEFAULT_COLUMNS), state, emptySet(), { opened = it }, {}, PaddingValues(), header = { Text("Library") })
+            }
+        }
+        compose.onNodeWithText("Library").assertExists()
+        compose.onAllNodes(hasClickAction())[1].performClick() // the second photo, inside the first row
+        compose.runOnIdle {
+            assertEquals(1L, opened?.id)
+            val first = cellBounds(state, 0L)!!
+            val second = cellBounds(state, 1L)!!
+            assertEquals(first.top, second.top) // same row
+            assertTrue(second.left > first.right) // to its right, past the gutter
+            assertEquals(null, cellBounds(state, 199L)) // far down, not on screen
+        }
+    }
+
+    @Test fun calendarJumpScrollsToTheDayAndReportsIt() {
+        val state = LazyGridState()
+        var jumped = false
+        compose.setContent {
+            AlbumTheme(Appearance()) {
+                MediaGrid(media, mutableIntStateOf(DEFAULT_COLUMNS), state, emptySet(), {}, {}, PaddingValues(), jumpTo = today - 20, onJumped = { jumped = true })
+            }
+        }
+        compose.runOnIdle {
+            assertTrue(jumped)
+            // 6 photos a day: day 20 starts at photo 120, after 20 headers
+            assertEquals(140, state.firstVisibleItemIndex)
+        }
     }
 }

@@ -134,6 +134,10 @@ interface IndexDao {
     /** [query] is FTS syntax, like `invoice*` for words starting with "invoice". */
     @Query("SELECT rowid FROM texts WHERE texts MATCH :query")
     fun idsWithText(query: String): List<Long>
+
+    /** The text read from one item, or null when it had none. */
+    @Query("SELECT text FROM texts WHERE rowid = :id")
+    fun text(id: Long): String?
 }
 
 // Schemas are exported to app/schemas so new tables can ship as Room auto-migrations instead of a full re-index.

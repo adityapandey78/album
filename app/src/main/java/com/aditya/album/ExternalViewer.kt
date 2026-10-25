@@ -20,10 +20,10 @@ class ExternalViewerActivity : ComponentActivity() {
         // content:// only: an explicit intent could pass https:// (the player would go online) or file:// (sharing crashes)
         val uri = intent.data?.takeIf { it.scheme == ContentResolver.SCHEME_CONTENT } ?: return finish()
         val type = intent.type
-        val look = Look.entries.find { it.name == getSharedPreferences("settings", MODE_PRIVATE).getString("look", null) } ?: Look.Clean
+        AppearancePrefs.load(this)
         CrashLog.note("open external")
         setContent {
-            AlbumTheme(look) {
+            AlbumTheme {
                 // The sending app's provider can be slow (cloud files), so its details are read off the main thread.
                 val media by produceState<Media?>(null) { value = withContext(Dispatchers.IO) { externalMedia(contentResolver, uri, type) } }
                 media?.let { Viewer(listOf(it), it.id, onClose = ::finish, external = true) }

@@ -22,13 +22,13 @@ class ViewerGestureTest {
     private val media = List(3) { i ->
         Media(
             i.toLong(), Uri.parse("content://test/$i"), false, taken = 1, day = 0, width = 0, height = 0,
-            durationMs = 0, bucketId = 0, bucketName = "", isFavorite = false, size = 0, name = "", path = "",
+            durationMs = 0, bucketId = 0, bucketName = "", isFavorite = false, size = 0, name = "IMG_$i.jpg", path = "",
         )
     }
     private var closed = false
 
     private fun showViewer() = compose.setContent {
-        AlbumTheme(Look.Clean) { Viewer(media, startId = 1, onClose = { closed = true }) }
+        AlbumTheme(Appearance()) { Viewer(media, startId = 1, onClose = { closed = true }) }
     }
 
     @Test fun swipeDownCloses() {
@@ -40,7 +40,7 @@ class ViewerGestureTest {
     @Test fun swipeUpOpensDetails() {
         showViewer()
         compose.onRoot().performTouchInput { swipeUp() }
-        compose.onNodeWithText("Details").assertExists()
+        compose.onNodeWithText("IMG_1.jpg", substring = true).assertExists() // the details sheet shows the file name
         compose.runOnIdle { assertFalse(closed) }
     }
 

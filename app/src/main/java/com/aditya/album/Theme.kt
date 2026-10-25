@@ -1,25 +1,11 @@
 package com.aditya.album
 
+import android.content.Context
+import android.content.SharedPreferences
+import android.provider.Settings
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CalendarMonth
-import androidx.compose.material.icons.filled.Explore
-import androidx.compose.material.icons.filled.Photo
-import androidx.compose.material.icons.filled.PhotoLibrary
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.outlined.CalendarMonth
-import androidx.compose.material.icons.outlined.Explore
-import androidx.compose.material.icons.outlined.Photo
-import androidx.compose.material.icons.outlined.PhotoLibrary
-import androidx.compose.material.icons.outlined.Search
-import androidx.compose.material.icons.outlined.Settings
-import androidx.compose.material.icons.rounded.CalendarMonth
-import androidx.compose.material.icons.rounded.Explore
-import androidx.compose.material.icons.rounded.Photo
-import androidx.compose.material.icons.rounded.PhotoLibrary
-import androidx.compose.material.icons.rounded.Search
-import androidx.compose.material.icons.rounded.Settings
+import androidx.core.content.edit
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
@@ -29,119 +15,329 @@ import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.ReadOnlyComposable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontVariation
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
-// The 3 design options. When you pick the final one, delete the other two here and in specOf().
-enum class Look(val label: String, val blurb: String) {
-    Clean("Clean", "ColorOS-like · Inter · tight square grid"),
-    Bold("Bold", "OriginOS-like · Outfit · rounded tiles, big titles"),
-    You("Material You", "Pixel-like · Plus Jakarta Sans · wallpaper colours"),
+// Album's design system in code: the tokens of the "Album" design system (tokens.json) and the four Appearance choices.
+// Screens read colours, type and shape from AlbumTheme.colors / .type / .spec, never from literals.
+
+enum class ThemeMode(val label: String) { System("System"), Light("Light"), Dark("Dark"), Dim("Dim") }
+
+enum class Accent(val label: String) { Lime("Lime"), Coral("Coral"), Sky("Sky"), Amber("Amber"), Mono("Mono"), Wallpaper("Wallpaper") }
+
+/** Tile shape and spacing. Air is balanced, Edge square and edge to edge, Soft rounded with more air. */
+enum class Look(val label: String, val blurb: String) { Air("Air", "Balanced"), Edge("Edge", "Square"), Soft("Soft", "Rounded") }
+
+enum class GalleryStyle(val label: String, val blurb: String) {
+    Grid("Grid", "Squares"), Justified("Justified", "True shapes"), Mosaic("Mosaic", "Best shot big"),
 }
 
-/** Everything that differs between the design options. */
-class LookSpec(
-    val font: FontFamily,
-    val gridGap: Dp,
-    val cellCorner: Dp,
-    val titleSize: TextUnit,
-    val icons: AppIcons,
+/** How tab content changes when you switch tabs in the bottom bar. */
+enum class TabMotion(val label: String) {
+    Depth("Depth"), Blur("Blur"), Instant("Instant"), Reveal("Reveal from the tab"), Pager("Swipe pager"), Slide("Slide"),
+}
+
+@Immutable
+data class Appearance(
+    val theme: ThemeMode = ThemeMode.System,
+    val accent: Accent = Accent.Lime,
+    val look: Look = Look.Air,
+    val gallery: GalleryStyle = GalleryStyle.Grid,
+    val tabMotion: TabMotion = TabMotion.Depth,
+    /** Remove animations: null follows the phone's setting, true or false is the in-app override. */
+    val still: Boolean? = null,
+    val haptics: Boolean = true,
+    /** Leaves Recently deleted and Private safe out of Collections; Settings still opens them. */
+    val hidePrivate: Boolean = false,
 )
 
-class AppIcons(
-    val photos: ImageVector,
-    val albums: ImageVector,
-    val explore: ImageVector,
-    val search: ImageVector,
-    val settings: ImageVector,
-    val calendar: ImageVector,
-)
+/** The Appearance settings, saved in the "settings" preferences and applied live. */
+object AppearancePrefs {
+    private lateinit var prefs: SharedPreferences
+    private val state = MutableStateFlow(Appearance())
+    val appearance = state.asStateFlow()
 
-// Variable fonts (one file per family), bundled so they work offline.
-private fun family(res: Int) = FontFamily(
-    listOf(400, 500, 600, 700).map { w ->
-        Font(res, FontWeight(w), variationSettings = FontVariation.Settings(FontVariation.weight(w)))
+    /** Call before the first frame so the app never flashes the default theme. Safe to call repeatedly. */
+    fun load(context: Context) {
+        if (::prefs.isInitialized) return
+        prefs = context.applicationContext.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        fun <T : Enum<T>> read(key: String, all: Array<T>, default: T) = all.find { it.name == prefs.getString(key, null) } ?: default
+        // v0.1 to v0.7 had three "looks": Clean becomes Edge, Bold becomes Soft, Material You becomes the Wallpaper accent
+        val old = prefs.getString("look", null)
+        state.value = Appearance(
+            theme = read("theme", ThemeMode.entries.toTypedArray(), ThemeMode.System),
+            accent = read("accent", Accent.entries.toTypedArray(), if (old == "You") Accent.Wallpaper else Accent.Lime),
+            look = read("look", Look.entries.toTypedArray(), if (old == "Clean") Look.Edge else if (old == "Bold") Look.Soft else Look.Air),
+            gallery = read("gallery", GalleryStyle.entries.toTypedArray(), GalleryStyle.Grid),
+            tabMotion = read("tab_motion", TabMotion.entries.toTypedArray(), TabMotion.Depth),
+            still = if (prefs.contains("still")) prefs.getBoolean("still", false) else null,
+            haptics = prefs.getBoolean("haptics", true),
+            hidePrivate = prefs.getBoolean("hide_private", false),
+        )
+    }
+
+    fun update(change: (Appearance) -> Appearance) {
+        val a = change(state.value)
+        state.value = a
+        prefs.edit {
+            putString("theme", a.theme.name)
+            putString("accent", a.accent.name)
+            putString("look", a.look.name)
+            putString("gallery", a.gallery.name)
+            putString("tab_motion", a.tabMotion.name)
+            putBoolean("haptics", a.haptics)
+            putBoolean("hide_private", a.hidePrivate)
+            if (a.still == null) remove("still") else putBoolean("still", a.still)
+        }
+        CrashLog.note("appearance ${a.theme} ${a.accent} ${a.look} ${a.gallery} ${a.tabMotion} still=${a.still}")
+    }
+}
+
+/** Colour roles. Names match the design system's tokens; see its README for which goes where. */
+@Immutable
+data class AlbumColors(
+    val canvas: Color,
+    val surface: Color,
+    val surfaceHigh: Color,
+    val line: Color,
+    val lineStrong: Color,
+    val ink: Color,
+    val inkMuted: Color,
+    /** The accent as a fill (primary button, active bottom-bar pill, selection check). Never text. */
+    val flash: Color,
+    val onFlash: Color,
+    /** The accent as text or a thin mark (Undo, links, a selected chip's check). */
+    val flashInk: Color,
+    val flashSoft: Color,
+    val danger: Color,
+    val dangerSoft: Color,
+    val onDanger: Color,
+    /**
+     * Floating chrome: bottom bar, dock, selection bar. 96% opaque rather than the design's 72 to 78%: the design pairs
+     * glass with a 24dp background blur, which Album skips because blurring a scrolling grid costs frame time at 144 Hz.
+     */
+    val glass: Color,
+    val scrim: Color,
+    val dark: Boolean,
+) {
+    /** Fades under text on photos (tile footers, viewer top bar). 0.56 keeps white text readable on a white photo. */
+    val scrimPhoto get() = Color(0x8F000000)
+    val onPhoto get() = Color.White
+
+    /** The viewer and video background in every theme. */
+    val void get() = Color.Black
+}
+
+private val Ink = Color(0xFF111110)
+private val Paper = Color(0xFFF4F4F0)
+
+private fun base(mode: ThemeMode) = when (mode) {
+    ThemeMode.Dark -> AlbumColors(
+        canvas = Color.Black, surface = Color(0xFF121212), surfaceHigh = Color(0xFF1F1F1F), line = Color(0xFF2C2C2C),
+        lineStrong = Color(0xFF6B6B66), ink = Paper, inkMuted = Color(0xFFA3A39C), flash = Color.Unspecified,
+        onFlash = Color.Unspecified, flashInk = Color.Unspecified, flashSoft = Color.Unspecified, danger = Color(0xFFFF8A7A),
+        dangerSoft = Color(0xFF2B0E0A), onDanger = Ink, glass = Color(0xF51C1C1C), scrim = Color(0xA3000000), dark = true,
+    )
+    ThemeMode.Dim -> AlbumColors(
+        canvas = Color(0xFF151515), surface = Color(0xFF1E1E1E), surfaceHigh = Color(0xFF2A2A2A), line = Color(0xFF383838),
+        lineStrong = Color(0xFF7A7A74), ink = Paper, inkMuted = Color(0xFFABABA4), flash = Color.Unspecified,
+        onFlash = Color.Unspecified, flashInk = Color.Unspecified, flashSoft = Color.Unspecified, danger = Color(0xFFFF8A7A),
+        dangerSoft = Color(0xFF3A1510), onDanger = Ink, glass = Color(0xF5282828), scrim = Color(0x99000000), dark = true,
+    )
+    else -> AlbumColors(
+        canvas = Color(0xFFF6F6F3), surface = Color.White, surfaceHigh = Color(0xFFEBEBE6), line = Color(0xFFD9D9D2),
+        lineStrong = Color(0xFF8C8C84), ink = Ink, inkMuted = Color(0xFF5E5E58), flash = Color.Unspecified,
+        onFlash = Color.Unspecified, flashInk = Color.Unspecified, flashSoft = Color.Unspecified, danger = Color(0xFFC42B1C),
+        dangerSoft = Color(0xFFFBE7E4), onDanger = Color.White, glass = Color(0xF5FFFFFF), scrim = Color(0x7A000000), dark = false,
+    )
+}
+
+/** The flash role (fill, on-fill, ink, soft) for an accent in a theme. Wallpaper is handled with the dynamic scheme. */
+private fun flashOf(accent: Accent, mode: ThemeMode): List<Color> {
+    val light = mode == ThemeMode.Light
+    val dim = mode == ThemeMode.Dim
+    fun pick(l: Long, d: Long, m: Long = d) = Color(if (light) l else if (dim) m else d)
+    return when (accent) {
+        Accent.Coral -> listOf(Color(0xFFFF7A59), Ink, pick(0xFFB33A1B, 0xFFFF7A59, 0xFFFF8F73), pick(0xFFFFE6DE, 0xFF2E1209, 0xFF3B1A10))
+        Accent.Sky -> listOf(Color(0xFF7CC6FF), Ink, pick(0xFF0B5E9E, 0xFF7CC6FF, 0xFF8FCFFF), pick(0xFFE0F1FF, 0xFF0A2133, 0xFF12293B))
+        Accent.Amber -> listOf(Color(0xFFFFC53D), Ink, pick(0xFF7A5200, 0xFFFFC53D, 0xFFFFCC55), pick(0xFFFFF2CC, 0xFF2B2000, 0xFF372A08))
+        Accent.Mono -> listOf(if (light) Ink else Paper, if (light) Color.White else Ink, if (light) Ink else Paper, pick(0xFFE2E2DC, 0xFF2A2A2A, 0xFF363636))
+        else -> listOf(Color(0xFFD7F94A), Ink, pick(0xFF4A6200, 0xFFD7F94A), pick(0xFFEEF8C8, 0xFF1E2508, 0xFF2A3310))
+    }
+}
+
+fun albumColors(mode: ThemeMode, accent: Accent, dynamic: ColorScheme? = null): AlbumColors {
+    val c = base(mode)
+    if (accent == Accent.Wallpaper && dynamic != null) {
+        return c.copy(flash = dynamic.primaryContainer, onFlash = dynamic.onPrimaryContainer, flashInk = dynamic.primary, flashSoft = dynamic.secondaryContainer)
+    }
+    val (flash, on, ink, soft) = flashOf(accent, mode)
+    return c.copy(flash = flash, onFlash = on, flashInk = ink, flashSoft = soft)
+}
+
+// Variable fonts bundled in res/font so they work offline: Bricolage Grotesque (display), Figtree (sans), Geist Mono (mono).
+private fun variable(res: Int, vararg weights: Int, opsz: Float? = null) = FontFamily(
+    weights.map { w ->
+        val axes = listOfNotNull(FontVariation.weight(w), opsz?.let { FontVariation.Setting("opsz", it) })
+        Font(res, FontWeight(w), variationSettings = FontVariation.Settings(*axes.toTypedArray()))
     }
 )
 
-private val inter = family(R.font.inter)
-private val outfit = family(R.font.outfit)
-private val jakarta = family(R.font.plus_jakarta_sans)
+// Bricolage's optical size follows the text size, as browsers do on their own: tighter and bolder-looking when big
+private val bricolage52 = variable(R.font.bricolage_grotesque, 700, opsz = 52f)
+private val bricolage34 = variable(R.font.bricolage_grotesque, 700, opsz = 34f)
+private val bricolage24 = variable(R.font.bricolage_grotesque, 600, opsz = 24f)
+val Figtree = variable(R.font.figtree, 400, 500, 600, 700)
+val GeistMono = variable(R.font.geist_mono, 500)
 
-fun specOf(look: Look) = when (look) {
-    Look.Clean -> LookSpec(
-        inter, gridGap = 2.dp, cellCorner = 0.dp, titleSize = 22.sp,
-        AppIcons(
-            Icons.Outlined.Photo, Icons.Outlined.PhotoLibrary, Icons.Outlined.Explore, Icons.Outlined.Search, Icons.Outlined.Settings,
-            Icons.Outlined.CalendarMonth,
-        ),
-    )
-    Look.Bold -> LookSpec(
-        outfit, gridGap = 4.dp, cellCorner = 8.dp, titleSize = 28.sp,
-        AppIcons(
-            Icons.Rounded.Photo, Icons.Rounded.PhotoLibrary, Icons.Rounded.Explore, Icons.Rounded.Search, Icons.Rounded.Settings,
-            Icons.Rounded.CalendarMonth,
-        ),
-    )
-    Look.You -> LookSpec(
-        jakarta, gridGap = 3.dp, cellCorner = 4.dp, titleSize = 24.sp,
-        AppIcons(
-            Icons.Filled.Photo, Icons.Filled.PhotoLibrary, Icons.Filled.Explore, Icons.Filled.Search, Icons.Filled.Settings,
-            Icons.Filled.CalendarMonth,
-        ),
-    )
+/** The text styles of the design system. Sizes are sp, so they follow the phone's font size. */
+@Immutable
+class AlbumType(edge: Boolean) {
+    /** One big moment per screen: memories, recaps. */
+    val display = TextStyle(fontFamily = if (edge) Figtree else bricolage52, fontSize = 52.sp, lineHeight = 50.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.02).em)
+    /** Expanded screen titles. */
+    val titleXl = TextStyle(fontFamily = if (edge) Figtree else bricolage34, fontSize = 34.sp, lineHeight = 36.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.01).em)
+    /** Album, person and sheet titles. */
+    val titleLg = TextStyle(fontFamily = if (edge) Figtree else bricolage24, fontSize = 24.sp, lineHeight = 28.sp, fontWeight = FontWeight.SemiBold)
+    /** Date headers, collapsed titles, card titles. */
+    val titleMd = TextStyle(fontFamily = Figtree, fontSize = 17.sp, lineHeight = 22.sp, fontWeight = FontWeight.SemiBold)
+    val body = TextStyle(fontFamily = Figtree, fontSize = 15.sp, lineHeight = 22.sp, fontWeight = FontWeight.Normal)
+    /** Buttons, chips, album names. */
+    val label = TextStyle(fontFamily = Figtree, fontSize = 14.sp, lineHeight = 18.sp, fontWeight = FontWeight.SemiBold)
+    /** Places under a date, helper lines. */
+    val caption = TextStyle(fontFamily = Figtree, fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium)
+    /** Numbers the camera made: durations, counts, sizes, dates in the scrubber. Tabular figures. */
+    val meta = TextStyle(fontFamily = GeistMono, fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium, fontFeatureSettings = "tnum")
+    /** The EXIF line in the details sheet. */
+    val metaLg = TextStyle(fontFamily = GeistMono, fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium, fontFeatureSettings = "tnum")
 }
 
-val LocalLook = staticCompositionLocalOf { specOf(Look.Clean) }
+private val airType = AlbumType(edge = false)
+private val edgeType = AlbumType(edge = true) // Edge sets titles in the sans
+
+/** Spacing, radii and sizes from the design system. Gutter and tile corner depend on the Look; see [AlbumSpec]. */
+object Space {
+    val s1 = 4.dp
+    val s2 = 8.dp
+    val s3 = 12.dp
+    val s4 = 16.dp
+    val s6 = 24.dp
+    val s8 = 32.dp
+    val s12 = 48.dp
+    /** Touch targets stay this far from a curved display edge. */
+    val edgeSafe = 20.dp
+    /** Minimum touch target. */
+    val target = 48.dp
+    /** Height of the bottom bar, selection bar and viewer dock. */
+    val bar = 64.dp
+    val icon = 24.dp
+    val iconSm = 20.dp
+    val check = 24.dp
+    /** Covers, cards and a selected tile. */
+    val radiusMd = 16.dp
+    /** Sheets, the confirmation bar. */
+    val radiusLg = 28.dp
+}
+
+@Immutable
+class AlbumSpec(
+    val colors: AlbumColors,
+    val type: AlbumType,
+    val appearance: Appearance,
+    /** Gap between grid tiles. */
+    val gutter: Dp,
+    /** Grid tile corners at rest. */
+    val tileCorner: Dp,
+    /** Remove animations is on (in Album, or on the phone): screens crossfade, nothing slides or zooms. */
+    val still: Boolean,
+)
+
+private val LocalAlbum = staticCompositionLocalOf<AlbumSpec> { error("AlbumTheme is missing") }
+
+object AlbumTheme {
+    val colors: AlbumColors @Composable @ReadOnlyComposable get() = LocalAlbum.current.colors
+    val type: AlbumType @Composable @ReadOnlyComposable get() = LocalAlbum.current.type
+    val spec: AlbumSpec @Composable @ReadOnlyComposable get() = LocalAlbum.current
+}
+
+/** The phone's "Remove animations" (animator duration scale 0). */
+fun phoneAnimationsOff(context: Context) =
+    Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
+
+/** Which theme is actually showing: System resolves to Light or Dark (true black). */
+@Composable
+fun resolvedTheme(mode: ThemeMode): ThemeMode {
+    val systemDark = isSystemInDarkTheme()
+    return if (mode == ThemeMode.System) if (systemDark) ThemeMode.Dark else ThemeMode.Light else mode
+}
 
 @Composable
-fun AlbumTheme(look: Look, content: @Composable () -> Unit) {
-    val dark = isSystemInDarkTheme()
+fun AlbumTheme(content: @Composable () -> Unit) {
+    val a by AppearancePrefs.appearance.collectAsState()
+    AlbumTheme(a, content)
+}
+
+@Composable
+fun AlbumTheme(a: Appearance, content: @Composable () -> Unit) {
     val context = LocalContext.current
-    val spec = specOf(look)
-    val colors = when (look) {
-        // Clean: pure white / OLED black with a blue accent
-        Look.Clean -> if (dark) {
-            darkColorScheme(primary = Color(0xFF7AA7FF), background = Color.Black, surface = Color.Black)
-        } else {
-            lightColorScheme(primary = Color(0xFF2563EB), background = Color.White, surface = Color.White)
-        }
-        Look.Bold -> if (dark) darkColorScheme(primary = Color(0xFFB7A6FF)) else lightColorScheme(primary = Color(0xFF6D4AFF))
-        Look.You -> if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-    }
-    CompositionLocalProvider(LocalLook provides spec) {
-        MaterialTheme(colorScheme = colors, typography = Typography().withFont(spec.font)) {
-            // Screens drawn over the Scaffold (Settings, Trash, Calendar, ...) aren't inside a Surface, so text with no
-            // colour of its own would fall back to black and vanish in dark mode. Default every screen to the theme's.
-            CompositionLocalProvider(LocalContentColor provides colors.onBackground, content = content)
+    val mode = resolvedTheme(a.theme)
+    val dynamic = if (a.accent == Accent.Wallpaper) {
+        if (mode == ThemeMode.Light) dynamicLightColorScheme(context) else dynamicDarkColorScheme(context)
+    } else null
+    val colors = remember(mode, a.accent, dynamic) { albumColors(mode, a.accent, dynamic) }
+    val still = a.still ?: remember { phoneAnimationsOff(context) }
+    val spec = AlbumSpec(
+        colors = colors,
+        type = if (a.look == Look.Edge) edgeType else airType,
+        appearance = a,
+        gutter = when (a.look) { Look.Edge -> 1.dp; Look.Soft -> 6.dp; Look.Air -> 2.dp },
+        tileCorner = when (a.look) { Look.Edge -> 0.dp; Look.Soft -> 12.dp; Look.Air -> 4.dp },
+        still = still,
+    )
+    CompositionLocalProvider(LocalAlbum provides spec) {
+        // Material components that are still used (text fields, bottom sheets, menus) take their colours from the same tokens
+        MaterialTheme(colorScheme = remember(colors) { materialScheme(colors) }, typography = remember(spec.type) { materialType(spec.type) }) {
+            // Screens drawn over the Scaffold aren't inside a Surface; without this their text would default to black
+            CompositionLocalProvider(LocalContentColor provides colors.ink, content = content)
         }
     }
 }
 
-private fun Typography.withFont(f: FontFamily) = Typography(
-    displayLarge = displayLarge.copy(fontFamily = f),
-    displayMedium = displayMedium.copy(fontFamily = f),
-    displaySmall = displaySmall.copy(fontFamily = f),
-    headlineLarge = headlineLarge.copy(fontFamily = f),
-    headlineMedium = headlineMedium.copy(fontFamily = f),
-    headlineSmall = headlineSmall.copy(fontFamily = f),
-    titleLarge = titleLarge.copy(fontFamily = f),
-    titleMedium = titleMedium.copy(fontFamily = f),
-    titleSmall = titleSmall.copy(fontFamily = f),
-    bodyLarge = bodyLarge.copy(fontFamily = f),
-    bodyMedium = bodyMedium.copy(fontFamily = f),
-    bodySmall = bodySmall.copy(fontFamily = f),
-    labelLarge = labelLarge.copy(fontFamily = f),
-    labelMedium = labelMedium.copy(fontFamily = f),
-    labelSmall = labelSmall.copy(fontFamily = f),
+private fun materialScheme(c: AlbumColors): ColorScheme {
+    val s = if (c.dark) darkColorScheme() else lightColorScheme()
+    return s.copy(
+        primary = c.flashInk, onPrimary = c.canvas, primaryContainer = c.flash, onPrimaryContainer = c.onFlash,
+        secondary = c.flashInk, secondaryContainer = c.flashSoft, onSecondaryContainer = c.ink,
+        background = c.canvas, onBackground = c.ink, surface = c.surface, onSurface = c.ink, surfaceVariant = c.surfaceHigh,
+        onSurfaceVariant = c.inkMuted, surfaceContainerLowest = c.canvas, surfaceContainerLow = c.surface, surfaceContainer = c.surface,
+        surfaceContainerHigh = c.surfaceHigh, surfaceContainerHighest = c.surfaceHigh, surfaceBright = c.surfaceHigh, surfaceDim = c.canvas,
+        inverseSurface = c.ink, inverseOnSurface = c.canvas, inversePrimary = c.flash,
+        outline = c.lineStrong, outlineVariant = c.line, error = c.danger, onError = c.onDanger, errorContainer = c.dangerSoft,
+        onErrorContainer = c.danger, scrim = c.scrim,
+    )
+}
+
+private fun materialType(t: AlbumType) = Typography(
+    displayLarge = t.display, displayMedium = t.titleXl, displaySmall = t.titleXl,
+    headlineLarge = t.titleXl, headlineMedium = t.titleLg, headlineSmall = t.titleLg,
+    titleLarge = t.titleLg, titleMedium = t.titleMd, titleSmall = t.label,
+    bodyLarge = t.body, bodyMedium = t.body, bodySmall = t.caption,
+    labelLarge = t.label, labelMedium = t.caption, labelSmall = t.caption,
 )

@@ -56,4 +56,43 @@ class CollectionsTest {
         assertEquals("Added 5 to Goa trip", addedMessage(5, "Goa trip"))
         assertEquals("Already in Goa trip", addedMessage(0, "Goa trip"))
     }
+
+    @Test fun collectionPinsNeverLookLikeFolders() {
+        // Folder pins are RELATIVE_PATHs, which always end in "/"
+        listOf(1L, 42L).forEach { assertTrue(!collectionKey(it).endsWith("/")) }
+        assertTrue(collectionKey(1) != collectionKey(11))
+    }
+
+    @Test fun subtitleCountsEachKind() {
+        assertEquals("12 albums · 3 people · 5 places", collectionsSubtitle(12, 3, 5))
+        assertEquals("1 album · 1 person · 1 place", collectionsSubtitle(1, 1, 1))
+        assertEquals("0 albums · 0 people · 0 places", collectionsSubtitle(0, 0, 0))
+    }
+
+    private fun entry(id: Long, name: String, count: Int, recent: Long, camera: Boolean = false, key: String = "pictures/$name/") =
+        AlbumEntry(id, key, name, count, recent, camera)
+
+    private val camera = entry(1, "Camera", 900, recent = 50, camera = true)
+    private val goa = entry(2, "Goa", 40, recent = 300, key = collectionKey(7)) // a collection, edited most recently
+    private val whatsApp = entry(3, "WhatsApp Images", 2_000, recent = 200)
+    private val bills = entry(4, "Bills", 12, recent = 100, key = collectionKey(8))
+    private val all = listOf(bills, whatsApp, goa, camera)
+
+    private fun names(list: List<AlbumEntry>) = list.map { it.name }
+
+    @Test fun defaultPutsCameraFirstThenMostRecentlyChangedOfEitherKind() {
+        assertEquals(listOf("Camera", "Goa", "WhatsApp Images", "Bills"), names(albumEntries(all, AlbumSort.Default, emptySet())))
+    }
+
+    @Test fun pinnedFoldersAndCollectionsComeFirstInTheChosenSort() {
+        val pinned = setOf(collectionKey(8), "pictures/WhatsApp Images/")
+        assertEquals(listOf("Bills", "WhatsApp Images", "Camera", "Goa"), names(albumEntries(all, AlbumSort.Name, pinned)))
+        assertEquals(listOf("WhatsApp Images", "Bills", "Camera", "Goa"), names(albumEntries(all, AlbumSort.Count, pinned)))
+    }
+
+    @Test fun otherSortsMixBothKinds() {
+        assertEquals(listOf("Bills", "Camera", "Goa", "WhatsApp Images"), names(albumEntries(all, AlbumSort.Name, emptySet())))
+        assertEquals(listOf("WhatsApp Images", "Camera", "Goa", "Bills"), names(albumEntries(all, AlbumSort.Count, emptySet())))
+        assertEquals(listOf("Goa", "WhatsApp Images", "Bills", "Camera"), names(albumEntries(all, AlbumSort.Updated, emptySet())))
+    }
 }

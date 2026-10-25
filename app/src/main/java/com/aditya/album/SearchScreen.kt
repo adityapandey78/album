@@ -3,47 +3,38 @@ package com.aditya.album
 import android.content.Context
 import android.content.SharedPreferences
 import android.os.SystemClock
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.ArrowBack
-import androidx.compose.material.icons.outlined.Category
-import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material.icons.outlined.Event
-import androidx.compose.material.icons.outlined.History
-import androidx.compose.material.icons.outlined.PermMedia
-import androidx.compose.material.icons.outlined.Person
-import androidx.compose.material.icons.outlined.PhotoAlbum
-import androidx.compose.material.icons.outlined.Place
-import androidx.compose.material.icons.outlined.SearchOff
-import androidx.compose.material.icons.outlined.TextFields
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.SuggestionChip
-import androidx.compose.material3.SuggestionChipDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TextField
-import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableIntState
@@ -59,18 +50,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.edit
 import kotlinx.coroutines.Dispatchers
@@ -219,60 +210,24 @@ private class Library(private val photos: List<Media>, private val collections: 
     }
 }
 
-/** The top bar while searching: Back and the query field, focused when search opens. */
-@Composable
-fun SearchBar(search: SearchState, onBack: () -> Unit) {
-    val focus = remember { FocusRequester() }
-    val focusManager = LocalFocusManager.current
-    // Only a fresh search brings the keyboard up, not coming back to one after selecting or rotating
-    LaunchedEffect(Unit) { if (search.query.text.isEmpty()) focus.requestFocus() }
-    Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back") }
-        val clear = Color.Transparent
-        TextField(
-            value = search.query,
-            onValueChange = { search.query = it },
-            modifier = Modifier.weight(1f).focusRequester(focus),
-            placeholder = { Text("Search your photos") },
-            trailingIcon = if (search.query.text.isEmpty()) null else {
-                {
-                    IconButton(onClick = {
-                        search.query = TextFieldValue()
-                        focus.requestFocus()
-                    }) { Icon(Icons.Outlined.Close, "Clear") }
-                }
-            },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            keyboardActions = KeyboardActions(onSearch = {
-                search.keep()
-                focusManager.clearFocus() // hides the keyboard so the results show
-            }),
-            colors = TextFieldDefaults.colors(
-                focusedContainerColor = clear,
-                unfocusedContainerColor = clear,
-                focusedIndicatorColor = clear,
-                unfocusedIndicatorColor = clear,
-            ),
-        )
-    }
-}
-
 /**
- * Below the search bar: suggestions while the query is empty, then what it was read as and the photos it found.
+ * Search, over the tabs. The field sits at the bottom, where the search disc was, so the thumb never travels to the top;
+ * suggestions, then what the query was read as and the photos it found, fill the screen above it.
  * [columns], [grid] and the selection belong to AlbumShell, like every grid's, so they survive the viewer.
  */
 @Composable
-fun SearchContent(
+fun SearchPage(
     search: SearchState,
     columns: MutableIntState,
     grid: LazyGridState,
     selected: Set<Long>,
     onOpen: (Media) -> Unit,
     onSelect: (Set<Long>) -> Unit,
-    padding: PaddingValues,
+    selecting: Boolean,
+    onBack: () -> Unit,
     gridModifier: Modifier,
 ) {
+    val c = AlbumTheme.colors
     val focusManager = LocalFocusManager.current
     val progress by SmartIndex.progress.collectAsState()
     val note = indexingNote(progress)
@@ -281,137 +236,178 @@ fun SearchContent(
     LaunchedEffect(text) { grid.requestScrollToItem(0) } // a new query starts at the top; back from the viewer keeps the place
     // Scrolling the results means reading them: the keyboard goes
     LaunchedEffect(grid) { snapshotFlow { grid.isScrollInProgress }.collect { if (it) focusManager.clearFocus() } }
-    Column(Modifier.fillMaxSize().padding(top = padding.calculateTopPadding())) {
+    val top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 57.dp // the one-row title bar and its hairline
+    // Content clears the field, and the keyboard when it is up
+    val bottom = WindowInsets.ime.union(WindowInsets.navigationBars).asPaddingValues().calculateBottomPadding() + FIELD_HEIGHT + Space.s4 + Space.s8
+    val padding = PaddingValues(top = top, bottom = bottom)
+    Box(Modifier.fillMaxSize().background(c.canvas)) {
         when {
-            text.isBlank() -> Suggestions(search, note) {
+            text.isBlank() -> Suggestions(search, note, padding) {
                 search.search(it)
                 focusManager.clearFocus()
             }
             result == null -> {} // the first search takes a moment
-            result.items.isEmpty() -> NoResults(result, note)
-            else -> {
-                MatchLine(result, note)
-                MediaGrid(
-                    result.items,
-                    columns,
-                    grid,
-                    selected,
-                    onOpen = {
-                        focusManager.clearFocus()
-                        search.keep()
-                        onOpen(it)
-                    },
-                    onSelect,
-                    PaddingValues(bottom = padding.calculateBottomPadding()),
-                    gridModifier,
-                )
+            result.items.isEmpty() -> NoResults(result, note, padding)
+            else -> MediaGrid(
+                result.items,
+                columns,
+                grid,
+                selected,
+                onOpen = {
+                    focusManager.clearFocus()
+                    search.keep()
+                    onOpen(it)
+                },
+                onSelect,
+                padding,
+                gridModifier,
+                header = { MatchLine(result, note) },
+            )
+        }
+        Column(Modifier.fillMaxWidth().background(c.canvas).statusBarsPadding()) {
+            CollapsedTopBar(
+                if (text.isBlank()) "Search" else "\u201c${text.trim()}\u201d",
+                subtitle = if (text.isBlank()) "Runs on this phone" else result?.let { "${countOf(it.items.size, "photo")} · on-device" },
+                onBack = onBack,
+            )
+        }
+        if (!selecting) {
+            SearchField(
+                search,
+                Modifier.align(Alignment.BottomCenter).navigationBarsPadding().imePadding().padding(start = Space.s4, end = Space.s4, bottom = Space.s4),
+            ) {
+                search.keep()
+                focusManager.clearFocus() // hides the keyboard so the results show
             }
         }
     }
 }
 
+private val FIELD_HEIGHT = 52.dp
+
+/** The search field: it stretches out of the search disc at the right, at the same height, as search opens. */
 @Composable
-private fun Suggestions(search: SearchState, note: String?, onPick: (String) -> Unit) {
+private fun SearchField(search: SearchState, modifier: Modifier, onSearch: () -> Unit) {
+    val c = AlbumTheme.colors
+    val still = AlbumTheme.spec.still
+    val focus = remember { FocusRequester() }
+    // Only a fresh search brings the keyboard up, not coming back to one after selecting or rotating
+    LaunchedEffect(Unit) { if (search.query.text.isEmpty()) focus.requestFocus() }
+    val grow = remember { Animatable(if (still) 1f else 0f) }
+    LaunchedEffect(Unit) { grow.animateTo(1f, tween(320, easing = CubicBezierEasing(0.2f, 0.9f, 0.25f, 1f))) }
+    Row(
+        modifier.fillMaxWidth().height(FIELD_HEIGHT)
+            .drawWithContent {
+                // the disc's width at the right edge grows to the full width
+                val left = (size.width - Space.bar.toPx()).coerceAtLeast(0f) * (1f - grow.value)
+                // only the left edge moves; the other sides stay open so the shadow isn't cut square
+                clipRect(left = left, top = -size.height, right = size.width * 2, bottom = size.height * 2) { this@drawWithContent.drawContent() }
+            }
+            .floating().background(c.surfaceHigh, CircleShape)
+            .padding(start = Space.s4, end = Space.s2),
+        horizontalArrangement = Arrangement.spacedBy(Space.s3),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Sym.Search, null, tint = c.ink)
+        Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+            if (search.query.text.isEmpty()) {
+                Text("Places, things, people or dates", style = AlbumTheme.type.body, color = c.inkMuted, maxLines = 1)
+            }
+            BasicTextField(
+                value = search.query,
+                onValueChange = { search.query = it },
+                modifier = Modifier.fillMaxWidth().focusRequester(focus).semantics { contentDescription = "Search photos" },
+                textStyle = AlbumTheme.type.body.copy(color = c.ink),
+                singleLine = true,
+                cursorBrush = SolidColor(c.flashInk),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = { onSearch() }),
+            )
+        }
+        if (search.query.text.isNotEmpty()) {
+            AlbumIconButton(Sym.Close, "Clear", {
+                search.query = TextFieldValue()
+                focus.requestFocus()
+            })
+        } else {
+            Badge("On-device", Modifier.padding(end = Space.s2), BadgeTone.Soft, Sym.Shield)
+        }
+    }
+}
+
+@Composable
+private fun Suggestions(search: SearchState, note: String?, padding: PaddingValues, onPick: (String) -> Unit) {
     val places = remember(search.places) { search.places.map { it.place.city }.distinct().take(MAX_SUGGESTIONS) }
     val things = remember(search.things) { search.things.map { it.category }.filter { it != Category.Other }.take(MAX_SUGGESTIONS) }
-    Column(Modifier.fillMaxSize().aboveKeyboard().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(padding)) {
         if (search.recent.isNotEmpty()) {
-            SectionTitle("Recent") { TextButton(onClick = search::clearRecent) { Text("Clear") } }
-            Chips(search.recent, Icons.Outlined.History, onPick)
+            SectionHead("Recent", action = "Clear", onAction = search::clearRecent)
+            Chips(search.recent, Sym.History, onPick)
         }
         if (places.isNotEmpty()) {
-            SectionTitle("Places")
-            Chips(places, Icons.Outlined.Place, onPick)
+            SectionHead("Places")
+            Chips(places, Sym.LocationOn, onPick)
         }
         if (things.isNotEmpty()) {
-            SectionTitle("Things")
-            Chips(things.map { it.title }, Icons.Outlined.Category, onPick)
+            SectionHead("Things")
+            Chips(things.map { it.title }, Sym.Category, onPick)
         }
         Text(
             listOfNotNull(TIP, note).joinToString("\n\n"),
-            Modifier.padding(vertical = 16.dp),
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.bodyMedium,
+            Modifier.padding(horizontal = Space.s4, vertical = Space.s6),
+            color = AlbumTheme.colors.inkMuted,
+            style = AlbumTheme.type.body,
         )
     }
 }
 
 @Composable
-private fun SectionTitle(text: String, action: @Composable () -> Unit = {}) {
-    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(text, Modifier.weight(1f).semantics { heading() }, style = MaterialTheme.typography.titleSmall)
-        action()
-    }
-}
-
-@Composable
-private fun Chips(texts: List<String>, icon: ImageVector, onPick: (String) -> Unit) {
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        texts.forEach { text ->
-            SuggestionChip(
-                onClick = { onPick(text) },
-                label = { Text(text) },
-                icon = { Icon(icon, null, Modifier.size(SuggestionChipDefaults.IconSize)) },
-            )
-        }
+private fun Chips(texts: List<String>, icon: Sym, onPick: (String) -> Unit) {
+    FlowRow(
+        Modifier.padding(horizontal = Space.s4),
+        horizontalArrangement = Arrangement.spacedBy(Space.s2),
+        verticalArrangement = Arrangement.spacedBy(Space.s2),
+    ) {
+        texts.forEach { text -> Chip(text, { onPick(text) }, icon = icon, toggle = false) }
     }
 }
 
 /** "[Goa] [Food] [2024]   42 results": what the query was read as, so a surprising result explains itself. */
 @Composable
 private fun MatchLine(result: SearchResult, note: String?) {
-    val colors = MaterialTheme.colorScheme
-    Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 8.dp)) {
+    val c = AlbumTheme.colors
+    Column(Modifier.padding(start = Space.s4, end = Space.s4, top = Space.s2, bottom = Space.s3)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), Arrangement.spacedBy(6.dp)) {
+            Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), Arrangement.spacedBy(Space.s2)) {
                 result.terms.forEach { term ->
                     Row(
-                        Modifier.background(colors.secondaryContainer, CircleShape).padding(start = 8.dp, end = 12.dp, top = 6.dp, bottom = 6.dp)
+                        Modifier.background(c.flashSoft, CircleShape).padding(start = Space.s2, end = Space.s3, top = 6.dp, bottom = 6.dp)
                             .semantics(mergeDescendants = true) {}, // read as "Place, Goa"
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Icon(term.kind.icon, term.kind.name, Modifier.size(16.dp), tint = colors.onSecondaryContainer)
-                        Text(term.label, color = colors.onSecondaryContainer, style = MaterialTheme.typography.labelLarge)
+                        Icon(term.kind.sym, term.kind.name, size = 16.dp, tint = c.flashInk)
+                        Text(term.label, color = c.ink, style = AlbumTheme.type.label)
                     }
                 }
             }
-            Text(
-                if (result.items.size == 1) "1 result" else "%,d results".format(result.items.size),
-                Modifier.padding(start = 12.dp),
-                color = colors.onSurfaceVariant,
-                style = MaterialTheme.typography.labelLarge,
-            )
+            Text(countOf(result.items.size, "result"), Modifier.padding(start = Space.s3), color = c.inkMuted, style = AlbumTheme.type.meta)
         }
-        note?.let { Text(it, Modifier.padding(top = 6.dp), color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodySmall) }
+        note?.let { Text(it, Modifier.padding(top = 6.dp), color = c.inkMuted, style = AlbumTheme.type.caption) }
     }
 }
 
 @Composable
-private fun NoResults(result: SearchResult, note: String?) {
+private fun NoResults(result: SearchResult, note: String?, padding: PaddingValues) {
     val title = when {
         result.unmatched.isNotEmpty() -> "Nothing found for ${namesOf(result.unmatched.map { it.label })}"
         result.terms.size > 1 -> "Nothing matches ${namesOf(result.terms.map { it.label })} together"
         else -> "Nothing found"
     }
-    Column(
-        Modifier.fillMaxSize().aboveKeyboard().padding(32.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Icon(Icons.Outlined.SearchOff, null, Modifier.size(48.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(title, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
-        Text(
-            listOfNotNull(TIP, note).joinToString("\n\n"),
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.bodyMedium,
-            textAlign = TextAlign.Center,
-        )
+    Column(Modifier.fillMaxSize().padding(padding), verticalArrangement = Arrangement.Center) {
+        EmptyState(Sym.SearchOff, title, listOfNotNull(TIP, note).joinToString("\n\n"))
     }
 }
-
-// The navigation bar's padding is used up first, so with the keyboard up only the rest of its height is added
-private fun Modifier.aboveKeyboard() = navigationBarsPadding().imePadding()
 
 /** "Goa", "Goa and Food", "Goa, Food and 2024". */
 fun namesOf(names: List<String>): String = if (names.size < 2) names.joinToString() else names.dropLast(1).joinToString(", ") + " and " + names.last()
@@ -420,13 +416,13 @@ fun namesOf(names: List<String>): String = if (names.size < 2) names.joinToStrin
 private fun indexingNote(p: IndexProgress) =
     if (p.done >= p.total) null else "Album is still going through your photos (%,d of %,d), so some can't be found yet.".format(p.done, p.total)
 
-private val MatchKind.icon
+private val MatchKind.sym
     get() = when (this) {
-        MatchKind.Thing -> Icons.Outlined.Category
-        MatchKind.Place -> Icons.Outlined.Place
-        MatchKind.Date -> Icons.Outlined.Event
-        MatchKind.Album -> Icons.Outlined.PhotoAlbum
-        MatchKind.Type -> Icons.Outlined.PermMedia
-        MatchKind.Text -> Icons.Outlined.TextFields
-        MatchKind.Person -> Icons.Outlined.Person
+        MatchKind.Thing -> Sym.Category
+        MatchKind.Place -> Sym.LocationOn
+        MatchKind.Date -> Sym.Event
+        MatchKind.Album -> Sym.PhotoAlbum
+        MatchKind.Type -> Sym.Image
+        MatchKind.Text -> Sym.TextFields
+        MatchKind.Person -> Sym.Person
     }
