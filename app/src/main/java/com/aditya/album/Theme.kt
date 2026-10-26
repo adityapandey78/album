@@ -49,6 +49,11 @@ enum class GalleryStyle(val label: String, val blurb: String) {
     Grid("Grid", "Squares"), Justified("Justified", "True shapes"), Mosaic("Mosaic", "Best shot big"),
 }
 
+/** The typeface for titles and text, Settings > Appearance > Font. Numbers the camera made stay in Geist Mono. */
+enum class AppFont(val label: String, val blurb: String) {
+    Album("Album", "Default"), System("System", "Phone"), Inter("Inter", "Clean"), Nunito("Nunito", "Rounded"), Lora("Lora", "Serif"),
+}
+
 /** How tab content changes when you switch tabs in the bottom bar. */
 enum class TabMotion(val label: String) {
     Depth("Depth"), Blur("Blur"), Instant("Instant"), Reveal("Reveal from the tab"), Pager("Swipe pager"), Slide("Slide"),
@@ -61,6 +66,7 @@ data class Appearance(
     val look: Look = Look.Air,
     val gallery: GalleryStyle = GalleryStyle.Grid,
     val tabMotion: TabMotion = TabMotion.Depth,
+    val font: AppFont = AppFont.Album,
     /** Remove animations: null follows the phone's setting, true or false is the in-app override. */
     val still: Boolean? = null,
     val haptics: Boolean = true,
@@ -87,6 +93,7 @@ object AppearancePrefs {
             look = read("look", Look.entries.toTypedArray(), if (old == "Clean") Look.Edge else if (old == "Bold") Look.Soft else Look.Air),
             gallery = read("gallery", GalleryStyle.entries.toTypedArray(), GalleryStyle.Grid),
             tabMotion = read("tab_motion", TabMotion.entries.toTypedArray(), TabMotion.Depth),
+            font = read("font", AppFont.entries.toTypedArray(), AppFont.Album),
             still = if (prefs.contains("still")) prefs.getBoolean("still", false) else null,
             haptics = prefs.getBoolean("haptics", true),
             hidePrivate = prefs.getBoolean("hide_private", false),
@@ -102,11 +109,12 @@ object AppearancePrefs {
             putString("look", a.look.name)
             putString("gallery", a.gallery.name)
             putString("tab_motion", a.tabMotion.name)
+            putString("font", a.font.name)
             putBoolean("haptics", a.haptics)
             putBoolean("hide_private", a.hidePrivate)
             if (a.still == null) remove("still") else putBoolean("still", a.still)
         }
-        CrashLog.note("appearance ${a.theme} ${a.accent} ${a.look} ${a.gallery} ${a.tabMotion} still=${a.still}")
+        CrashLog.note("appearance ${a.theme} ${a.accent} ${a.look} ${a.gallery} ${a.tabMotion} ${a.font} still=${a.still}")
     }
 }
 
@@ -192,7 +200,8 @@ fun albumColors(mode: ThemeMode, accent: Accent, dynamic: ColorScheme? = null): 
     return c.copy(flash = flash, onFlash = on, flashInk = ink, flashSoft = soft)
 }
 
-// Variable fonts bundled in res/font so they work offline: Bricolage Grotesque (display), Figtree (sans), Geist Mono (mono).
+// Variable fonts bundled in res/font so they work offline: Bricolage Grotesque (display), Figtree (sans), Geist Mono (mono),
+// and the Font choices Inter, Nunito and Lora (tools/fonts.py).
 private fun variable(res: Int, vararg weights: Int, opsz: Float? = null) = FontFamily(
     weights.map { w ->
         val axes = listOfNotNull(FontVariation.weight(w), opsz?.let { FontVariation.Setting("opsz", it) })
@@ -206,31 +215,49 @@ private val bricolage34 = variable(R.font.bricolage_grotesque, 700, opsz = 34f)
 private val bricolage24 = variable(R.font.bricolage_grotesque, 600, opsz = 24f)
 val Figtree = variable(R.font.figtree, 400, 500, 600, 700)
 val GeistMono = variable(R.font.geist_mono, 500)
+private val inter = variable(R.font.inter, 400, 500, 600, 700)
+private val interDisplay = variable(R.font.inter, 600, 700, opsz = 32f) // Inter's display cut, for titles
+private val nunito = variable(R.font.nunito, 400, 500, 600, 700)
+private val lora = variable(R.font.lora, 400, 500, 600, 700)
 
-/** The text styles of the design system. Sizes are sp, so they follow the phone's font size. */
+/**
+ * The text styles of the design system. Sizes are sp, so they follow the phone's font size. [font] is the person's choice:
+ * Album pairs Bricolage titles with Figtree text (Edge sets those titles in Figtree too); the others use one family.
+ */
 @Immutable
-class AlbumType(edge: Boolean) {
+class AlbumType(private val edge: Boolean, private val font: AppFont = AppFont.Album) {
+    private val text = when (font) {
+        AppFont.Album -> Figtree
+        AppFont.System -> FontFamily.Default
+        AppFont.Inter -> inter
+        AppFont.Nunito -> nunito
+        AppFont.Lora -> lora
+    }
+    private fun titles(album: FontFamily) = when {
+        font == AppFont.Album -> if (edge) Figtree else album
+        font == AppFont.Inter -> interDisplay
+        else -> text
+    }
+
     /** One big moment per screen: memories, recaps. */
-    val display = TextStyle(fontFamily = if (edge) Figtree else bricolage52, fontSize = 52.sp, lineHeight = 50.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.02).em)
+    val display = TextStyle(fontFamily = titles(bricolage52), fontSize = 52.sp, lineHeight = 50.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.02).em)
     /** Expanded screen titles. */
-    val titleXl = TextStyle(fontFamily = if (edge) Figtree else bricolage34, fontSize = 34.sp, lineHeight = 36.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.01).em)
+    val titleXl = TextStyle(fontFamily = titles(bricolage34), fontSize = 34.sp, lineHeight = 36.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.01).em)
     /** Album, person and sheet titles. */
-    val titleLg = TextStyle(fontFamily = if (edge) Figtree else bricolage24, fontSize = 24.sp, lineHeight = 28.sp, fontWeight = FontWeight.SemiBold)
+    val titleLg = TextStyle(fontFamily = titles(bricolage24), fontSize = 24.sp, lineHeight = 28.sp, fontWeight = FontWeight.SemiBold)
     /** Date headers, collapsed titles, card titles. */
-    val titleMd = TextStyle(fontFamily = Figtree, fontSize = 17.sp, lineHeight = 22.sp, fontWeight = FontWeight.SemiBold)
-    val body = TextStyle(fontFamily = Figtree, fontSize = 15.sp, lineHeight = 22.sp, fontWeight = FontWeight.Normal)
+    val titleMd = TextStyle(fontFamily = text, fontSize = 17.sp, lineHeight = 22.sp, fontWeight = FontWeight.SemiBold)
+    val body = TextStyle(fontFamily = text, fontSize = 15.sp, lineHeight = 22.sp, fontWeight = FontWeight.Normal)
     /** Buttons, chips, album names. */
-    val label = TextStyle(fontFamily = Figtree, fontSize = 14.sp, lineHeight = 18.sp, fontWeight = FontWeight.SemiBold)
+    val label = TextStyle(fontFamily = text, fontSize = 14.sp, lineHeight = 18.sp, fontWeight = FontWeight.SemiBold)
     /** Places under a date, helper lines. */
-    val caption = TextStyle(fontFamily = Figtree, fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium)
+    val caption = TextStyle(fontFamily = text, fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium)
     /** Numbers the camera made: durations, counts, sizes, dates in the scrubber. Tabular figures. */
     val meta = TextStyle(fontFamily = GeistMono, fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium, fontFeatureSettings = "tnum")
     /** The EXIF line in the details sheet. */
     val metaLg = TextStyle(fontFamily = GeistMono, fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium, fontFeatureSettings = "tnum")
 }
 
-private val airType = AlbumType(edge = false)
-private val edgeType = AlbumType(edge = true) // Edge sets titles in the sans
 
 /** Spacing, radii and sizes from the design system. Gutter and tile corner depend on the Look; see [AlbumSpec]. */
 object Space {
@@ -305,7 +332,7 @@ fun AlbumTheme(a: Appearance, content: @Composable () -> Unit) {
     val still = a.still ?: remember { phoneAnimationsOff(context) }
     val spec = AlbumSpec(
         colors = colors,
-        type = if (a.look == Look.Edge) edgeType else airType,
+        type = remember(a.look, a.font) { AlbumType(edge = a.look == Look.Edge, a.font) },
         appearance = a,
         gutter = when (a.look) { Look.Edge -> 1.dp; Look.Soft -> 6.dp; Look.Air -> 2.dp },
         tileCorner = when (a.look) { Look.Edge -> 0.dp; Look.Soft -> 12.dp; Look.Air -> 4.dp },

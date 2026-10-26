@@ -18,6 +18,7 @@ import androidx.work.WorkerParameters
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.asCoroutineDispatcher
@@ -26,8 +27,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -59,7 +64,10 @@ fun personAlbumId(cluster: Long) = PEOPLE_IDS + cluster
 /** The cluster behind an album id, or null for any other album. */
 fun clusterOfAlbum(albumId: Long): Long? = if (albumId > PEOPLE_IDS && albumId < PEOPLE_IDS * 2) albumId - PEOPLE_IDS else null
 
-/** A person or automatic group, with its photos still on the phone (newest first) and its cover face ([coverPinned] if the user chose it). */
+/**
+ * A person or automatic group, with its photos still on the phone (newest first) and its cover face ([coverPinned] if the
+ * user chose it). [locked]: hidden behind the privacy PIN, shown only in Hidden items.
+ */
 data class PersonAlbum(
     val cluster: Long,
     val name: String?,
@@ -68,6 +76,7 @@ data class PersonAlbum(
     val items: List<Media>,
     val faces: Int,
     val coverPinned: Boolean = false,
+    val locked: Boolean = false,
 ) {
     val albumId get() = personAlbumId(cluster)
 }
@@ -107,12 +116,21 @@ fun coverOf(faces: List<FaceTile>, pinned: FaceSpot?, isCamera: (mediaId: Long) 
 /** Whether a group appears in People: named people always, other groups once they have [MIN_FACES] faces. */
 fun isShown(name: String?, faces: Int) = name != null || faces >= MIN_FACES
 
-/** For search: each named person who isn't hidden, to the photos they're in. */
+/** For search: each named person who isn't hidden or locked, to the photos they're in. */
 fun namedMedia(names: List<PersonName>, tiles: List<FaceTile>): Map<String, Set<Long>> {
     val byCluster = tiles.groupBy({ it.cluster }, { it.mediaId })
     val out = HashMap<String, MutableSet<Long>>()
-    for (p in names) if (p.name != null && !p.hidden) byCluster[p.id]?.let { out.getOrPut(p.name) { HashSet() } += it }
+    for (p in names) if (p.name != null && !p.hidden && !p.locked) byCluster[p.id]?.let { out.getOrPut(p.name) { HashSet() } += it }
     return out
+}
+
+/** People locked behind the privacy PIN ([ids]) and every photo they're in ([photos]). */
+class LockedPeople(val ids: Set<Long>, val photos: Set<Long>)
+
+/** [ids]' photos: the faces the face index groups with them, and the faces confirmed for them ([confirmed], photo ids). */
+fun lockedPeople(ids: Collection<Long>, tiles: List<FaceTile>, confirmed: Collection<Long>): LockedPeople {
+    val locked = ids.toHashSet()
+    return LockedPeople(locked, tiles.filter { it.cluster in locked }.mapTo(HashSet(confirmed)) { it.mediaId })
 }
 
 /**
@@ -159,8 +177,8 @@ fun decodeSuggestions(text: String?): List<Suggestion> = text.orEmpty().split(';
 }
 
 /**
- * "Same person?" pairs worth asking: both shown and not hidden, not both named (two names mean two people), not answered
- * Not sure ([skipped], group pairs from [answeredPairs]). Most alike first.
+ * "Same person?" pairs worth asking: both shown and not hidden or locked, not both named (two names mean two people), not
+ * answered Not sure ([skipped], group pairs from [answeredPairs]). Most alike first.
  */
 fun reviewPairs(suggestions: List<Suggestion>, albums: List<PersonAlbum>, skipped: Set<Pair<Long, Long>>): List<PeoplePair> {
     val byCluster = albums.associateBy { it.cluster }
@@ -169,7 +187,7 @@ fun reviewPairs(suggestions: List<Suggestion>, albums: List<PersonAlbum>, skippe
         val b = byCluster[s.b] ?: return@mapNotNull null
         when {
             s.a to s.b in skipped -> null
-            a.hidden || b.hidden || !isShown(a.name, a.faces) || !isShown(b.name, b.faces) -> null
+            a.hidden || b.hidden || a.locked || b.locked || !isShown(a.name, a.faces) || !isShown(b.name, b.faces) -> null
             a.name != null && b.name != null -> null
             a.faces >= b.faces -> PeoplePair(a, b)
             else -> PeoplePair(b, a)
@@ -241,22 +259,46 @@ object People {
     }
 
     /**
-     * Every person and automatic group with a photo still on the phone, hidden ones included (see [isShown]). Grouped
-     * off the main thread, and only while someone is watching: the Photos tab never pays for it.
+     * Every person and automatic group with a photo still on the phone, hidden and locked ones included (see [isShown]).
+     * Grouped off the main thread, and only while someone is watching: the Photos tab never pays for it.
      */
     val albums: StateFlow<List<PersonAlbum>> by lazy {
-        combine(faces.tiles(), people.names(), Gallery.media.filterNotNull(), AlbumPrefs.hidden) { tiles, names, media, hidden ->
+        combine(faces.tiles(), people.names(), Gallery.media.filterNotNull(), AlbumPrefs.hidden, Hidden.state.filterNotNull()) { tiles, names, media, hidden, h ->
             val byId = names.associateBy { it.id }
             val pinned = names.mapNotNull { p -> p.coverMediaId?.let { id -> p.cover?.let { p.id to FaceSpot(id, it) } } }.toMap()
             // Folders hidden from Photos stay out of People too, as they do from Explore and search
-            clusterMembers(tiles, media.inPhotos(hidden), { it.id }, ::isCamera, pinned).map { (cluster, m) ->
+            val photos = media.inPhotos(hidden)
+            // Photos hidden behind the PIN leave everyone's page and cover; a locked person keeps all theirs, for Hidden items
+            val shown = clusterMembers(tiles, photos.withoutHidden(h), { it.id }, ::isCamera, pinned) - h.people
+            val locked = if (h.people.isEmpty()) emptyMap() else clusterMembers(tiles.filter { it.cluster in h.people }, photos, { it.id }, ::isCamera, pinned)
+            (shown + locked).map { (cluster, m) ->
                 val person = byId[cluster]
                 val chosen = pinned[cluster]?.let { it.mediaId == m.cover.mediaId && iou(it.box, m.cover.box) >= SAME_BOX } == true
-                PersonAlbum(cluster, person?.name, person?.hidden == true, FaceCrop(m.cover.id, m.cover.mediaId, m.cover.box), m.items, m.faces, chosen)
+                PersonAlbum(
+                    cluster, person?.name, person?.hidden == true, FaceCrop(m.cover.id, m.cover.mediaId, m.cover.box), m.items, m.faces, chosen,
+                    locked = cluster in h.people,
+                )
             }
         }
             .flowOn(Dispatchers.Default)
             .stateIn(scope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    }
+
+    /**
+     * People locked behind the privacy PIN and every photo they're in, the confirmed faces included, so a face index being
+     * rebuilt never brings their photos back meanwhile. Reads the face index only while someone is locked.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class) // flatMapLatest
+    val locked: Flow<LockedPeople> by lazy {
+        people.lockedIds().distinctUntilChanged().flatMapLatest { ids ->
+            if (ids.isEmpty()) flowOf(LockedPeople(emptySet(), emptySet()))
+            else combine(faces.tiles(), people.lockedPhotos()) { tiles, confirmed -> lockedPeople(ids, tiles, confirmed) }
+        }
+            .catch { // Hidden items would otherwise never load, and the Library waits for them
+                CrashLog.note("locked people failed: $it")
+                emit(LockedPeople(emptySet(), emptySet()))
+            }
+            .flowOn(Dispatchers.Default)
     }
 
     private fun isCamera(m: Media) = m.path.startsWith("DCIM/", ignoreCase = true)
@@ -275,8 +317,10 @@ object People {
 
     /** [cluster]'s faces in photos still on the phone, best covers first: the cover picker's grid. Live. */
     fun facesOf(cluster: Long): Flow<List<FaceTile>> =
-        combine(faces.tiles(), Gallery.media.filterNotNull(), AlbumPrefs.hidden) { tiles, media, hidden ->
-            val shown = media.inPhotos(hidden).associateBy { it.id }
+        combine(faces.tiles(), Gallery.media.filterNotNull(), AlbumPrefs.hidden, Hidden.state.filterNotNull()) { tiles, media, hidden, h ->
+            // A photo hidden behind the PIN never becomes someone else's cover
+            val photos = media.inPhotos(hidden).let { if (cluster in h.people) it else it.withoutHidden(h) }
+            val shown = photos.associateBy { it.id }
             tiles.filter { it.cluster == cluster && it.mediaId in shown }
                 .sortedWith(compareByDescending<FaceTile> { coverScore(it, isCamera(shown.getValue(it.mediaId))) }.thenBy { it.id })
         }.flowOn(Dispatchers.Default)
@@ -305,11 +349,14 @@ object People {
 
     /**
      * Names [cluster], making it a person if it was an automatic group. A name another person already has (ignoring case)
-     * merges the two instead. Returns the person's cluster id, which is new for an automatic group: open that page.
+     * merges the two instead, but only on the same side of Hidden items: naming someone after a hidden person never moves
+     * them in there, or brings the hidden one out. Returns the person's cluster id, which is new for an automatic group:
+     * open that page.
      */
     suspend fun name(cluster: Long, name: String): Long = edit {
         val trimmed = name.trim()
-        val same = people.people().find { it.id != cluster && it.name.equals(trimmed, ignoreCase = true) }
+        val locked = people.person(live(cluster))?.locked == true
+        val same = people.people().find { it.id != cluster && it.locked == locked && it.name.equals(trimmed, ignoreCase = true) }
         if (same != null) moveInto(cluster, same.id) else personOf(cluster).also { people.rename(it, trimmed) }
     }
 
@@ -320,6 +367,25 @@ object People {
     suspend fun setHidden(cluster: Long, hidden: Boolean): Long = edit {
         personOf(cluster).also { people.setHidden(it, hidden) }
     }
+
+    /**
+     * Locks [cluster] behind the privacy PIN, or unlocks it. Locking confirms the faces the face index grouped with them,
+     * so their photos stay hidden while a newer face model rescans the phone. Returns its cluster id (new if it was an
+     * automatic group). No face moves, so unlike the other edits it doesn't re-cluster: hiding several people stays quick.
+     */
+    suspend fun setLocked(cluster: Long, locked: Boolean): Long = scope.async {
+        clustering.withLock {
+            val id = personOf(cluster)
+            if (locked) {
+                val confirmed = people.facesOfPerson(id)
+                val fresh = faces.spots(id).filter { s -> confirmed.none { it.mediaId == s.mediaId && iou(it.box, s.box) >= SAME_BOX } }
+                people.lock(id, fresh.map { PersonFace(personId = id, mediaId = it.mediaId, box = it.box) })
+            } else {
+                people.setLocked(id, false)
+            }
+            id
+        }
+    }.await()
 
     /** Pins [face] as [cluster]'s cover photo, or with null lets Album pick again. Returns its cluster id (new if it was an automatic group). */
     suspend fun setCover(cluster: Long, face: FaceTile?): Long = edit {
@@ -392,6 +458,7 @@ object People {
             val t = people.person(target)
             if (t?.name == null && person.name != null) people.rename(target, person.name)
             if (t?.hidden == true && !person.hidden) people.setHidden(target, false) // stays hidden only if both were
+            if (person.locked && t?.locked != true) people.setLocked(target, true) // locked if either was: never shown by accident
             val cover = person.cover
             if (t?.coverMediaId == null && person.coverMediaId != null && cover != null) {
                 people.setCover(target, person.coverMediaId, cover.left, cover.top, cover.right, cover.bottom)

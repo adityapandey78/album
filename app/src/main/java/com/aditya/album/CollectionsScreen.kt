@@ -62,6 +62,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.Role
@@ -125,9 +126,9 @@ fun collectionsSubtitle(albums: Int, people: Int, places: Int) =
 
 /**
  * The Collections tab: the top albums (folders and collections together), utilities, people, places and things, with
- * Recently deleted and the Private safe last. Every card opens through [onOpen] with an album id; [onAllAlbums] opens
- * the rest when there are more than fit. [contentPadding] already clears the status bar and the floating bottom bar.
- * Long-pressing a folder's card offers [onAction]; a collection's card handles its own.
+ * Recently deleted, Private safe and Hidden items last. Every card opens through [onOpen] with an album id; [onAllAlbums]
+ * opens the rest when there are more than fit. [contentPadding] already clears the status bar and the floating bottom
+ * bar. Long-pressing a folder's card offers [onAction] (and Hide album, handled here); a collection's card handles its own.
  */
 @Composable
 fun CollectionsScreen(
@@ -142,11 +143,13 @@ fun CollectionsScreen(
     onAllPeople: () -> Unit,
     onReviewPeople: () -> Unit,
     onOpenSafe: () -> Unit,
+    onOpenHidden: () -> Unit,
     onAction: (Album, AlbumAction) -> Unit,
     onNewAlbum: () -> Unit,
     onSettings: () -> Unit,
 ) {
     val spec = AlbumTheme.spec
+    val onHide = rememberHideAlbum()
     val places = Explore.places.collectAsState().value
     val things = Explore.things.collectAsState().value
     val everyone by People.albums.collectAsState()
@@ -160,7 +163,7 @@ fun CollectionsScreen(
     val shown = remember(entries) { albumsInSection(entries) }
     val people = remember(everyone) { shownPeople(everyone) }
     val reviews by remember { People.review }.collectAsState(emptyList())
-    val anyHidden = remember(everyone) { everyone.any { it.hidden } }
+    val anyHidden = remember(everyone) { everyone.any { it.hidden && !it.locked } }
     val names = remember(places) { placeNames(places.orEmpty().map { it.key }) }
     // Utilities open the same albums as the cards above, so like them they include folders hidden from the Library
     val utilities = remember(albums, specialCounts) {
@@ -281,12 +284,25 @@ fun CollectionsScreen(
                     CrashLog.note("open safe")
                     onOpenSafe()
                 }
+                // Like the safe, never a count or a cover from outside: whether anything is hidden stays private too
+                UtilityTile(Sym.VisibilityOff, "Hidden items", "Locked", "Hidden items, locked", quiet = true) {
+                    CrashLog.note("open hidden items")
+                    onOpenHidden()
+                }
             }
         }
     }
 
-    menu?.let { AlbumEntrySheet(it, collections, pinned, hidden, onAction) { menu = null } }
+    menu?.let { AlbumEntrySheet(it, collections, pinned, hidden, onAction, onHide) { menu = null } }
     if (sorting) AlbumSortSheet { sorting = false }
+}
+
+/** Returns what Hide album does: after the privacy PIN (or at once while unlocked), the folder goes to Hidden items. */
+@Composable
+private fun rememberHideAlbum(): (Album) -> Unit {
+    val context = LocalContext.current
+    val privacy = rememberPrivacyAsk()
+    return { album -> privacy.run("Hide ${album.name}") { Hidden.hide(context, emptyList(), listOf(album)) } }
 }
 
 /**
@@ -312,6 +328,7 @@ fun AllAlbumsScreen(
     }
     var menu by remember { mutableStateOf<AlbumEntry?>(null) }
     var sorting by rememberSaveable { mutableStateOf(false) }
+    val onHide = rememberHideAlbum()
 
     PushedGridPage("Albums", counted(entries.size, "album", "albums"), state, onBack, actions = {
         AlbumIconButton(Sym.Add, "New album", onNewAlbum)
@@ -321,7 +338,7 @@ fun AllAlbumsScreen(
         albumCards(entries, pinned, hidden, onOpen) { menu = it }
     }
 
-    menu?.let { AlbumEntrySheet(it, collections, pinned, hidden, onAction) { menu = null } }
+    menu?.let { AlbumEntrySheet(it, collections, pinned, hidden, onAction, onHide) { menu = null } }
     if (sorting) AlbumSortSheet { sorting = false }
 }
 
@@ -365,15 +382,24 @@ private fun AlbumEntrySheet(
     pinned: Set<String>,
     hidden: Set<String>,
     onAction: (Album, AlbumAction) -> Unit,
+    onHide: (Album) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    entry.folder?.let { AlbumSheet(it, it.key in pinned, it.key in hidden, onDismiss) { action -> onDismiss(); onAction(it, action) } }
+    entry.folder?.let {
+        AlbumSheet(it, it.key in pinned, it.key in hidden, onDismiss, onHide = {
+            onDismiss()
+            onHide(it)
+        }) { action -> onDismiss(); onAction(it, action) }
+    }
     entry.collection?.let { CollectionSheet(it, collections, entry.key in pinned, onDismiss) }
 }
 
-/** Long-press sheet of a folder album: pin, rename, hide from the Library, delete. */
+/**
+ * Long-press sheet of a folder album: pin, rename, hide from the Library (a tidier timeline; the album stays here), Hide
+ * album (it and its photos go to Hidden items, behind the privacy PIN), delete.
+ */
 @Composable
-private fun AlbumSheet(album: Album, pinned: Boolean, hidden: Boolean, onDismiss: () -> Unit, onAction: (AlbumAction) -> Unit) {
+private fun AlbumSheet(album: Album, pinned: Boolean, hidden: Boolean, onDismiss: () -> Unit, onHide: () -> Unit, onAction: (AlbumAction) -> Unit) {
     Sheet(onDismiss, album.name) {
         MenuRow(Sym.PushPin, if (pinned) "Unpin" else "Pin", { onAction(AlbumAction.Pin) }, sub = "Pinned albums come first".takeIf { !pinned }, trailing = null)
         MenuRow(Sym.Edit, "Rename", { onAction(AlbumAction.Rename) }, trailing = null)
@@ -384,6 +410,7 @@ private fun AlbumSheet(album: Album, pinned: Boolean, hidden: Boolean, onDismiss
             sub = if (hidden) "Its photos show in the Library again" else "Its photos stay in this album",
             trailing = null,
         )
+        MenuRow(Sym.Lock, "Hide album", onHide, sub = "It and its photos show only in Hidden items", trailing = null)
         MenuRow(Sym.Delete, "Delete", { onAction(AlbumAction.Delete) }, sub = "Moves its ${itemCount(album.count)} to Trash", trailing = null, danger = true)
     }
 }

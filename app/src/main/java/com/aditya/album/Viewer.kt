@@ -1,6 +1,7 @@
 package com.aditya.album
 
 import android.Manifest.permission.ACCESS_MEDIA_LOCATION
+import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -12,14 +13,18 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.MutatePriority
+import androidx.compose.foundation.MutatorMutex
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -34,12 +39,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsIgnoringVisibility
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -55,7 +61,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.MutableFloatState
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
@@ -69,6 +74,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -95,6 +101,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.toSize
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.edit
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -103,6 +110,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
@@ -113,11 +121,18 @@ import coil3.request.ImageRequest
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import me.saket.telephoto.zoomable.DoubleClickToZoomListener
+import me.saket.telephoto.zoomable.ZoomableContentLocation
+import me.saket.telephoto.zoomable.ZoomableState
 import me.saket.telephoto.zoomable.coil3.ZoomableAsyncImage
 import me.saket.telephoto.zoomable.rememberZoomableImageState
+import me.saket.telephoto.zoomable.zoomable
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -143,7 +158,8 @@ internal val progressLine = 3.dp
 /**
  * Full-screen swipeable viewer. [items] is the list it was opened from (all photos, or one album).
  * [external] is a file another app opened: it may not be in MediaStore, so only Share, Edit and Details are offered.
- * A two-finger twist turns a photo; let go past halfway to a quarter turn and it's rotated for real (see [rememberRotate]).
+ * More > Rotate, or a two-finger twist, opens rotate mode: the photo turns on screen and nothing is written until Save
+ * (see [RotateMode]).
  */
 @Composable
 fun Viewer(
@@ -166,6 +182,7 @@ fun Viewer(
     val c = AlbumTheme.colors
     val type = AlbumTheme.type
     val still = AlbumTheme.spec.still
+    val doubleTap = remember(still) { doubleTapZoom(still) } // photos and videos alike
     val start = remember { items.indexOfFirst { it.id == startId }.coerceAtLeast(0) }
     val pager = rememberPagerState(start) { items.size }
     var chrome by remember { mutableStateOf(true) }
@@ -177,23 +194,18 @@ fun Viewer(
     // The viewer's own messages. Undo after Move to trash is the caller's (onTrash), in the shell's snackbar.
     val snackbar = remember { SnackbarHostState() }
     val say: (String) -> Unit = { message -> scope.launch { snackbar.showSnackbar(message) } }
-    val rotate = rememberRotate(onMessage = say)
+    val rotate = rememberRotate()
     val edit = rememberEdit(onMessage = say)
     val clock = rememberClock()
     val placeOf = if (external) emptyMap() else rememberPlaces()
     // Places guessed from camera photos taken around then (location was off): the header leaves them out, Details says so
     val estimated by remember(external) { if (external) flowOf(emptySet()) else SmartIndex.estimatedIds() }.collectAsState(emptySet())
-    // Rotate keeps quality, so it can always be taken back: Undo turns the photo back the other way
+    // An updated original keeps its quality, so it can always be taken back: Undo turns it back the other way
     val rotated = { m: Media, quarters: Int ->
         scope.launch {
-            val message = when (Math.floorMod(quarters, 4)) {
-                1 -> "Rotated right"
-                3 -> "Rotated left"
-                else -> "Rotated 180°"
-            }
-            if (snackbar.showSnackbar(message, "Undo", duration = SnackbarDuration.Short) == SnackbarResult.ActionPerformed) {
+            if (snackbar.showSnackbar(rotatedMessage(quarters), "Undo", duration = SnackbarDuration.Long) == SnackbarResult.ActionPerformed) {
                 CrashLog.note("rotate undo")
-                rotate(m, -quarters) {}
+                rotate(m, -quarters) { if (it == Turned.Failed) say("Couldn't turn it back") }
             }
         }
     }
@@ -204,8 +216,10 @@ fun Viewer(
     // Motion photo: its video plays in place over the still, from the Live badge or a long-press
     val motion = rememberMotionVideo(current)
     var playMotion by remember(current.id) { mutableStateOf(false) }
-    var motionMuted by remember { mutableStateOf(true) }
-    var videoMuted by remember { mutableStateOf(false) }
+    var motionMuted by remember { mutableStateOf(true) } // a motion photo's own sound: off until turned on while one plays
+    // Videos play with sound unless it was turned off on one: then the next ones stay muted, after a restart too
+    val prefs = remember(context) { context.getSharedPreferences("settings", Context.MODE_PRIVATE) }
+    var videoMuted by remember { mutableStateOf(prefs.getBoolean(VIDEO_MUTED, false)) }
 
     // Opening and closing fly the photo between its grid cell and its full-screen place: 0 = in the cell, 1 = full screen.
     // The square cell crop grows into the whole photo (ContentScale.Crop on a rect that changes shape), so nothing stretches.
@@ -246,41 +260,131 @@ fun Viewer(
         }
     }
 
-    // Two-finger twist: [twisting] while the fingers turn the photo (the pager and swipe-down wait), [turning] while a
-    // released twist settles and Rotate writes it (no new twist meanwhile)
-    var twisting by remember { mutableStateOf(false) }
-    var turning by remember { mutableStateOf(false) }
-    val settleTwist by rememberUpdatedState { m: Media, angle: MutableFloatState ->
-        twisting = false
-        turning = true
-        val quarters = nearestQuarter(angle.floatValue)
-        CrashLog.note("twist ${angle.floatValue.roundToInt()}° to $quarters")
+    // Rotate mode, from More > Rotate or a twist: the photo turns on screen, and nothing is written until Save
+    var rotating by remember { mutableStateOf<RotateMode?>(null) }
+    var askSave by remember { mutableStateOf(false) } // the "Save rotated photo" sheet
+    // Degrees the current photo is turned on screen, clockwise. A fresh one per photo and per edit: a photo rotated for
+    // real reloads upright.
+    val angle = remember(current.id, editVersion(current.uri)) { mutableFloatStateOf(0f) }
+    val tilted by remember(angle) { derivedStateOf { angle.floatValue != 0f } } // paging and swipe-down wait until it's upright
+    val turning = remember { MutatorMutex() } // one turn at a time: a new one takes over from wherever the photo is
+    fun turnTo(degrees: Float, then: () -> Unit = {}) {
         scope.launch {
-            suspend fun springTo(target: Float) {
-                if (still) angle.floatValue = target
-                else animate(angle.floatValue, target, animationSpec = spring(dampingRatio = 0.8f, stiffness = Spring.StiffnessMediumLow)) { value, _ -> angle.floatValue = value }
+            turning.mutate {
+                if (still) angle.floatValue = degrees
+                else animate(angle.floatValue, degrees, animationSpec = spring(dampingRatio = 0.8f, stiffness = Spring.StiffnessMediumLow)) { value, _ -> angle.floatValue = value }
+                then()
             }
-            springTo(quarters * 90f)
-            if (Math.floorMod(quarters, 4) == 0) {
-                angle.floatValue = 0f // a full turn looks the same as none
-                turning = false
-                return@launch
-            }
-            // Held at the quarter turn while Android asks and the file is written; the reloaded photo is then upright
-            rotate(m, quarters) { ok ->
-                turning = false
-                if (ok) {
-                    angle.floatValue = 0f
-                    rotated(m, quarters)
-                } else {
-                    scope.launch { springTo(0f) } // refused or cancelled: Rotate has said why
+        }
+    }
+    fun startRotate(m: Media, quarters: Int) {
+        CrashLog.note("rotate mode")
+        chrome = true // keeps the system bars, so the bar sits just where the dock was
+        playMotion = false
+        rotating = RotateMode(m, quarters).also { mode ->
+            scope.launch { mode.inPlace = withContext(Dispatchers.IO) { turnsInPlace(context.contentResolver, m.uri) } }
+        }
+    }
+    // Back or Discard: the short way round to upright, then 0, so a full turn counts as none
+    fun leaveRotate() {
+        rotating = null
+        askSave = false
+        turnTo(360f * (angle.floatValue / 360f).roundToInt()) { angle.floatValue = 0f }
+    }
+    val latest by rememberUpdatedState(items)
+    // The copy takes the turned photo's place once MediaStore lists it; where it isn't part of what's shown (a collection,
+    // search results) the photo turns back instead. Undo deletes the copy: it was only just made, and the original never changed.
+    fun saveCopy(mode: RotateMode, note: String? = null) {
+        mode.saving = true
+        scope.launch {
+            val m = mode.m
+            val copy = when (val result = saveRotatedCopy(context, m, mode.net)) {
+                is RotatedCopy.Failed -> {
+                    mode.saving = false // still turned: Save can try again, or Discard
+                    say(result.message)
+                    return@launch
                 }
+                is RotatedCopy.Saved -> result
+            }
+            CrashLog.note("rotated copy saved")
+            val id = ContentUris.parseId(copy.uri)
+            val at = withTimeoutOrNull(5_000) { snapshotFlow { latest.indexOfFirst { it.id == id } }.first { it >= 0 } }
+            if (at == null) {
+                leaveRotate()
+            } else {
+                rotating = null
+                pager.scrollToPage(at)
+            }
+            if (snackbar.showSnackbar(copyMessage(copy.album, copy.megapixels, note), "Undo", duration = SnackbarDuration.Long) == SnackbarResult.ActionPerformed) {
+                CrashLog.note("rotated copy undo")
+                // Back to the original first, or the pager would land on whatever comes after the copy
+                if (latest.getOrNull(pager.currentPage)?.id == id) latest.indexOfFirst { it.id == m.id }.takeIf { it >= 0 }?.let { pager.scrollToPage(it) }
+                val removed = withContext(Dispatchers.IO) { runCatching { context.contentResolver.delete(copy.uri, null, null) > 0 }.getOrDefault(false) }
+                if (!removed) say("Couldn't remove the copy")
+            }
+        }
+    }
+    fun saveOriginal(mode: RotateMode) {
+        mode.saving = true
+        val m = mode.m
+        val quarters = mode.net
+        rotate(m, quarters) { result ->
+            when (result) {
+                Turned.Done -> {
+                    rotating = null // the photo reloads upright, with a fresh angle for its new version
+                    rotated(m, quarters)
+                }
+                Turned.Cancelled -> mode.saving = false // Android's pop-up was declined: still turned, so Save can try again
+                Turned.Failed -> saveCopy(mode, "The original couldn't be updated")
+            }
+        }
+    }
+    fun save(mode: RotateMode) {
+        if (mode.saving) return
+        mode.saving = true // until it's known what Save does: no second tap meanwhile
+        scope.launch {
+            val inPlace = mode.inPlace ?: snapshotFlow { mode.inPlace }.filterNotNull().first()
+            RotatePrefs.load(context)
+            val choice = RotatePrefs.choice.value
+            when (saveTarget(choice, inPlace)) {
+                RotateSave.Ask -> {
+                    mode.saving = false
+                    askSave = true
+                }
+                RotateSave.Copy -> saveCopy(mode, "The original can't be updated".takeIf { choice == RotateSave.Original })
+                RotateSave.Original -> saveOriginal(mode)
             }
         }
     }
 
+    // Two-finger twist: the photo follows the fingers ([twisting]: paging and swipe-down wait) and, let go, settles on the
+    // nearest quarter. Past halfway to one it opens rotate mode with that turn, or changes the mode's turn.
+    var twisting by remember { mutableStateOf(false) }
+    var twistFrom by remember { mutableFloatStateOf(0f) } // degrees the photo was turned when this twist began
+    val settleTwist by rememberUpdatedState {
+        twisting = false
+        val quarters = nearestQuarter(angle.floatValue)
+        CrashLog.note("twist ${angle.floatValue.roundToInt()}° to $quarters")
+        val mode = rotating
+        when {
+            mode != null -> mode.turns = quarters
+            Math.floorMod(quarters, 4) != 0 -> startRotate(current, quarters)
+        }
+        // Let go near upright, or a full turn round, outside rotate mode: nothing to save, so it's just upright again
+        turnTo(quarters * 90f) { if (rotating == null) angle.floatValue = 0f }
+    }
+
     BackHandler(onBack = close)
     BackHandler(enabled = lensOn) { lensOn = false }
+    // Leaves rotate mode without saving; while saving, Back waits for it
+    BackHandler(enabled = rotating != null) { if (rotating?.saving == false) leaveRotate() }
+    // Its photo went away meanwhile (deleted elsewhere): nothing left to save
+    LaunchedEffect(current.id) {
+        if (rotating?.m?.id != current.id) {
+            rotating = null
+            askSave = false
+        }
+    }
     ImmersiveBars(visible = chrome)
 
     Box(
@@ -293,37 +397,49 @@ fun Viewer(
             // composed from the start so the full photo loads during the flight, shown once it lands
             Modifier.fillMaxSize().graphicsLayer { alpha = if (flying) 0f else 1f },
             beyondViewportPageCount = 1,
-            userScrollEnabled = lens == null && !twisting && !turning, // stays on a photo being turned until it's written
+            userScrollEnabled = lens == null && !twisting && rotating == null && !tilted, // a turned photo is saved or turned back first
             key = { items[it].id },
         ) { page ->
             val m = items[page]
             val settled = pager.settledPage == page
-            // Rotate edits the file in place under the same uri, and Telephoto keeps its decoded tiles and Exif per uri:
-            // a fresh state per edit makes it read the new orientation instead of showing the old one
+            // Photos and videos zoom alike, with Telephoto: pinch, pan, double-tap. Rotate edits the file in place under the
+            // same uri, and Telephoto keeps its decoded tiles and Exif per uri: a fresh state per edit makes it read the new
+            // orientation instead of showing the old one.
             val zoom = key(editVersion(m.uri)) { rememberZoomableImageState() }
-            // zoomed in, vertical drags pan the photo (Telephoto) instead of closing it
+            // zoomed in, drags pan the photo or video instead of closing it, and sideways ones only turn the page at its edge
             val zoomed by remember(zoom) { derivedStateOf { (zoom.zoomableState.zoomFraction ?: 0f) > 0.01f } }
+            // Left zoomed in, it's back at fit the next time it shows
+            LaunchedEffect(settled) { if (!settled) zoom.zoomableState.resetZoom(snap()) }
             val pageLens = lens?.takeIf { m.id == current.id }
-            // Degrees a twist has turned the photo, clockwise. A fresh one per edit: once rotated for real it's upright again.
-            val angle = remember(m.id, editVersion(m.uri)) { mutableFloatStateOf(0f) }
-            val canTwist = settled && !m.isVideo && !external && !flying && pageLens == null && !turning
+            val turnable = m.id == current.id // only the current photo is ever turned (see angle)
+            val inRotate = rotating?.m?.id == m.id
+            // Rotate mode shows the whole photo: a zoomed one zooms back out
+            LaunchedEffect(inRotate) { if (inRotate) zoom.zoomableState.resetZoom(if (still) snap() else spring()) }
+            val canTwist = settled && turnable && !m.isVideo && !external && !flying && pageLens == null && rotating?.saving != true && !askSave
             Box(
                 Modifier.fillMaxSize()
                     // before graphicsLayer, so drag deltas are measured on screen and not inside the moving page
-                    .draggable(drag, Orientation.Vertical, enabled = settled && !zoomed && !twisting && lens == null, onDragStopped = release)
+                    .draggable(drag, Orientation.Vertical, enabled = settled && !zoomed && !twisting && lens == null && rotating == null && !tilted, onDragStopped = release)
                     .then(
                         if (!canTwist) Modifier else Modifier.twistGesture(angle, onTwist = { turned ->
                             val shown = twistAngle(turned)
-                            if (shown != 0f) twisting = true
-                            if (reachesQuarter(angle.floatValue, shown)) haptics.tick()
-                            angle.floatValue = shown
-                        }, onEnd = { if (twisting) settleTwist(m, angle) }),
+                            if (shown != 0f && !twisting) {
+                                twisting = true
+                                twistFrom = angle.floatValue
+                                scope.launch { turning.mutate(MutatePriority.UserInput) {} } // the fingers take over from a turn still settling
+                            }
+                            if (twisting) {
+                                val to = twistFrom + shown
+                                if (reachesQuarter(angle.floatValue, to)) haptics.tick()
+                                angle.floatValue = to
+                            }
+                        }, onEnd = { if (twisting) settleTwist() }),
                     )
                     .then(if (pageLens == null) Modifier else Modifier.lensSelection(pageLens, { zoom.zoomableState.transformedContentBounds }, haptics))
                     .graphicsLayer {
                         if (!settled) return@graphicsLayer
                         translationY = dragY
-                        val turned = angle.floatValue
+                        val turned = if (turnable) angle.floatValue else 0f
                         // turned, it shrinks to fit (or grows), ending at the size it has once rotated for real
                         val fit = if (turned == 0f) 1f else twistScale(fitRect(m.width, m.height, size).size, size, turned)
                         rotationZ = turned
@@ -336,7 +452,14 @@ fun Viewer(
                         m,
                         active = settled,
                         chrome = chrome,
+                        zoom = zoom.zoomableState,
+                        doubleTap = doubleTap,
                         muted = videoMuted,
+                        onSound = {
+                            videoMuted = !videoMuted
+                            CrashLog.note("video sound ${if (videoMuted) "off" else "on"}")
+                            prefs.edit { putBoolean(VIDEO_MUTED, videoMuted) }
+                        },
                         onTap = { chrome = !chrome },
                         onHideChrome = { chrome = false },
                     )
@@ -353,6 +476,7 @@ fun Viewer(
                         Modifier.fillMaxSize(),
                         state = zoom,
                         onClick = { if (pageLens != null) pageLens.selection = null else chrome = !chrome },
+                        onDoubleClick = doubleTap,
                         onLongClick = video?.takeIf { pageLens == null }?.let {
                             { _: Offset ->
                                 CrashLog.note("motion play (hold)")
@@ -364,6 +488,8 @@ fun Viewer(
                     }
                     if (video != null && playMotion) MotionPlayer(m.uri, video, motionMuted, onEnd = { playMotion = false })
                     if (pageLens != null) TextLensHighlights(pageLens) { zoom.zoomableState.transformedContentBounds }
+                    // Rotate mode only turns the photo, so its pinch, pan and taps wait. A twist still works: the page above reads it.
+                    if (inRotate) Box(Modifier.matchParentSize().pointerInput(Unit) {})
                 }
             }
         }
@@ -390,7 +516,8 @@ fun Viewer(
         }
 
         val fade = Modifier.graphicsLayer { alpha = 1f - pulled() }
-        AnimatedVisibility(chrome && !flying && lens == null, Modifier.align(Alignment.TopCenter).then(fade), enter = fadeIn(), exit = fadeOut()) {
+        val bars = chrome && !flying && lens == null && rotating == null
+        AnimatedVisibility(bars, Modifier.align(Alignment.TopCenter).then(fade), enter = fadeIn(), exit = fadeOut()) {
             Row(
                 Modifier.fillMaxWidth()
                     .background(Brush.verticalGradient(listOf(c.scrimPhoto, Color.Transparent)))
@@ -416,22 +543,23 @@ fun Viewer(
                         playMotion = true
                     })
                 }
-                if (current.isVideo || playMotion) {
-                    val muted = if (current.isVideo) videoMuted else motionMuted
+                // A motion photo's sound, while it plays. A video's is with its own controls (see VideoPage).
+                if (playMotion) {
                     AlbumIconButton(
-                        if (muted) Sym.VolumeOff else Sym.VolumeUp,
-                        if (muted) "Turn sound on" else "Turn sound off",
-                        onClick = {
-                            CrashLog.note("${if (current.isVideo) "video" else "motion"} sound ${if (muted) "on" else "off"}")
-                            if (current.isVideo) videoMuted = !muted else motionMuted = !muted
+                        if (motionMuted) Sym.VolumeOff else Sym.VolumeUp,
+                        "Sound",
+                        {
+                            CrashLog.note("motion sound ${if (motionMuted) "on" else "off"}")
+                            motionMuted = !motionMuted
                         },
+                        Modifier.semantics { stateDescription = if (motionMuted) "Off" else "On" },
                         variant = IconButtonVariant.Photo,
                     )
                 }
             }
         }
 
-        AnimatedVisibility(chrome && !flying && lens == null, Modifier.align(Alignment.BottomCenter).then(fade), enter = fadeIn(), exit = fadeOut()) {
+        AnimatedVisibility(bars, Modifier.align(Alignment.BottomCenter).then(fade), enter = fadeIn(), exit = fadeOut()) {
             Row(
                 Modifier.navigationBarsPadding().padding(bottom = dockGap).height(Space.bar).floating().padding(horizontal = Space.s2),
                 horizontalArrangement = Arrangement.spacedBy(Space.s1),
@@ -454,10 +582,6 @@ fun Viewer(
                     )
                 }
                 AlbumIconButton(Sym.Edit, "Edit", { edit(current) })
-                AlbumIconButton(Sym.Info, "Details", {
-                    CrashLog.note("details")
-                    showInfo = true
-                })
                 if (!external) {
                     onTrash?.let { trash ->
                         AlbumIconButton(Sym.Delete, "Move to trash", {
@@ -465,14 +589,31 @@ fun Viewer(
                             trash(current)
                         })
                     }
-                    // Last, as in the design. A video has nothing in it but the safe.
-                    if (!current.isVideo || onMoveToSafe != null) {
-                        AlbumIconButton(Sym.MoreVert, "More", {
-                            CrashLog.note("more")
-                            showMore = true
-                        })
-                    }
                 }
+                // Last, as in the design: Details first inside, then what's used less often
+                AlbumIconButton(Sym.MoreVert, "More", {
+                    CrashLog.note("more")
+                    showMore = true
+                })
+            }
+        }
+
+        // Rotate mode's bar takes the dock's place. It goes at once when the mode ends, as the dock fades back.
+        AnimatedVisibility(rotating != null && !flying, Modifier.align(Alignment.BottomCenter), enter = fadeIn(), exit = ExitTransition.None) {
+            rotating?.let { mode ->
+                RotateBar(
+                    mode,
+                    onTurn = { quarters ->
+                        mode.turns += quarters
+                        turnTo(mode.turns * 90f)
+                    },
+                    onDiscard = {
+                        CrashLog.note("rotate discard")
+                        leaveRotate()
+                    },
+                    onSave = { save(mode) },
+                    modifier = Modifier.navigationBarsPadding().padding(bottom = dockGap),
+                )
             }
         }
 
@@ -492,12 +633,17 @@ fun Viewer(
         MoreSheet(
             m,
             title,
+            external,
+            onDetails = {
+                CrashLog.note("details")
+                showInfo = true
+            },
             onText = {
                 CrashLog.note("text lens")
                 chrome = true
                 lensOn = true
             },
-            onRotate = { quarters -> rotate(m, quarters) { ok -> if (ok) rotated(m, quarters) } },
+            onRotate = { startRotate(m, 0) },
             onMoveToSafe = onMoveToSafe?.let { safe ->
                 {
                     CrashLog.note("move to safe")
@@ -507,15 +653,28 @@ fun Viewer(
             onDismiss = { showMore = false },
         )
     }
+    rotating?.takeIf { askSave }?.let { mode ->
+        SaveRotatedSheet(mode.inPlace == true, onDismiss = { askSave = false }) { choice, always ->
+            askSave = false
+            CrashLog.note("rotate save ${choice.name}${if (always) ", always" else ""}")
+            if (always) RotatePrefs.set(choice)
+            if (choice == RotateSave.Original) saveOriginal(mode) else saveCopy(mode)
+        }
+    }
 }
 
-/** The viewer's More sheet: actions used less often than the dock's. Text, Rotate and Use as are for photos only. */
+/**
+ * The viewer's More sheet: Details first, then actions used less often than the dock's. Text, Rotate and Use as are for
+ * photos in Album only; a file from another app ([external]) has Details alone.
+ */
 @Composable
 private fun MoreSheet(
     m: Media,
     title: String,
+    external: Boolean,
+    onDetails: () -> Unit,
     onText: () -> Unit,
-    onRotate: (quarters: Int) -> Unit,
+    onRotate: () -> Unit,
     onMoveToSafe: (() -> Unit)?,
     onDismiss: () -> Unit,
 ) {
@@ -526,11 +685,11 @@ private fun MoreSheet(
             onDismiss()
             action()
         }
-        if (!m.isVideo) {
+        MenuRow(Sym.Info, "Details", closing(onDetails), sub = "Camera, place and file. Or swipe up")
+        if (!m.isVideo && !external) {
             // Read on the phone, offline: nothing leaves it
             MenuRow(Sym.TextFields, "Text", closing(onText), sub = "Select and copy words in this photo")
-            MenuRow(Sym.RotateRight, "Rotate right", closing { onRotate(1) }, sub = "Lossless, keeps quality. Or twist with two fingers")
-            MenuRow(Sym.RotateLeft, "Rotate left", closing { onRotate(-1) })
+            MenuRow(Sym.RotateRight, "Rotate", closing(onRotate), sub = "Or twist the photo with two fingers")
             MenuRow(Sym.Wallpaper, "Use as", closing {
                 CrashLog.note("use as")
                 // Wallpaper, contact photo and the like. Some of those apps read the type from the "mimeType" extra.
@@ -635,18 +794,46 @@ private fun Modifier.twistGesture(key: Any, onTwist: (Float) -> Unit, onEnd: () 
     }
 }
 
+// ---------- Zoom ----------
+
+/** Double-tap zoom for photos and videos: Telephoto's own (all the way in, or back out to fit), at once with Remove animations. */
+private fun doubleTapZoom(still: Boolean): DoubleClickToZoomListener = if (still) InstantDoubleTapZoom else DoubleClickToZoomListener.cycle()
+
+/** Telephoto's cycle without its animation: back out to fit once (nearly) all the way in, else in to the most. */
+private object InstantDoubleTapZoom : DoubleClickToZoomListener {
+    override suspend fun onDoubleClick(state: ZoomableState, centroid: Offset) {
+        val fraction = state.zoomFraction ?: return // nothing to zoom yet
+        if (fraction >= 0.95f) state.resetZoom(snap()) else state.zoomTo(state.zoomSpec.maximum.factor, centroid, snap())
+    }
+}
+
 // ---------- Video ----------
 
 /** The player's own controls used to hide this long into playback; the viewer's chrome does the same. */
 private const val CONTROLS_MS = 5_000L
 
+/** The "settings" prefs key that remembers videos were muted. */
+private const val VIDEO_MUTED = "video_muted"
+
 /**
  * Plays only while it's the settled page; the player is released as soon as you swipe away. Tapping toggles the chrome;
- * with it come a big play/pause in the middle and (always) a progress line in flash along the video's bottom edge,
- * which seeks when dragged or tapped.
+ * with it comes a big play/pause in the middle. Always there: a progress line in flash along the video's bottom edge,
+ * which seeks when dragged or tapped, and above its end the sound button ([muted], [onSound]), unless the video is silent.
+ * The picture zooms as a photo does ([zoom], the page's, and [doubleTap]); the controls stay as they are.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun VideoPage(m: Media, active: Boolean, chrome: Boolean, muted: Boolean, onTap: () -> Unit, onHideChrome: () -> Unit) {
+private fun VideoPage(
+    m: Media,
+    active: Boolean,
+    chrome: Boolean,
+    zoom: ZoomableState,
+    doubleTap: DoubleClickToZoomListener,
+    muted: Boolean,
+    onSound: () -> Unit,
+    onTap: () -> Unit,
+    onHideChrome: () -> Unit,
+) {
     if (!active) {
         AsyncImage(Thumb(m.uri), null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
         return
@@ -659,6 +846,7 @@ private fun VideoPage(m: Media, active: Boolean, chrome: Boolean, muted: Boolean
     var playing by remember(m.id) { mutableStateOf(true) } // wants to play: paused and finished are both false
     // As shown: the player turns sideways-stored phone videos upright, which MediaStore's width and height may not say
     var shape by remember(m.id) { mutableStateOf(m.width to m.height) }
+    var hasSound by remember(m.id) { mutableStateOf(false) } // known once the player has read the file's tracks
     val player = remember(m.id, softwareOnly) {
         val renderers = DefaultRenderersFactory(context).setEnableDecoderFallback(true)
         if (softwareOnly) {
@@ -674,6 +862,10 @@ private fun VideoPage(m: Media, active: Boolean, chrome: Boolean, muted: Boolean
 
                 override fun onVideoSizeChanged(videoSize: VideoSize) {
                     if (videoSize.width > 0) shape = (videoSize.width * videoSize.pixelWidthHeightRatio).roundToInt() to videoSize.height
+                }
+
+                override fun onTracksChanged(tracks: Tracks) {
+                    hasSound = tracks.containsType(C.TRACK_TYPE_AUDIO)
                 }
 
                 override fun onPlayerError(error: PlaybackException) {
@@ -716,19 +908,29 @@ private fun VideoPage(m: Media, active: Boolean, chrome: Boolean, muted: Boolean
     }
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
-        AndroidView(
-            factory = {
-                PlayerView(it).apply {
-                    useController = false // Album draws its own controls
-                    this.player = player
-                }
-            },
-            update = { it.player = player }, // picks up the software-decoder retry
-            onRelease = { it.player = null },
-            modifier = Modifier.fillMaxSize(),
-        )
-        // Above the player view, which would otherwise take the touches
-        Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures(onTap = { onTap() }) })
+        val density = LocalDensity.current
+        // Where the picture is drawn: fitted and centred, as the player draws it
+        val frame = with(density) { fitRect(shape.first, shape.second, Size(maxWidth.toPx(), maxHeight.toPx())) }
+        // Told to the zoom, so it stops at the picture's edges and a double-tap zooms in where it lands. Off until the
+        // video's size is known.
+        val known = shape.first > 0 && shape.second > 0
+        LaunchedEffect(zoom, frame.size, known) { zoom.setContentLocation(ZoomableContentLocation.scaledInsideAndCenterAligned(frame.size.takeIf { known })) }
+        // Only the picture zooms and pans; the controls drawn after it keep their size and place. Its tap shows or hides the chrome.
+        Box(Modifier.fillMaxSize().zoomable(zoom, onClick = { onTap() }, onDoubleClick = doubleTap)) {
+            AndroidView(
+                factory = {
+                    PlayerView(it).apply {
+                        useController = false // Album draws its own controls
+                        this.player = player
+                    }
+                },
+                update = { it.player = player }, // picks up the software-decoder retry
+                onRelease = { it.player = null },
+                modifier = Modifier.fillMaxSize(),
+            )
+            // Above the player view, which would otherwise take the touches; the zoom around them still sees them all
+            Box(Modifier.matchParentSize().pointerInput(Unit) {})
+        }
         if (failed) {
             Text("Can't play this video", Modifier.align(Alignment.Center), style = AlbumTheme.type.body, color = c.onPhoto)
             return@BoxWithConstraints
@@ -751,11 +953,12 @@ private fun VideoPage(m: Media, active: Boolean, chrome: Boolean, muted: Boolean
             )
         }
 
-        // The line runs along the bottom of the picture, but never lower than just above the navigation bar, where a
-        // sideways drag would switch apps instead of seeking. Its touch strip is a full target tall.
-        val density = LocalDensity.current
-        val frame = with(density) { fitRect(shape.first, shape.second, Size(maxWidth.toPx(), maxHeight.toPx())) }
-        val lowest = with(density) { maxHeight.toPx() - WindowInsets.navigationBars.getBottom(this) - Space.s6.toPx() }
+        // The line runs along the bottom of the picture, but never so low that its touch strip (a full target tall) meets
+        // the dock: seeking works with the dock showing, as it is while paused. Measured as if the navigation bar showed,
+        // so neither it nor the sound button moves when the chrome comes and goes.
+        val lowest = with(density) {
+            maxHeight.toPx() - WindowInsets.navigationBarsIgnoringVisibility.getBottom(this) - (dockGap + Space.bar + Space.target / 2).toPx()
+        }
         val lineY = minOf(frame.bottom, lowest)
         Box(
             Modifier
@@ -773,6 +976,22 @@ private fun VideoPage(m: Media, active: Boolean, chrome: Boolean, muted: Boolean
                     drawRect(c.flash, Offset(0f, size.height / 2 - h), Size(size.width * progress.floatValue, h))
                 },
         )
+        // Sound on or off, one tap away all through playback: just above the line's end, inside the picture, and clear of
+        // a curved screen edge. A video with no sound track gets none, rather than a button that does nothing.
+        if (hasSound) {
+            AlbumIconButton(
+                if (muted) Sym.VolumeOff else Sym.VolumeUp,
+                "Sound",
+                onSound,
+                Modifier
+                    .offset {
+                        val right = minOf(frame.right - Space.s3.toPx(), constraints.maxWidth - Space.edgeSafe.toPx())
+                        IntOffset((right - Space.target.toPx()).roundToInt(), (lineY - Space.s3.toPx() - Space.target.toPx()).roundToInt())
+                    }
+                    .semantics { stateDescription = if (muted) "Off" else "On" },
+                variant = IconButtonVariant.Photo,
+            )
+        }
     }
 }
 

@@ -110,7 +110,9 @@ class MemoryWidget : GlanceAppWidget() {
         AlbumPrefs.load(context)
         withContext(Dispatchers.Main) { Gallery.start(context) }
         val media = withTimeoutOrNull(LOAD_MS) { Gallery.media.filterNotNull().first() } ?: return null
-        val photos = media.inPhotos(AlbumPrefs.hidden.value).filter { !it.isVideo }
+        // Nothing in Hidden items ever reaches the home screen: no photo until it's known which are hidden
+        val hidden = withTimeoutOrNull(LOAD_MS) { Hidden.state.filterNotNull().first() } ?: return null
+        val photos = media.inPhotos(AlbumPrefs.hidden.value).withoutHidden(hidden).filter { !it.isVideo }
         val placeOf = placesById(withTimeoutOrNull(LOAD_MS) { Explore.places.filterNotNull().first() }.orEmpty())
         val (memory, photo) = widgetPick(photos, LocalDate.now(), Media::day, Media::isFavorite) { placeOf[it.id] } ?: return null
         val thumb = context.contentResolver.loadThumbnail(photo.uri, Size(WIDGET_THUMB_PX, WIDGET_THUMB_PX), null)

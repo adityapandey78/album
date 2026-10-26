@@ -5,9 +5,7 @@ import android.app.Activity
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.view.SurfaceView
-import android.view.WindowManager
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -62,12 +60,14 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -81,9 +81,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
@@ -113,28 +111,41 @@ import java.time.Instant
 import java.time.ZoneId
 import androidx.media3.datasource.DataSource as MediaDataSource
 
-/** What the lock screen says once Android has erased the safe's key: see [Safe.reset]. */
+/** What the lock screen says once Android has erased the key of a safe with no privacy PIN: see [Safe.reset]. */
 private const val LOST_NOTE =
     "Android erased this safe's key when the screen lock was turned off, so what's inside can't be opened any more."
 
-/** What first use says before Android asks for the fingerprint or screen lock: nothing in the safe has a second copy. */
+/** What the first move into the safe says: nothing in it has a second copy. */
 private const val SAFE_NOTE =
-    "It opens with your fingerprint or screen lock and isn't backed up. Uninstalling Album or turning off your screen lock erases what's inside."
+    "They're encrypted on this phone and open with your privacy PIN or fingerprint. The safe isn't backed up, so uninstalling " +
+        "Album or clearing its storage erases what's inside."
 
 /**
- * Returns a function that moves photos and videos into the safe, asking for the fingerprint or screen lock first (on
- * first use, after explaining the safe). Android's pop-up then deletes the originals, once every copy is verified; the
- * result shows in [snackbar]: "Moved 12 items to Private safe". [onStart] runs once the fingerprint is given and the move
- * begins (the selection it came from is done). Draws its own explanation and progress card (windows of their own, so it
- * works wherever it's called) and also finishes a move the app was closed in the middle of.
+ * Moves photos and videos into the safe, asking once first: a ConfirmBar with the photos while privacy is unlocked (with
+ * the safe's note on its first use), else the privacy PIN or fingerprint in a sheet that names the move (setting up a PIN
+ * first if there's none). Android's pop-up then deletes the originals, once every copy is verified; the result shows in
+ * the snackbar: "Moved 12 items to Private safe". Get one with [rememberMoveToSafe].
+ */
+@Stable
+class MoveToSafe internal constructor(private val start: (List<Media>, Boolean) -> Unit) {
+    /** [confirmed]: the caller already asked with its own ConfirmBar (For you's ID cards), so only the PIN may be asked for. */
+    operator fun invoke(items: List<Media>, confirmed: Boolean = false) = start(items, confirmed)
+}
+
+/**
+ * Returns the [MoveToSafe] of this screen. [onStart] runs once the move begins (the selection it came from is done), so
+ * a cancelled PIN leaves the selection as it was. Draws its own ConfirmBar, PIN sheet and progress card (windows of their
+ * own, so it works wherever it's called) and also finishes a move the app was closed in the middle of.
  */
 @Composable
-fun rememberMoveToSafe(snackbar: SnackbarHostState, onStart: () -> Unit = {}): (List<Media>) -> Unit {
+fun rememberMoveToSafe(snackbar: SnackbarHostState, onStart: () -> Unit = {}): MoveToSafe {
     val context = LocalContext.current
-    remember { Safe.init(context) }
+    remember { PrivacyLock.init(context) }
     val haptics = rememberHaptics()
     val scope = rememberCoroutineScope()
-    var explaining by remember { mutableStateOf<List<Media>?>(null) }
+    val privacy = rememberPrivacyAsk()
+    val started by rememberUpdatedState(onStart)
+    var confirming by remember { mutableStateOf<List<Media>?>(null) }
     val request = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {
         Safe.answer(it.resultCode == Activity.RESULT_OK)
     }
@@ -148,74 +159,60 @@ fun rememberMoveToSafe(snackbar: SnackbarHostState, onStart: () -> Unit = {}): (
     LaunchedEffect(snackbar) { for (message in Safe.libraryMessages) snackbar.showSnackbar(message) }
     Safe.progress.collectAsState().value?.takeIf { !it.inSafe }?.let { SafeProgress(it) }
 
-    val move = { items: List<Media> ->
-        Safe.unlock(
-            context, "Move ${itemCount(items.size)} to Private safe", "They leave the Library and search.",
-            onKey = { key ->
-                CrashLog.note("safe move in ${items.size}")
-                onStart()
-                Safe.moveIn(context.applicationContext, items, key)
-            },
-            onFail = { message ->
-                if (message != null) {
+    // The move holds its own copy of the key, so privacy locking mid-move (Android's pop-up, leaving Album) doesn't stop it
+    fun move(items: List<Media>) = privacy.run("Move ${itemCount(items.size)} to Private safe") {
+        val key = Safe.key.value?.copyOf() ?: return@run
+        CrashLog.note("safe move in ${items.size}")
+        started()
+        Safe.moveIn(context.applicationContext, items, key)
+    }
+    confirming?.let { items ->
+        // The safe's note on its first use only: whether it has anything yet, read once off the main thread
+        val empty by produceState<Boolean?>(null) { value = withContext(Dispatchers.IO) { Safe.isEmpty() } }
+        empty?.let {
+            ConfirmBar(
+                title = "Move ${itemCount(items.size)} to Private safe?",
+                body = "They leave the Library and search." + if (it) " $SAFE_NOTE" else "",
+                confirmLabel = "Move to safe",
+                onConfirm = {
+                    confirming = null
+                    move(items)
+                },
+                onCancel = { confirming = null },
+                icon = Sym.Lock,
+                tone = ConfirmTone.Flash,
+                thumbs = items.take(3),
+            )
+        }
+    }
+    return remember {
+        MoveToSafe { items, confirmed ->
+            when {
+                !context.canSend(items.size, MAX_REQUEST, "move") -> {}
+                // Without it Android hands over photos with their GPS blanked, and deleting the original would lose the place
+                context.checkSelfPermission(ACCESS_MEDIA_LOCATION) != PackageManager.PERMISSION_GRANTED -> {
                     haptics.reject()
-                    scope.launch { snackbar.showSnackbar(message) }
+                    scope.launch { snackbar.showSnackbar(SAFE_NEEDS_LOCATION) }
                 }
-            },
-        )
-    }
-    explaining?.let { items ->
-        ConfirmBar(
-            title = "Move ${itemCount(items.size)} to Private safe?",
-            body = "They leave the Library and search. $SAFE_NOTE",
-            confirmLabel = "Move to safe",
-            onConfirm = {
-                explaining = null
-                move(items)
-            },
-            onCancel = { explaining = null },
-            icon = Sym.Lock,
-            tone = ConfirmTone.Flash,
-            thumbs = items.take(3),
-        )
-    }
-    return { items ->
-        when {
-            !context.canSend(items.size, MAX_REQUEST, "move") -> {}
-            // Without it Android hands over photos with their GPS blanked, and deleting the original would lose the place
-            context.checkSelfPermission(ACCESS_MEDIA_LOCATION) != PackageManager.PERMISSION_GRANTED -> {
-                haptics.reject()
-                scope.launch { snackbar.showSnackbar(SAFE_NEEDS_LOCATION) }
+                // Locked, the PIN sheet naming the move is the one deliberate step; unlocked, the ConfirmBar is
+                confirmed || !PrivacyLock.isOpen -> move(items)
+                else -> confirming = items
             }
-            Safe.isSetUp -> move(items)
-            else -> explaining = items
         }
     }
 }
 
 /**
- * Private safe, a pushed page. Locked: a lock badge and Unlock. Open: decrypted thumbnails, long-press to select, then Move
- * out or Delete forever; tap to view. Screenshots and the recents preview are blocked while it's on screen (FLAG_SECURE),
- * and it locks when Album leaves the screen, when you leave the page, and on Lock now.
+ * Private safe, a pushed page. Locked: the privacy PIN pad (or the fingerprint). Open: decrypted thumbnails, long-press to
+ * select, then Move out or Delete forever; tap to view. Screenshots and the recents preview are blocked while it's on
+ * screen (FLAG_SECURE), and privacy locks when you leave the page, when Album leaves the screen, and on Lock now.
  */
 @Composable
 fun SafeScreen(onBack: () -> Unit) {
     val context = LocalContext.current
-    val activity = LocalActivity.current
-    remember { Safe.init(context) }
+    remember { PrivacyLock.init(context) }
     val key by Safe.key.collectAsState()
-    DisposableEffect(activity) {
-        val window = activity?.window
-        window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        onDispose {
-            window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
-            // Leaving the page locks the safe; turning the phone only rebuilds the screen, so it stays open
-            if (activity?.isChangingConfigurations != true) Safe.lock()
-        }
-    }
-    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
-        if (activity?.isChangingConfigurations != true) Safe.lock() // home, another app, screen off
-    }
+    PrivatePage(lockOnLeave = true)
     Box(Modifier.fillMaxSize().background(AlbumTheme.colors.canvas).pointerInput(Unit) {}) { // catches taps meant for the screen underneath
         when (val k = key) {
             null -> LockedSafe(onBack)
@@ -225,16 +222,20 @@ fun SafeScreen(onBack: () -> Unit) {
     Safe.progress.collectAsState().value?.takeIf { it.inSafe }?.let { SafeProgress(it) }
 }
 
+/**
+ * The safe while locked: the privacy PIN pad. A v1.0 safe with no PIN whose key Android erased can't be opened by
+ * anything: then it says so, and offers Reset safe instead.
+ */
 @Composable
 private fun LockedSafe(onBack: () -> Unit) {
-    val context = LocalContext.current
-    val c = AlbumTheme.colors
-    val haptics = rememberHaptics()
-    val lost by Safe.keyLost.collectAsState()
+    val wrapLost by Safe.wrapLost.collectAsState()
+    val pin by PrivacyLock.setUp.collectAsState()
     LaunchedEffect(Unit) { Safe.checkKey() }
-    val setUp = remember(lost) { Safe.isSetUp } // a reset makes it false again
-    var checking by remember { mutableStateOf(false) }
-    var problem by remember { mutableStateOf<String?>(null) }
+    if (!wrapLost || pin) {
+        PrivacyGate("Private safe", Sym.Lock, "Encrypted on this phone and hidden from the Library, search and other apps.", onBack)
+        return
+    }
+    val c = AlbumTheme.colors
     var resetting by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
         Box(Modifier.statusBarsPadding()) { CollapsedTopBar("Private safe", onBack = onBack) }
@@ -244,47 +245,12 @@ private fun LockedSafe(onBack: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(Space.s3, Alignment.CenterVertically),
         ) {
             Box(Modifier.size(88.dp).background(c.flashSoft, CircleShape), contentAlignment = Alignment.Center) {
-                Icon(if (checking) Sym.Fingerprint else Sym.Lock, null, size = 44.dp, tint = c.flashInk)
+                Icon(Sym.Lock, null, size = 44.dp, tint = c.flashInk)
             }
             Text("Private safe", style = AlbumTheme.type.titleLg, color = c.ink)
-            Text(
-                if (lost) LOST_NOTE else "Encrypted on this phone and hidden from the Library, search and other apps.",
-                style = AlbumTheme.type.body, color = c.inkMuted, textAlign = TextAlign.Center,
-            )
-            if (!setUp) Text(SAFE_NOTE, style = AlbumTheme.type.caption, color = c.inkMuted, textAlign = TextAlign.Center)
-            problem?.takeIf { !lost }?.let {
-                Text(it, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, style = AlbumTheme.type.caption, color = c.ink, textAlign = TextAlign.Center)
-            }
+            Text(LOST_NOTE, style = AlbumTheme.type.body, color = c.inkMuted, textAlign = TextAlign.Center)
             Spacer(Modifier.height(Space.s2))
-            if (lost) {
-                AlbumButton("Reset safe", { resetting = true }, variant = ButtonVariant.Danger, icon = Sym.DeleteForever)
-            } else {
-                AlbumButton(
-                    if (setUp) "Unlock" else "Set up safe",
-                    {
-                        if (!checking) {
-                            checking = true
-                            problem = null
-                            Safe.unlock(
-                                context, if (setUp) "Unlock Private safe" else "Set up Private safe", null,
-                                onKey = {
-                                    checking = false
-                                    Safe.open(it)
-                                },
-                                onFail = {
-                                    checking = false
-                                    if (it != null) {
-                                        haptics.reject()
-                                        problem = it
-                                    }
-                                },
-                            )
-                        }
-                    },
-                    variant = ButtonVariant.Primary,
-                    icon = Sym.Fingerprint,
-                )
-            }
+            AlbumButton("Reset safe", { resetting = true }, variant = ButtonVariant.Danger, icon = Sym.DeleteForever)
         }
     }
     if (resetting) {
@@ -332,7 +298,7 @@ private fun OpenSafe(key: ByteArray, onBack: () -> Unit) {
                 CollapsedTopBar("Private safe", subtitle = "${itemCount(list.size)} · locks when you leave", onBack = onBack) {
                     AlbumIconButton(Sym.Lock, "Lock now", {
                         CrashLog.note("safe lock now")
-                        Safe.lock()
+                        PrivacyLock.lock()
                     })
                 }
             }
@@ -340,7 +306,7 @@ private fun OpenSafe(key: ByteArray, onBack: () -> Unit) {
                 items == null -> {} // first load takes a few ms
                 list.isEmpty() -> EmptyState(
                     Sym.Lock, "Nothing in the safe",
-                    "Photos you move here leave the Library and search, and open only with your fingerprint or screen lock.",
+                    "Photos you move here leave the Library and search, and open only with your privacy PIN or fingerprint.",
                 )
                 else -> LazyVerticalGrid(
                     GridCells.Fixed(DEFAULT_COLUMNS),

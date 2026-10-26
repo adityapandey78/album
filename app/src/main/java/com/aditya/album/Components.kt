@@ -771,11 +771,13 @@ fun AlbumSnackbar(data: SnackbarData, modifier: Modifier = Modifier) {
 fun LogoMark(modifier: Modifier = Modifier, size: Dp = 32.dp) {
     val sun = logoSun(AlbumTheme.spec.appearance.accent)
     Canvas(modifier.size(size).semantics { contentDescription = "Album" }) {
-        // The icon's 108-unit grid as a launcher shows it: its middle 72 units, the drawing at three quarters about (54, 55)
+        // The icon's 108-unit grid as a launcher shows it: its middle 72 units, the drawing scaled about (54, 55) as
+        // tools/app_icon.py scales it (SCALE)
         val u = this.size.width / 72f
-        fun at(x: Float, y: Float) = Offset(((x - 54) * 0.75f + 36) * u, ((y - 55) * 0.75f + 36) * u)
-        val print = Size(37.5f * u, 37.5f * u)
-        val corner = CornerRadius(7.5f * u)
+        val k = 0.9f
+        fun at(x: Float, y: Float) = Offset(((x - 54) * k + 36) * u, ((y - 55) * k + 36) * u)
+        val print = Size(50 * k * u, 50 * k * u)
+        val corner = CornerRadius(10 * k * u)
         val pivot = at(54f, 55f)
         drawCircle(Ink)
         rotate(-14f, pivot) { drawRoundRect(Color(0xFF5F5E5A), at(29f, 30f), print, corner) }
@@ -789,7 +791,7 @@ fun LogoMark(modifier: Modifier = Modifier, size: Dp = 32.dp) {
             close()
         }
         drawPath(mountains, Ink)
-        drawCircle(sun, 5.25f * u, at(64f, 46f))
+        drawCircle(sun, 7 * k * u, at(64f, 46f))
     }
 }
 

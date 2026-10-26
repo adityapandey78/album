@@ -101,7 +101,11 @@ object Explore {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     // Places and things organise the Library, so folders hidden from it stay out of them too, as in the calendar and search.
-    private val photos = combine(Gallery.media.filterNotNull(), AlbumPrefs.hidden) { media, hidden -> media.inPhotos(hidden) }
+    // Places and things organise the Library, so folders hidden from it stay out of them too, as in the calendar and
+    // search, and so does everything in Hidden items
+    private val photos = combine(Gallery.media.filterNotNull(), AlbumPrefs.hidden, Hidden.state.filterNotNull()) { media, hidden, h ->
+        media.inPhotos(hidden).withoutHidden(h)
+    }
 
     /** Biggest first. Other says nothing about a photo, so it isn't shown. */
     val things: StateFlow<List<Group<Category, Media>>?> =

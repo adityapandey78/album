@@ -187,14 +187,19 @@ fun transferMessage(transfer: Transfer, done: Int, failed: Int, album: String): 
     else -> "${transfer.done} ${itemCount(done)} to $album. $failed couldn't be ${transfer.done.lowercase()}."
 }
 
-/** Album choices that live outside MediaStore, in the "settings" prefs: pinned albums, folders hidden from the Library, and the sort. */
+/**
+ * Album choices that live outside MediaStore, in the "settings" prefs: pinned albums, folders hidden from the Library,
+ * folders locked behind the privacy PIN, and the sort.
+ */
 object AlbumPrefs {
     private const val PINNED = "albums_pinned"
     private const val HIDDEN = "albums_hidden"
+    private const val LOCKED = "albums_locked"
     private const val SORT = "albums_sort"
     private lateinit var prefs: SharedPreferences
     private val pinnedKeys = MutableStateFlow(emptySet<String>())
     private val hiddenKeys = MutableStateFlow(emptySet<String>())
+    private val lockedKeys = MutableStateFlow(emptySet<String>())
     private val sortOrder = MutableStateFlow(AlbumSort.Default)
 
     /** [folderKey]s of pinned folders and [collectionKey]s of pinned collections, which come first. */
@@ -202,6 +207,9 @@ object AlbumPrefs {
 
     /** [folderKey]s of folders left out of the Library (see [inPhotos]). They still show in Collections. */
     val hidden = hiddenKeys.asStateFlow()
+
+    /** [folderKey]s of folders in Hidden items: out of everything but that page (see [withoutHidden]). */
+    val locked = lockedKeys.asStateFlow()
     val sort = sortOrder.asStateFlow()
 
     /** Call before the first screen draws, so the Library never flashes a hidden folder. Safe to call repeatedly. */
@@ -210,12 +218,15 @@ object AlbumPrefs {
         prefs = context.applicationContext.getSharedPreferences("settings", Context.MODE_PRIVATE)
         pinnedKeys.value = prefs.getStringSet(PINNED, null).orEmpty().toSet()
         hiddenKeys.value = prefs.getStringSet(HIDDEN, null).orEmpty().toSet()
+        lockedKeys.value = prefs.getStringSet(LOCKED, null).orEmpty().toSet()
         sortOrder.value = AlbumSort.entries.find { it.name == prefs.getString(SORT, null) } ?: AlbumSort.Default
     }
 
     fun setPinned(key: String, on: Boolean) = save(pinnedKeys, PINNED, key, on)
 
     fun setHidden(key: String, on: Boolean) = save(hiddenKeys, HIDDEN, key, on)
+
+    fun setLocked(key: String, on: Boolean) = save(lockedKeys, LOCKED, key, on)
 
     fun setSort(sort: AlbumSort) {
         sortOrder.value = sort
@@ -292,6 +303,7 @@ object AlbumOps {
         // Carried over before moving, so a hidden album's photos never flash up in the Library on the way
         if (album.key in AlbumPrefs.pinned.value) AlbumPrefs.setPinned(folderKey(path), true)
         if (album.key in AlbumPrefs.hidden.value) AlbumPrefs.setHidden(folderKey(path), true)
+        if (album.key in AlbumPrefs.locked.value) AlbumPrefs.setLocked(folderKey(path), true)
         val (moved, tried) = move(context.contentResolver, items, path, "Renaming")
         // Whichever folder ended up empty drops its pin and hiding, so a later folder of that name doesn't inherit them
         val emptied = when (moved) {
@@ -302,6 +314,7 @@ object AlbumOps {
         emptied?.let {
             AlbumPrefs.setPinned(it, false)
             AlbumPrefs.setHidden(it, false)
+            AlbumPrefs.setLocked(it, false)
         }
         when {
             tried == 0 -> null
@@ -535,6 +548,7 @@ fun AlbumActionsHost(actions: AlbumActions, media: List<Media>, albums: List<Alb
                     // a future folder at the same path must not silently inherit this one's pin or hiding
                     AlbumPrefs.setPinned(step.album.key, false)
                     AlbumPrefs.setHidden(step.album.key, false)
+                    AlbumPrefs.setLocked(step.album.key, false)
                     trashWithUndo(items)
                 },
                 onCancel = close,

@@ -71,9 +71,20 @@ import kotlinx.coroutines.launch
 private const val NO_NAME = "Add a name"
 private const val COULDNT_SAVE = "Couldn't save that change to People"
 
-/** People shown in People and Collections, biggest first. With [hidden], the hidden ones instead, however small, so each can be shown again. */
+private val biggestFirst = compareByDescending<PersonAlbum> { it.items.size }.thenBy { it.cluster }
+
+/**
+ * People shown in People and Collections, biggest first. With [hidden], the ones hidden from People instead, however small,
+ * so each can be shown again. People in Hidden items are in neither.
+ */
 fun shownPeople(all: List<PersonAlbum>, hidden: Boolean = false) =
-    all.filter { it.hidden == hidden && (hidden || isShown(it.name, it.faces)) }.sortedWith(compareByDescending<PersonAlbum> { it.items.size }.thenBy { it.cluster })
+    all.filter { !it.locked && it.hidden == hidden && (hidden || isShown(it.name, it.faces)) }.sortedWith(biggestFirst)
+
+/** People in Hidden items, biggest first. */
+fun peopleInHiddenItems(all: List<PersonAlbum>) = all.filter { it.locked }.sortedWith(biggestFirst)
+
+/** Everyone who can go to Hidden items: shown in People or hidden from it, biggest first. */
+fun hideablePeople(all: List<PersonAlbum>) = all.filter { !it.locked && (it.hidden || isShown(it.name, it.faces)) }.sortedWith(biggestFirst)
 
 private fun titleOf(p: PersonAlbum) = p.name ?: "this person"
 
@@ -89,13 +100,16 @@ fun reviewCount(n: Int) = "${"%,d".format(n)} to review"
 
 /**
  * The person page open at [albumId], or null when it isn't a person page. Watches People only while one is open.
- * A group that just became a person (or merged) is found under its new id, so its page stays open meanwhile.
+ * A group that just became a person (or merged) is found under its new id, so its page stays open meanwhile. A person
+ * in Hidden items is there only while privacy is unlocked, so a page restored later closes instead of showing them.
  */
 @Composable
 fun rememberPerson(albumId: Long?): PersonAlbum? {
     val cluster = albumId?.let(::clusterOfAlbum) ?: return null
     val people by People.albums.collectAsState()
-    return people.find { it.cluster == cluster } ?: People.movedTo(cluster)?.let { to -> people.find { it.cluster == to } }
+    val open = Safe.key.collectAsState().value != null
+    val person = people.find { it.cluster == cluster } ?: People.movedTo(cluster)?.let { to -> people.find { it.cluster == to } }
+    return person?.takeIf { !it.locked || open }
 }
 
 /**
@@ -212,15 +226,17 @@ fun FaceImage(crop: FaceCrop, modifier: Modifier) {
 
 /**
  * The top of a person page, styled like LargeTopBar: back, rename and more on a row, then the name in title-xl (or
- * "Add a name"; tap it to name them) and the photo count. More offers a new cover photo, merging with another person
- * and hiding. [onOpenPerson] gets the page to show next, as an album id: naming or merging an automatic group makes it
- * a person with a new id.
+ * "Add a name"; tap it to name them) and the photo count. More offers a new cover photo, merging with another person,
+ * hiding from People, and Hide person (into Hidden items, after the privacy PIN); for someone in Hidden items, a new
+ * cover and Unhide. [onOpenPerson] gets the page to show next, as an album id: naming or merging an automatic group makes
+ * it a person with a new id.
  */
 @Composable
 fun PersonHeader(person: PersonAlbum, onBack: () -> Unit, onOpenPerson: (albumId: Long) -> Unit) {
     val context = LocalContext.current
     val c = AlbumTheme.colors
     val scope = rememberCoroutineScope()
+    val privacy = rememberPrivacyAsk()
     val all by People.albums.collectAsState()
     var naming by rememberSaveable { mutableStateOf(false) }
     var merging by rememberSaveable { mutableStateOf(false) }
@@ -256,22 +272,37 @@ fun PersonHeader(person: PersonAlbum, onBack: () -> Unit, onOpenPerson: (albumId
                 more = false
                 covering = true
             }, sub = "The face shown for them in People", trailing = null)
-            MenuRow(Sym.Merge, "Merge with another person", {
-                more = false
-                merging = true
-            }, sub = "When the same person shows up twice", trailing = null)
-            MenuRow(
-                if (person.hidden) Sym.Visibility else Sym.VisibilityOff,
-                if (person.hidden) "Show in People" else "Hide from People",
-                {
+            if (person.locked) {
+                MenuRow(Sym.Visibility, "Unhide", {
                     more = false
-                    val hide = !person.hidden
-                    // Like hiding a folder: they leave the list, so the page closes too
-                    change(if (hide) "hide person" else "show person", { People.setHidden(person.cluster, hide) }) { if (hide) onBack() }
-                },
-                sub = "Their photos stay in the Library".takeIf { !person.hidden },
-                trailing = null,
-            )
+                    privacy.run("Unhide ${titleOf(person)}") { Hidden.unhide(context, listOf(person), emptyList()) }
+                }, sub = "They and their photos show in the Library again", trailing = null)
+            } else {
+                MenuRow(Sym.Merge, "Merge with another person", {
+                    more = false
+                    merging = true
+                }, sub = "When the same person shows up twice", trailing = null)
+                MenuRow(
+                    if (person.hidden) Sym.Visibility else Sym.VisibilityOff,
+                    if (person.hidden) "Show in People" else "Hide from People",
+                    {
+                        more = false
+                        val hide = !person.hidden
+                        // Like hiding a folder: they leave the list, so the page closes too
+                        change(if (hide) "hide person" else "show person", { People.setHidden(person.cluster, hide) }) { if (hide) onBack() }
+                    },
+                    sub = "Their photos stay in the Library".takeIf { !person.hidden },
+                    trailing = null,
+                )
+                MenuRow(Sym.Lock, "Hide person", {
+                    more = false
+                    // They and their photos leave everything but Hidden items, this page too
+                    privacy.run("Hide ${titleOf(person)}") {
+                        Hidden.hide(context, listOf(person), emptyList())
+                        onBack()
+                    }
+                }, sub = "They and their photos show only in Hidden items", trailing = null)
+            }
         }
     }
     if (covering) {
@@ -336,7 +367,8 @@ private fun PersonNameSheet(person: PersonAlbum, all: List<PersonAlbum>, onDismi
     // Starts with the old name selected, so typing replaces it
     var text by rememberSaveable(stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue(initial, TextRange(0, initial.length))) }
     val name = text.text.trim()
-    val named = all.filter { it.name != null && it.cluster != person.cluster }
+    // Names merge only on the same side of Hidden items (see People.name), and hidden people are never suggested outside it
+    val named = all.filter { it.name != null && it.cluster != person.cluster && it.locked == person.locked }
     val same = named.find { it.name.equals(name, ignoreCase = true) }
     val suggestions = if (name.isEmpty() || same != null) emptyList() else named.filter { it.name!!.startsWith(name, ignoreCase = true) }.take(4)
     val enabled = name.isNotEmpty() && name != person.name

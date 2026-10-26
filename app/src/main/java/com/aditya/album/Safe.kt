@@ -253,6 +253,12 @@ fun movedInMessage(moved: Int, failed: Int): String? = when {
     else -> "Moved ${itemCount(moved)} to Private safe. $failed couldn't be moved and ${if (failed == 1) "stays" else "stay"} in the Library."
 }
 
+/** Why setup and Forgot PIN can't start: both check it's you with the screen lock (or a fingerprint, which needs one). */
+const val NEEDS_SCREEN_LOCK = "Set a screen lock in Android settings first. It's how Album checks it's you."
+
+/** What a prompt says once Android has erased the Keystore key it needed (the screen lock was turned off). */
+const val KEY_ERASED = "Android erased this key when the screen lock was turned off"
+
 /** Why a move into the safe is refused without ACCESS_MEDIA_LOCATION: Android would hand over photos with GPS blanked. */
 const val SAFE_NEEDS_LOCATION = "Album isn't allowed to read photo locations, so moving would lose where these were taken. Nothing was moved."
 
@@ -268,23 +274,29 @@ fun movedOutMessage(moved: Int, failed: Int): String? = when {
  * The private safe: photos and videos encrypted in app storage (filesDir/safe, excluded from backup and device transfer),
  * listed in safe.db, and gone from MediaStore, so the Library, search and other apps never see them.
  *
- * Keys: one random 256-bit safe key encrypts every file (through [SafeCipher]). It is stored only wrapped by an Android
- * Keystore key that needs the fingerprint or screen lock for every single use (BiometricPrompt with a CryptoObject).
+ * Keys: one random 256-bit safe key encrypts every file (through [SafeCipher]). It is stored only wrapped, twice:
+ * - in "key", by an Android Keystore key that needs the fingerprint or screen lock for every single use (BiometricPrompt
+ *   with a CryptoObject): the fingerprint unlock and Forgot PIN;
+ * - in "pin", by the privacy PIN together with a second Keystore key, so the file is useless off this phone (see
+ *   [PrivacyLock]). v1.0 safes get it at their first unlock after the update.
  * Unwrapping a data key, rather than encrypting the files with the Keystore key itself, is deliberate: Keystore runs
  * each operation in secure hardware over IPC, far too slow for gigabytes of video, and a key with a validity window
  * would expire mid-video or mid-move, while one unwrap per unlock binds the fingerprint to exactly that unlock. The safe
- * key stays in memory only while the safe is open and is wiped when it locks; a move holds its own copy until it ends.
+ * key stays in memory only while privacy is unlocked and is wiped when it locks; a move holds its own copy until it ends.
  *
- * Android erases Keystore keys that need the screen lock when the screen lock is turned off, and nothing here is backed
- * up, which is why setup says so. Adding a fingerprint does not erase the key (setInvalidatedByBiometricEnrollment false).
+ * Android erases Keystore keys that need the screen lock when the screen lock is turned off. The PIN's wrapping doesn't
+ * need the screen lock, so the safe still opens with the PIN; the fingerprint and Forgot PIN come back once the screen
+ * lock does ([rearm]). Adding a fingerprint does not erase the key (setInvalidatedByBiometricEnrollment false).
  */
 object Safe {
-    private const val ALIAS = "album_safe"
+    private const val ALIAS = "album_safe" // v1.0's wrapping key; one re-armed later has an alias of its own, named in the key file
+    private val KEY_MAGIC = "ALSK".toByteArray()
+    private const val KEY_VERSION: Byte = 2
     private const val THUMB = 512
     private const val RESERVE = 100L shl 20 // left free, so a move never fills the phone to the last byte
     private lateinit var app: Context
     private val dao by lazy { Room.databaseBuilder(app, SafeDb::class.java, "safe.db").build().dao() }
-    private val dir by lazy { File(app.filesDir, "safe").apply { mkdirs() } }
+    internal val dir by lazy { File(app.filesDir, "safe").apply { mkdirs() } }
     private val keyFile by lazy { AtomicFile(File(dir, "key")) }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var job: Job? = null
@@ -295,10 +307,13 @@ object Safe {
     /** The safe key while the safe is open, else null. Never copy it anywhere but memory. */
     val key = openKey.asStateFlow()
 
-    private val lostKey = MutableStateFlow(false)
+    private val lostWrap = MutableStateFlow(false)
 
-    /** True once the safe is found set up but Android has erased its Keystore key (screen lock turned off): see [reset]. */
-    val keyLost = lostKey.asStateFlow()
+    /**
+     * True once the safe is found set up but Android has erased the Keystore key of its fingerprint-or-screen-lock wrapping
+     * (the screen lock was turned off). With a privacy PIN the safe still opens; without one it can't: see [reset].
+     */
+    val wrapLost = lostWrap.asStateFlow()
 
     // Decrypted grid thumbnails, so a tile scrolled back into view doesn't decrypt again. Memory only, emptied on lock.
     private val thumbs = object : LruCache<Long, ImageBitmap>((Runtime.getRuntime().maxMemory() / 16).toInt()) {
@@ -307,6 +322,9 @@ object Safe {
 
     /** Everything in the safe, newest first. Moves still waiting for Android to delete the original aren't in it yet. */
     val items by lazy { dao.items() }
+
+    /** Whether nothing has been moved in yet (or everything was moved out), so the first move explains the safe. */
+    suspend fun isEmpty() = dao.count() == 0
 
     /** Call before anything else; safe to call again. Finishes moves the app was closed in the middle of. */
     fun init(context: Context) {
@@ -319,7 +337,7 @@ object Safe {
         }
     }
 
-    /** Whether the safe has a key yet. Before that, first use explains it and asks for the fingerprint or screen lock. */
+    /** Whether the safe has a key yet. Setting up the privacy PIN makes one. */
     val isSetUp get() = keyFile.baseFile.exists()
 
     fun open(key: ByteArray) {
@@ -336,33 +354,69 @@ object Safe {
 
     // ---------- Unlocking ----------
 
-    /** The Keystore cipher BiometricPrompt unlocks: [fresh] wraps a new safe key (setup), else unwraps the saved one. */
-    private class Unlock(val cipher: Cipher, val fresh: Boolean, val wrapped: ByteArray?)
+    /** How Android's prompt checks it's you, and what the safe key is then used for. */
+    enum class Proof {
+        /** The quick way in: a fingerprint only. "Use PIN" closes the prompt. */
+        Fingerprint,
 
-    private fun unlockCipher(): Unlock {
-        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        if (!keyFile.baseFile.exists()) {
-            // A Keystore key left by a setup that never finished wraps nothing yet, so it's reused, or replaced if Android
-            // erased it. Never deleted otherwise: a second unlock running alongside may be about to wrap with it.
-            val wrapping = store.getKey(ALIAS, null) as? SecretKey ?: newWrappingKey()
-            try {
-                cipher.init(Cipher.ENCRYPT_MODE, wrapping)
-            } catch (e: KeyPermanentlyInvalidatedException) {
-                cipher.init(Cipher.ENCRYPT_MODE, newWrappingKey())
-            }
-            return Unlock(cipher, fresh = true, wrapped = null)
-        }
-        val saved = ByteBuffer.wrap(keyFile.readFully())
-        val iv = ByteArray(saved.get().toInt()).also { saved.get(it) }
-        val wrapped = ByteArray(saved.remaining()).also { saved.get(it) }
-        val wrapping = store.getKey(ALIAS, null) as? SecretKey ?: throw KeyPermanentlyInvalidatedException()
-        cipher.init(Cipher.DECRYPT_MODE, wrapping, GCMParameterSpec(128, iv))
-        return Unlock(cipher, fresh = false, wrapped = wrapped)
+        /** Forgot PIN: the fingerprint, or the screen lock on a phone without one. */
+        Recover,
+
+        /** Setting up the privacy PIN: the fingerprint or screen lock, making the safe key (or opening a v1.0 safe's). */
+        SetUp,
     }
 
-    private fun newWrappingKey(): SecretKey {
-        val spec = KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+    /**
+     * The Keystore cipher BiometricPrompt unlocks: [fresh] wraps a new safe key (setup), [rearm] wraps the open one again
+     * under a new Keystore key ([alias]), else it unwraps the saved one.
+     */
+    private class Unlock(val cipher: Cipher, val fresh: Boolean, val wrapped: ByteArray?, val rearm: ByteArray? = null, val alias: String? = null)
+
+    /** The key file: the Keystore alias that wraps the safe key, its IV and the wrapped key. */
+    private class Saved(val alias: String, val iv: ByteArray, val wrapped: ByteArray)
+
+    /** v1.0 wrote the IV and the wrapped key; a re-armed file starts "ALSK", 2 and names its Keystore alias. */
+    private fun saved(): Saved {
+        val bytes = keyFile.readFully()
+        val b = ByteBuffer.wrap(bytes)
+        val alias = if (bytes.size > 6 && bytes.copyOfRange(0, 4).contentEquals(KEY_MAGIC)) {
+            b.position(4)
+            if (b.get() != KEY_VERSION) throw IOException("unknown key file")
+            String(ByteArray(b.get().toInt()).also { b.get(it) })
+        } else {
+            ALIAS
+        }
+        val iv = ByteArray(b.get().toInt()).also { b.get(it) }
+        return Saved(alias, iv, ByteArray(b.remaining()).also { b.get(it) })
+    }
+
+    private fun keyStore() = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+
+    /** The saved wrapping's cipher, ready to unwrap; a gone or erased Keystore key throws KeyPermanentlyInvalidatedException. */
+    private fun openCipher(): Unlock {
+        val saved = saved()
+        val wrapping = keyStore().getKey(saved.alias, null) as? SecretKey ?: throw KeyPermanentlyInvalidatedException()
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, wrapping, GCMParameterSpec(128, saved.iv))
+        return Unlock(cipher, fresh = false, wrapped = saved.wrapped)
+    }
+
+    private fun unlockCipher(): Unlock {
+        if (keyFile.baseFile.exists()) return openCipher()
+        // A Keystore key left by a setup that never finished wraps nothing yet, so it's reused, or replaced if Android
+        // erased it. Never deleted otherwise: a second unlock running alongside may be about to wrap with it.
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        val wrapping = keyStore().getKey(ALIAS, null) as? SecretKey ?: newWrappingKey(ALIAS)
+        try {
+            cipher.init(Cipher.ENCRYPT_MODE, wrapping)
+        } catch (e: KeyPermanentlyInvalidatedException) {
+            cipher.init(Cipher.ENCRYPT_MODE, newWrappingKey(ALIAS))
+        }
+        return Unlock(cipher, fresh = true, wrapped = null)
+    }
+
+    private fun newWrappingKey(alias: String): SecretKey {
+        val spec = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
             .setKeySize(256)
@@ -374,57 +428,134 @@ object Safe {
         return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply { init(spec) }.generateKey()
     }
 
-    /**
-     * After the fingerprint or screen lock: the safe key. A new one is saved (durably) before anything uses it, and never
-     * over an existing one, which may already encrypt photos: of two setups at once, the second fails instead.
-     */
-    private fun finishUnlock(unlock: Unlock): ByteArray {
-        if (!unlock.fresh) return unlock.cipher.doFinal(unlock.wrapped)
-        check(!keyFile.baseFile.exists()) { "already set up" }
-        val key = ByteArray(32).also(SecureRandom()::nextBytes)
-        val wrapped = unlock.cipher.doFinal(key)
-        val iv = unlock.cipher.iv
+    /** Writes the key file in one go: flushed to disk before it replaces the old one, so a crash can't leave half a key. */
+    private fun writeKeyFile(alias: String?, iv: ByteArray, wrapped: ByteArray) {
+        val body = ByteBuffer.allocate(1 + iv.size + wrapped.size).put(iv.size.toByte()).put(iv).put(wrapped).array()
+        val bytes = alias?.toByteArray()?.let { KEY_MAGIC + byteArrayOf(KEY_VERSION, it.size.toByte()) + it + body } ?: body
         val out = keyFile.startWrite()
         try {
-            out.write(ByteBuffer.allocate(1 + iv.size + wrapped.size).put(iv.size.toByte()).put(iv).put(wrapped).array())
-            keyFile.finishWrite(out) // flushes to disk before replacing, so a crash can't leave half a key
+            out.write(bytes)
+            keyFile.finishWrite(out)
         } catch (e: Exception) {
             keyFile.failWrite(out)
             throw e
         }
-        return key
     }
 
     /**
-     * Asks for the fingerprint or screen lock with [title], then gives the safe key to [onKey] (a setup creates it first).
-     * [onFail] gets a message to show, or null when the person just cancelled. Both are called on the main thread; the
-     * Keystore and the key file are used off it.
+     * After the fingerprint or screen lock: the safe key. A new one is saved (durably) before anything uses it, and never
+     * over an existing one, which may already encrypt photos: of two setups at once, the second fails instead. A re-arm
+     * saves the new wrapping first, then drops the erased Keystore key it replaces.
      */
-    fun unlock(context: Context, title: String, description: String?, onKey: (ByteArray) -> Unit, onFail: (String?) -> Unit) {
-        val allowed = BIOMETRIC_STRONG or DEVICE_CREDENTIAL
+    private fun finishUnlock(unlock: Unlock): ByteArray {
+        unlock.rearm?.let { key ->
+            val old = runCatching { saved().alias }.getOrNull()
+            writeKeyFile(unlock.alias, unlock.cipher.iv, unlock.cipher.doFinal(key))
+            if (old != null && old != unlock.alias) runCatching { keyStore().deleteEntry(old) }
+            lostWrap.value = false
+            return key
+        }
+        if (!unlock.fresh) return unlock.cipher.doFinal(unlock.wrapped)
+        check(!keyFile.baseFile.exists()) { "already set up" }
+        val key = ByteArray(32).also(SecureRandom()::nextBytes)
+        val wrapped = unlock.cipher.doFinal(key)
+        writeKeyFile(null, unlock.cipher.iv, wrapped)
+        return key
+    }
+
+    /** What Android's prompt may accept for [proof], given what the phone has set up. */
+    private fun allowedFor(context: Context, proof: Proof): Int = when (proof) {
+        Proof.Fingerprint -> BIOMETRIC_STRONG
+        Proof.Recover -> if (hasFingerprint(context)) BIOMETRIC_STRONG else DEVICE_CREDENTIAL
+        Proof.SetUp -> BIOMETRIC_STRONG or DEVICE_CREDENTIAL
+    }
+
+    /** Whether the phone has a strong biometric (a fingerprint, on a Moto) enrolled. */
+    fun hasFingerprint(context: Context) =
+        context.getSystemService(BiometricManager::class.java).canAuthenticate(BIOMETRIC_STRONG) == BiometricManager.BIOMETRIC_SUCCESS
+
+    /** Whether the phone has a screen lock (or a fingerprint, which needs one): Forgot PIN and setup rely on it. */
+    fun hasScreenLock(context: Context) =
+        context.getSystemService(BiometricManager::class.java).canAuthenticate(BIOMETRIC_STRONG or DEVICE_CREDENTIAL) == BiometricManager.BIOMETRIC_SUCCESS
+
+    /**
+     * Asks for [proof] with [title], then gives the safe key to [onKey] (a setup creates it first). [onFail] gets a message
+     * to show, or null when the person just cancelled (or chose the PIN instead). Both are called on the main thread; the
+     * Keystore and the key file are used off it. [cancel] closes the prompt, say when the screen asking for it goes away.
+     */
+    fun prompt(
+        context: Context,
+        title: String,
+        description: String?,
+        proof: Proof,
+        cancel: CancellationSignal,
+        onKey: (ByteArray) -> Unit,
+        onFail: (String?) -> Unit,
+    ) {
+        val allowed = allowedFor(context, proof)
         if (context.getSystemService(BiometricManager::class.java).canAuthenticate(allowed) != BiometricManager.BIOMETRIC_SUCCESS) {
-            onFail("Set a screen lock in Android settings to use Private safe")
+            onFail(if (proof == Proof.Fingerprint) "Add a fingerprint in Android settings to use it here" else NEEDS_SCREEN_LOCK)
             return
         }
+        authenticate(context, title, description, allowed, if (proof == Proof.Fingerprint) "Use PIN" else "Cancel", cancel, onKey, onFail) {
+            if (proof == Proof.SetUp) unlockCipher() else openCipher()
+        }
+    }
+
+    /**
+     * Wraps [key] (the open safe key, a copy this call wipes) again under a new Keystore key, after the fingerprint or screen
+     * lock: for when Android erased the old one because the screen lock was off for a while. Brings back the fingerprint
+     * unlock and Forgot PIN. [onFail] as in [prompt].
+     */
+    fun rearm(context: Context, key: ByteArray, cancel: CancellationSignal, onDone: () -> Unit, onFail: (String?) -> Unit) {
+        val allowed = allowedFor(context, Proof.SetUp)
+        if (context.getSystemService(BiometricManager::class.java).canAuthenticate(allowed) != BiometricManager.BIOMETRIC_SUCCESS) {
+            key.fill(0)
+            onFail(NEEDS_SCREEN_LOCK)
+            return
+        }
+        val alias = "${ALIAS}_${System.currentTimeMillis()}"
+        val done = { k: ByteArray -> k.fill(0); onDone() }
+        authenticate(context, "Turn Forgot PIN back on", null, allowed, "Cancel", cancel, done, { key.fill(0); onFail(it) }) {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.ENCRYPT_MODE, newWrappingKey(alias))
+            Unlock(cipher, fresh = false, wrapped = null, rearm = key, alias = alias)
+        }
+    }
+
+    private fun authenticate(
+        context: Context,
+        title: String,
+        description: String?,
+        allowed: Int,
+        negative: String,
+        cancel: CancellationSignal,
+        onKey: (ByteArray) -> Unit,
+        onFail: (String?) -> Unit,
+        cipherFor: () -> Unlock,
+    ) {
         scope.launch(Dispatchers.Main.immediate) {
             val unlock = try {
-                withContext(Dispatchers.IO) { unlockCipher() }
+                withContext(Dispatchers.IO) { cipherFor() }
             } catch (e: KeyPermanentlyInvalidatedException) {
-                lostKey.value = true // the safe's screen then offers Reset safe
-                onFail("Android erased the safe's key when the screen lock was turned off, so what's inside can't be opened")
+                lostWrap.value = true // the safe's screen then offers Reset safe, or the PIN's flow re-arms it
+                onFail(KEY_ERASED)
                 return@launch
             } catch (e: Exception) {
                 CrashLog.note("safe unlock failed: ${e.javaClass.simpleName}")
-                onFail("Couldn't open Private safe")
+                onFail("Couldn't check it's you. Try again.")
                 return@launch
             }
+            if (cancel.isCanceled) return@launch
             val prompt = BiometricPrompt.Builder(context)
                 .setTitle(title)
                 .apply { description?.let(::setDescription) }
                 .setAllowedAuthenticators(allowed)
+                // Android asks for a way out when the screen lock isn't one of the choices
+                .apply { if (allowed and DEVICE_CREDENTIAL == 0) setNegativeButton(negative, context.mainExecutor) { _, _ -> onFail(null) } }
                 .build()
             prompt.authenticate(
-                BiometricPrompt.CryptoObject(unlock.cipher), CancellationSignal(), context.mainExecutor,
+                BiometricPrompt.CryptoObject(unlock.cipher), cancel, context.mainExecutor,
                 object : BiometricPrompt.AuthenticationCallback() {
                     override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                         scope.launch(Dispatchers.Main.immediate) {
@@ -432,13 +563,15 @@ object Safe {
                                 .onSuccess(onKey)
                                 .onFailure {
                                     CrashLog.note("safe key failed: ${it.javaClass.simpleName}")
-                                    onFail("Couldn't open Private safe")
+                                    unlock.rearm?.fill(0)
+                                    onFail("Couldn't check it's you. Try again.")
                                 }
                         }
                     }
 
                     override fun onAuthenticationError(code: Int, message: CharSequence) {
                         val cancelled = code == BiometricPrompt.BIOMETRIC_ERROR_USER_CANCELED || code == BiometricPrompt.BIOMETRIC_ERROR_CANCELED
+                        unlock.rearm?.fill(0)
                         onFail(if (cancelled) null else message.toString())
                     }
                 },
@@ -446,11 +579,11 @@ object Safe {
         }
     }
 
-    /** Whether the safe is set up but Android erased its Keystore key. Only that, never a doubt, counts as lost. */
-    private fun keyIsLost(): Boolean {
+    /** Whether the safe is set up but Android erased the Keystore key of its key file. Only that, never a doubt, counts. */
+    private fun wrapIsLost(): Boolean {
         if (!keyFile.baseFile.exists()) return false
         return try {
-            unlockCipher() // with a key file this only reads it and opens the Keystore key; nothing is created
+            openCipher() // only reads the key file and opens the Keystore key; nothing is created
             false
         } catch (e: KeyPermanentlyInvalidatedException) {
             true
@@ -459,22 +592,27 @@ object Safe {
         }
     }
 
-    /** Checks [keyLost] without asking for the fingerprint, so a safe that can't open says so before anyone tries. */
-    suspend fun checkKey() = withContext(Dispatchers.IO) { lostKey.value = keyIsLost() }
+    /** Checks [wrapLost] without asking for anything, so a safe that can't open says so before anyone tries. */
+    suspend fun checkKey() = withContext(Dispatchers.IO) { lostWrap.value = wrapIsLost() }
 
     /**
-     * Empties a safe whose Keystore key Android erased: nobody can decrypt its files any more, so this frees their space
-     * and lets the safe be set up again. Checks again that the key is really gone first. Callers confirm with a hold.
+     * Empties a safe nothing can open any more: Android erased the Keystore key of its key file (or the file is gone), and
+     * there's no privacy PIN or nobody remembers it. Nobody can decrypt its files, so this frees their space and lets
+     * privacy be set up again, with a new PIN. Checks again first: a key file that still opens is never touched. Callers
+     * confirm with a hold. Hidden people and albums stay hidden.
      */
     fun reset() = start(safeMessages, null) {
-        if (!keyIsLost()) return@start null
+        if (keyFile.baseFile.exists() && !wrapIsLost()) return@start null
         CrashLog.note("safe reset")
+        lock()
         dao.clear()
-        dir.deleteRecursively()
+        val alias = runCatching { saved().alias }.getOrNull()
+        dir.deleteRecursively() // the key file and the PIN's file with it: both wrap the lost key
         dir.mkdirs()
-        KeyStore.getInstance("AndroidKeyStore").apply { load(null) }.deleteEntry(ALIAS)
+        alias?.let { runCatching { keyStore().deleteEntry(it) } }
         thumbs.evictAll()
-        lostKey.value = false
+        lostWrap.value = false
+        PrivacyLock.forgetPin()
         null
     }
 
@@ -573,9 +711,9 @@ object Safe {
         "Deleted ${itemCount(items.size)} forever"
     }
 
-    private fun start(messages: Channel<String>, key: ByteArray?, work: suspend () -> String?) {
+    private fun start(messages: Channel<String>, key: ByteArray?, work: suspend () -> String?): Job {
         val previous = job
-        job = scope.launch {
+        return scope.launch {
             previous?.join() // one at a time, and never before init's settling is done
             stopping = false
             try {
@@ -590,7 +728,7 @@ object Safe {
                 progress.value = null
                 asking.value = null
             }
-        }
+        }.also { job = it }
     }
 
     private suspend fun ask(request: PendingIntent): Boolean {

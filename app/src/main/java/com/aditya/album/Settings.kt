@@ -72,15 +72,17 @@ import java.io.File
 private val Columns = listOf(3, 4, 5, 7)
 
 /**
- * The Settings page, pushed over the tabs with its own top bar and insets. [columns] is the Library grid's live column
- * count. [onOpenTrash] opens Recently deleted, which stays reachable here even when Collections hides it. Updates,
- * Diagnostics and About open pages of their own, so this one stays a page of choices.
+ * The Settings page, pushed over the tabs with its own top bar and insets. [onOpenTrash] opens Recently deleted, which
+ * stays reachable here even when Collections hides it. Appearance, Updates, Diagnostics and About open pages of their own,
+ * so this one stays a short page of choices.
  */
 @Composable
 fun SettingsScreen(
     onBack: () -> Unit,
-    columns: MutableIntState,
+    onAppearance: () -> Unit,
     onOpenTrash: () -> Unit,
+    onHiddenItems: () -> Unit,
+    onOpenSafe: () -> Unit,
     onDescribe: () -> Unit,
     onUpdates: () -> Unit,
     onDiagnostics: () -> Unit,
@@ -100,7 +102,53 @@ fun SettingsScreen(
     fun Subhead(text: String) = SectionHead(text, Modifier.bleed(Space.s4))
 
     SettingsPage("Settings", onBack) {
-        Title("Appearance", top = 0.dp)
+        // Appearance has a page of its own: its choices are many and visual, and this page stays a short list
+        MenuRow(Sym.Palette, "Appearance", onAppearance, Modifier.bleed(Space.s1), sub = appearanceSummary(a))
+
+        Title("Privacy")
+        PrivacyRows(onHiddenItems, Modifier.bleed(Space.s1), onOpenSafe)
+        SwitchRow(
+            "Hide private places", "Leaves Recently deleted, Private safe and Hidden items out of Collections. Open them from here.", a.hidePrivate,
+            { v -> AppearancePrefs.update { it.copy(hidePrivate = v) } }, icon = Sym.VisibilityOff,
+        )
+        MenuRow(Sym.RestoreFromTrash, "Recently deleted", onOpenTrash, Modifier.bleed(Space.s1))
+
+        Title("Behaviour")
+        MediaManagementRow()
+        EditingAppRow(Modifier.bleed(Space.s1))
+        RotateSaveRow(Modifier.bleed(Space.s1))
+        SwitchRow(
+            "Haptic feedback", "Ticks on select, pinch and swipe.", a.haptics,
+            { v -> AppearancePrefs.update { it.copy(haptics = v) } }, icon = Sym.Vibration,
+        )
+
+        Title("Search")
+        MenuRow(Sym.Search, "Describe-it search", onDescribe, Modifier.bleed(Space.s1), sub = describeSummary(describe))
+
+        // A section's gap without a title: these rows are pages, not choices
+        Spacer(Modifier.height(Space.s4))
+        MenuRow(Sym.SystemUpdate, "Updates", onUpdates, Modifier.bleed(Space.s1), sub = "Version ${remember { Updater.currentVersion(context) }}")
+        MenuRow(Sym.BugReport, "Diagnostics", onDiagnostics, Modifier.bleed(Space.s1), sub = logs?.let(::crashLogs))
+        MenuRow(Sym.Info, "About", onAbout, Modifier.bleed(Space.s1), sub = "Developer and open-source licences")
+    }
+}
+
+private fun appearanceSummary(a: Appearance) = "${a.theme.label} theme, ${a.accent.label} accent, ${a.font.label} font"
+
+/**
+ * Appearance, pushed from Settings or the Library's menu: theme, accent, font, look, gallery style and columns, then
+ * motion. Every choice applies the moment it's made. [columns] is the Library grid's live column count.
+ */
+@Composable
+fun AppearanceScreen(onBack: () -> Unit, columns: MutableIntState) {
+    val c = AlbumTheme.colors
+    val type = AlbumTheme.type
+    val a = AlbumTheme.spec.appearance
+
+    @Composable
+    fun Subhead(text: String) = SectionHead(text, Modifier.bleed(Space.s4))
+
+    SettingsPage("Appearance", onBack, top = 0.dp) {
         Subhead("Theme")
         ChoiceGroup(
             ThemeMode.entries.map { mode ->
@@ -118,6 +166,19 @@ fun SettingsScreen(
         ) { v -> AppearancePrefs.update { it.copy(theme = v) } }
         Subhead("Accent")
         AccentPicker(a.accent) { v -> AppearancePrefs.update { it.copy(accent = v) } }
+        Subhead("Font")
+        ChoiceGroup(
+            AppFont.entries.map { f ->
+                Choice(f, f.label, f.blurb) {
+                    // The font's own letters on a swatch's ground
+                    val style = remember(f) { AlbumType(edge = false, f).titleLg }
+                    Box(Modifier.fillMaxWidth().aspectRatio(1f).background(c.surfaceHigh), contentAlignment = Alignment.Center) {
+                        Text("Aa", style = style, color = c.ink)
+                    }
+                }
+            },
+            a.font,
+        ) { v -> AppearancePrefs.update { it.copy(font = v) } }
         Subhead("Look")
         ChoiceGroup(Look.entries.map { Choice(it, it.label, it.blurb) { StyleSwatch(look = it) } }, a.look) { v ->
             AppearancePrefs.update { it.copy(look = v) }
@@ -132,25 +193,7 @@ fun SettingsScreen(
         }
         Text("Or pinch the grid.", style = type.caption, color = c.inkMuted)
 
-        Title("Privacy")
-        SwitchRow(
-            "Hide Recently deleted", "Leaves Recently deleted out of Collections. Open it from here.", a.hidePrivate,
-            { v -> AppearancePrefs.update { it.copy(hidePrivate = v) } }, icon = Sym.VisibilityOff,
-        )
-        MenuRow(Sym.RestoreFromTrash, "Recently deleted", onOpenTrash, Modifier.bleed(Space.s1))
-
-        Title("Behaviour")
-        MediaManagementRow()
-        EditingAppRow(Modifier.bleed(Space.s1))
-        SwitchRow(
-            "Haptic feedback", "Ticks on select, pinch and swipe.", a.haptics,
-            { v -> AppearancePrefs.update { it.copy(haptics = v) } }, icon = Sym.Vibration,
-        )
-
-        Title("Search")
-        MenuRow(Sym.Search, "Describe-it search", onDescribe, Modifier.bleed(Space.s1), sub = describeSummary(describe))
-
-        Title("Motion")
+        Text("Motion", Modifier.padding(top = Space.s8), style = type.titleLg, color = c.ink)
         SwitchRow(
             "Remove animations",
             "Screens swap with a quick fade; nothing slides, zooms or bounces. " +
@@ -169,12 +212,6 @@ fun SettingsScreen(
         FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.s2), verticalArrangement = Arrangement.spacedBy(Space.s2)) {
             TabMotion.entries.forEach { m -> Chip(m.label, { AppearancePrefs.update { it.copy(tabMotion = m) } }, selected = a.tabMotion == m) }
         }
-
-        // A section's gap without a title: these rows are pages, not choices
-        Spacer(Modifier.height(Space.s4))
-        MenuRow(Sym.SystemUpdate, "Updates", onUpdates, Modifier.bleed(Space.s1), sub = "Version ${remember { Updater.currentVersion(context) }}")
-        MenuRow(Sym.BugReport, "Diagnostics", onDiagnostics, Modifier.bleed(Space.s1), sub = logs?.let(::crashLogs))
-        MenuRow(Sym.Info, "About", onAbout, Modifier.bleed(Space.s1), sub = "Developer and open-source licences")
     }
 }
 
@@ -184,13 +221,14 @@ private fun SettingsPage(
     title: String,
     onBack: () -> Unit,
     scroll: ScrollState = rememberScrollState(),
+    top: Dp = Space.s4, // 0 when the page opens on a section head, which has its own space above
     content: @Composable ColumnScope.() -> Unit,
 ) {
     BackHandler(onBack = onBack)
     Column(Modifier.fillMaxSize().background(AlbumTheme.colors.canvas).systemBarsPadding()) {
         CollapsedTopBar(title, onBack = onBack)
         Column(
-            Modifier.verticalScroll(scroll).padding(start = Space.s4, end = Space.s4, top = Space.s4, bottom = Space.s8),
+            Modifier.verticalScroll(scroll).padding(start = Space.s4, end = Space.s4, top = top, bottom = Space.s8),
             verticalArrangement = Arrangement.spacedBy(Space.s2),
             content = content,
         )
@@ -515,6 +553,9 @@ private val Licences = listOf(
     Licence("Bricolage Grotesque font", "Bricolage Grotesque Project Authors", "SIL Open Font License 1.1", "bricolage-grotesque-OFL.txt", Sym.TextFields),
     Licence("Figtree font", "Figtree Project Authors", "SIL Open Font License 1.1", "figtree-OFL.txt", Sym.TextFields),
     Licence("Geist Mono font", "Geist Project Authors", "SIL Open Font License 1.1", "geist-mono-OFL.txt", Sym.TextFields),
+    Licence("Inter font", "Inter Project Authors", "SIL Open Font License 1.1", "inter-OFL.txt", Sym.TextFields),
+    Licence("Nunito font", "Nunito Project Authors", "SIL Open Font License 1.1", "nunito-OFL.txt", Sym.TextFields),
+    Licence("Lora font", "Lora Project Authors", "SIL Open Font License 1.1", "lora-OFL.txt", Sym.TextFields),
     Licence("Material Symbols icons", "Google", "Apache License 2.0", "material-symbols-Apache-2.0.txt", Sym.Category),
     Licence("Face detection (YuNet)", "OpenCV Zoo", "MIT License", "yunet-MIT.txt", Sym.Face),
     Licence("Face recognition (EdgeFace-S)", "Idiap Research Institute", "CC BY-NC-SA 4.0, non-commercial", "edgeface-CC-BY-NC-SA-4.0.txt", Sym.Face),

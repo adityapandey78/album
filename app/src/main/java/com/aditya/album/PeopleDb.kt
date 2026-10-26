@@ -1,6 +1,7 @@
 package com.aditya.album
 
 import androidx.room.AutoMigration
+import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Embedded
@@ -19,7 +20,8 @@ import kotlinx.coroutines.flow.Flow
 /**
  * A person the user named, hid or corrected. Automatic groups only live in the face index; touching one makes it a person.
  * [coverMediaId] and [cover]: the face the user picked as their cover photo, by photo and box like [PersonFace], or null
- * for the automatic pick.
+ * for the automatic pick. [hidden] only leaves them out of People; [locked] puts them and every photo they're in behind
+ * the privacy PIN (Hidden items).
  */
 @Entity(tableName = "people")
 class Person(
@@ -34,6 +36,7 @@ class Person(
     val centroidModel: Int = 0,
     val coverMediaId: Long? = null,
     @Embedded(prefix = "cover_") val cover: FaceBox? = null,
+    @ColumnInfo(defaultValue = "0") val locked: Boolean = false,
 )
 
 /**
@@ -80,6 +83,7 @@ data class PersonName(
     val hidden: Boolean,
     val coverMediaId: Long? = null,
     @Embedded(prefix = "cover_") val cover: FaceBox? = null,
+    val locked: Boolean = false,
 )
 
 /**
@@ -93,8 +97,15 @@ private const val CHUNK = 500
 
 @Dao
 interface PeopleDao {
-    @Query("SELECT id, name, hidden, coverMediaId, cover_left, cover_top, cover_right, cover_bottom FROM people")
+    @Query("SELECT id, name, hidden, coverMediaId, cover_left, cover_top, cover_right, cover_bottom, locked FROM people")
     fun names(): Flow<List<PersonName>>
+
+    @Query("SELECT id FROM people WHERE locked = 1")
+    fun lockedIds(): Flow<List<Long>>
+
+    /** Photos with a face confirmed for a locked person: hidden even while the face index is being rebuilt. */
+    @Query("SELECT DISTINCT mediaId FROM person_faces WHERE personId IN (SELECT id FROM people WHERE locked = 1)")
+    fun lockedPhotos(): Flow<List<Long>>
 
     @Query("SELECT * FROM people")
     suspend fun people(): List<Person>
@@ -137,6 +148,19 @@ interface PeopleDao {
 
     @Query("UPDATE people SET hidden = :hidden WHERE id = :id")
     suspend fun setHidden(id: Long, hidden: Boolean)
+
+    @Query("UPDATE people SET locked = :locked WHERE id = :id")
+    suspend fun setLocked(id: Long, locked: Boolean)
+
+    @Query("SELECT * FROM person_faces WHERE personId = :personId")
+    suspend fun facesOfPerson(personId: Long): List<PersonFace>
+
+    /** Locks [id] and confirms [faces] for them in one go, so a locked person's photos are never left unhidden (see People.setLocked). */
+    @Transaction
+    suspend fun lock(id: Long, faces: List<PersonFace>) {
+        setLocked(id, true)
+        insertFaces(faces)
+    }
 
     /** Pins the face at [mediaId] and [box] as [id]'s cover; nulls go back to the automatic pick. */
     @Query("UPDATE people SET coverMediaId = :mediaId, cover_left = :left, cover_top = :top, cover_right = :right, cover_bottom = :bottom WHERE id = :id")
@@ -217,11 +241,12 @@ interface PeopleDao {
  * To change the schema: bump the version, keep the exported app/schemas/com.aditya.album.PeopleDb/N.json files in git,
  * and add an AutoMigration (or a hand-written Migration for renames and splits), with a test in PeopleDbTest.
  * 2 (v0.10): pinned cover photos (nullable columns) and "Different" pairs (a new table); nothing existing changes.
+ * 3 (v1.1): people locked behind the privacy PIN (a column that starts false for everyone); nothing existing changes.
  */
 @Database(
     entities = [Person::class, PersonFace::class, NotPerson::class, DifferentPeople::class],
-    version = 2,
-    autoMigrations = [AutoMigration(from = 1, to = 2)],
+    version = 3,
+    autoMigrations = [AutoMigration(from = 1, to = 2), AutoMigration(from = 2, to = 3)],
 )
 abstract class PeopleDb : RoomDatabase() {
     abstract fun dao(): PeopleDao

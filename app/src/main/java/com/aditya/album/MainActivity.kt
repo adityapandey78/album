@@ -155,6 +155,7 @@ private sealed class Route(val key: String) {
     data object Places : Route("places")
     data object Storage : Route("storage")
     data object PrivateSafe : Route("safe") // not "Safe": that's the object in Safe.kt
+    data object HiddenItems : Route("hidden") // not "Hidden": that's the object in Hidden.kt
 
     /** Clean up, on one category (a CleanupKind name) or the suggested ones. */
     data class Clean(val category: String?) : Route("cleanup:${category.orEmpty()}")
@@ -165,6 +166,7 @@ private sealed class Route(val key: String) {
     data object Settings : Route("settings")
 
     // Pages pushed from Settings
+    data object Appearance : Route("appearance")
     data object Describe : Route("describe")
     data object Updates : Route("updates")
     data object Diagnostics : Route("diagnostics")
@@ -174,7 +176,7 @@ private sealed class Route(val key: String) {
     companion object {
         fun of(key: String): Route? = key.removePrefix("open:").toLongOrNull()?.takeIf { key.startsWith("open:") }?.let(::Open)
             ?: key.removePrefix("cleanup:").takeIf { key.startsWith("cleanup:") }?.let { Clean(it.ifEmpty { null }) }
-            ?: listOf(Albums, Places, People, PeopleReview, Trash, Search, Settings, Storage, PrivateSafe, Describe, Updates, Diagnostics, About, Licences)
+            ?: listOf(Albums, Places, People, PeopleReview, Trash, Search, Settings, Storage, PrivateSafe, HiddenItems, Appearance, Describe, Updates, Diagnostics, About, Licences)
                 .find { it.key == key }
     }
 }
@@ -268,8 +270,13 @@ private fun AlbumShell() {
     var protecting by remember { mutableStateOf<List<Media>?>(null) } // For you's ID-card photos, while asking
     var barHidden by remember { mutableStateOf(false) }
 
-    val loaded = Gallery.media.collectAsState().value
-    val media = loaded.orEmpty()
+    // Nothing shows until it's known what's in Hidden items, so none of it ever flashes up at launch
+    val hiddenItems by Hidden.state.collectAsState()
+    val loaded = Gallery.media.collectAsState().value?.takeIf { hiddenItems != null }
+    val everything = loaded.orEmpty()
+    // Every photo and video Album shows, minus Hidden items; only Hidden items' own pages see past it
+    val media = remember(everything, hiddenItems) { hiddenItems?.let { everything.withoutHidden(it) } ?: everything }
+    val privacyOpen = Safe.key.collectAsState().value != null
     val hidden by AlbumPrefs.hidden.collectAsState()
     val photos = remember(media, hidden) { media.inPhotos(hidden) } // the Library leaves out folders hidden from it
     val trash = if (access != Access.None) rememberTrash().value else null
@@ -311,6 +318,11 @@ private fun AlbumShell() {
     // Always composed: it also finishes a move into the safe that the app was closed in the middle of.
     // The selection clears only once the fingerprint is given, so a cancelled prompt leaves it as it was.
     val moveToSafe = rememberMoveToSafe(snackbar) { clearSelection() }
+    PrivacyHost(snackbar) // hide and unhide results with Undo, and the privacy lock itself
+    // Locking privacy (leaving Album, Lock now, 2 minutes after the last private thing) closes what Hidden items opened
+    LaunchedEffect(privacyOpen, hiddenItems) {
+        if (!privacyOpen) stack.removeAll { it is Route.Open && hiddenItems?.isHiddenAlbum(it.id, everything) == true }
+    }
     val cleanup by Cleanup.summary.collectAsState()
     val albumActions = rememberAlbumActions { clearSelection() }
     val addToCollection = rememberAddToCollection(snackbar)
@@ -415,6 +427,7 @@ private fun AlbumShell() {
                         onAllPeople = { push(Route.People) },
                         onReviewPeople = { push(Route.PeopleReview) },
                         onOpenSafe = { push(Route.PrivateSafe) },
+                        onOpenHidden = { push(Route.HiddenItems) },
                         onAction = albumActions::onAlbum,
                         onNewAlbum = albumActions::newAlbum,
                         onSettings = { push(Route.Settings) },
@@ -487,16 +500,24 @@ private fun AlbumShell() {
             ) {
                 routeStates.SaveableStateProvider(route.key) {
                     when (route) {
-                        is Route.Open -> AlbumPage(
-                            route, media, albums, collections, loaded != null, albumColumns,
-                            albumGrids.getOrPut(route.key) { LazyGridState() }, selected, open, select,
-                            tabPadding, gridPosition,
-                            onBack = pop,
-                            onOpenPerson = { id -> stack[stack.lastIndex] = Route.Open(id) }, // merging leaves you on the merged person
-                            selectMode = selectMode,
-                            onStartSelecting = startSelecting,
-                            report = { page = it },
-                        )
+                        is Route.Open -> {
+                            // A hidden album or person, opened from Hidden items while privacy is unlocked, shows its photos
+                            val private = privacyOpen && hiddenItems?.isHiddenAlbum(route.id, everything) == true
+                            if (private) PrivatePage()
+                            AlbumPage(
+                                route, if (private) everything else media,
+                                if (private) remember(everything) { albumsOf(everything) } else albums,
+                                collections, loaded != null, albumColumns,
+                                albumGrids.getOrPut(route.key) { LazyGridState() }, selected, open, select,
+                                tabPadding, gridPosition,
+                                onBack = pop,
+                                onOpenPerson = { id -> stack[stack.lastIndex] = Route.Open(id) }, // merging leaves you on the merged person
+                                selectMode = selectMode,
+                                onStartSelecting = startSelecting,
+                                report = { page = it },
+                            )
+                        }
+                        Route.HiddenItems -> HiddenItemsScreen(onBack = pop, onOpen = openId)
                         Route.Albums -> AllAlbumsScreen(
                             albums, collections, albumsGrid, onBack = pop, onOpen = openId,
                             onAction = albumActions::onAlbum, onNewAlbum = albumActions::newAlbum,
@@ -510,9 +531,12 @@ private fun AlbumShell() {
                         Route.PeopleReview -> PeopleReviewScreen(onBack = pop)
                         Route.Trash -> TrashScreen(trash, onBack = pop)
                         Route.Settings -> SettingsScreen(
-                            onBack = pop, columns = photosColumns, onOpenTrash = { push(Route.Trash) }, onDescribe = { push(Route.Describe) },
+                            onBack = pop, onAppearance = { push(Route.Appearance) }, onOpenTrash = { push(Route.Trash) },
+                            onHiddenItems = { push(Route.HiddenItems) }, onOpenSafe = { push(Route.PrivateSafe) },
+                            onDescribe = { push(Route.Describe) },
                             onUpdates = { push(Route.Updates) }, onDiagnostics = { push(Route.Diagnostics) }, onAbout = { push(Route.About) },
                         )
+                        Route.Appearance -> AppearanceScreen(onBack = pop, columns = photosColumns)
                         Route.Describe -> DescribeScreen(onBack = pop)
                         Route.Updates -> UpdatesScreen(onBack = pop)
                         Route.Diagnostics -> DiagnosticsScreen(onBack = pop)
@@ -627,6 +651,10 @@ private fun AlbumShell() {
                     libraryMenu = false
                     calendarOpen = true
                 },
+                onAppearance = {
+                    libraryMenu = false
+                    push(Route.Appearance)
+                },
                 onSettings = {
                     libraryMenu = false
                     push(Route.Settings)
@@ -648,7 +676,7 @@ private fun AlbumShell() {
                 confirmLabel = "Move to safe",
                 onConfirm = {
                     protecting = null
-                    moveToSafe(items)
+                    moveToSafe(items, confirmed = true) // that was the confirmation: only the PIN may still be asked for
                 },
                 onCancel = { protecting = null },
                 icon = Sym.Lock,
@@ -948,12 +976,12 @@ private fun SelectionActions(
 }
 
 @Composable
-private fun LibraryMenu(columns: Int, onDismiss: () -> Unit, onCalendar: () -> Unit, onSettings: () -> Unit) {
+private fun LibraryMenu(columns: Int, onDismiss: () -> Unit, onCalendar: () -> Unit, onAppearance: () -> Unit, onSettings: () -> Unit) {
     val a = AlbumTheme.spec.appearance
     Sheet(onDismiss = onDismiss, title = "Library") {
         MenuRow(Sym.CalendarMonth, "Jump to a date", onCalendar, sub = "Calendar with your photos on each day")
-        MenuRow(Sym.GridView, "Gallery style", onSettings, sub = "${a.gallery.label} · $columns columns")
-        MenuRow(Sym.Palette, "Appearance", onSettings, sub = "Theme, accent and look")
+        MenuRow(Sym.GridView, "Gallery style", onAppearance, sub = "${a.gallery.label} · $columns columns")
+        MenuRow(Sym.Palette, "Appearance", onAppearance, sub = "Theme, accent, font and motion")
         MenuRow(Sym.Settings, "Settings", onSettings)
     }
 }

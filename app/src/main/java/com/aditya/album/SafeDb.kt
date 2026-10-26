@@ -43,6 +43,9 @@ interface SafeDao {
     @Query("SELECT * FROM items WHERE original IS NOT NULL")
     suspend fun waiting(): List<SafeItem>
 
+    @Query("SELECT COUNT(*) FROM items WHERE original IS NULL")
+    suspend fun count(): Int
+
     @Insert
     suspend fun insert(item: SafeItem): Long
 

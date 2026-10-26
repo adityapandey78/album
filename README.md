@@ -15,6 +15,7 @@ After that, update from inside the app: **Settings → Check for updates → Upd
 
 | Version | Phase | What's in it |
 |---|---|---|
+| 1.1.0 | Stable | Privacy PIN (Album's own, fingerprint to unlock, Forgot PIN with fingerprint or screen lock) guarding the Private safe and Hidden items · hide people and albums from everywhere, Hidden items page · videos: sound button in the controls, two-finger zoom · viewer: Details in More, one Rotate mode with Save as a copy or Update original, every photo rotatable · Settings > Appearance page with a Font choice (Album, System, Inter, Nunito, Lora) · bigger icon |
 | 1.0.0 | Stable | First stable release · Clean up: select photos by hand (Select, or a long-press) and move them to Trash together, with Undo; Select all picks only what Clean up suggests, never originals or best shots |
 | 0.10.0 | 3 | People rebuilt: new on-phone face models (YuNet, EdgeFace-S) keep look-alike family members apart, "Same person?" suggestions instead of automatic merges, change a person's cover photo, a tidy row of five faces · Search finds more: labels down to 30% confidence, text read from any photo that has it, places at every level (area, city, district, state), places estimated for photos without GPS, WhatsApp dates from file names, "Top matches" first, and optional describe-it search (a one-time download, runs on the phone) · Clean up: exact copies and copies across the whole library (PDQ), similar shots without chaining, better blur and too dark or bright checks · For you split into Memories and Clean up · Settings: Updates, Diagnostics and About on pages of their own · new app icon (a stack of prints) whose sun follows your accent |
 | 0.9.1 | 3 | Organising a big library keeps going after you leave Album (a quiet "Organising your photos" notification) instead of a slice per visit; the progress card shows overall progress, so a resumed pass no longer looks like a restart |
@@ -73,10 +74,10 @@ of interpreting it on the first scrolls) and commit `app/src/release/generated/b
 ./gradlew :app:generateBaselineProfile
 ```
 
-On an emulator, compare before and after on the same setup only: run it headless (`emulator -no-window`), since macOS
+On an emulator, compare before and after on the same setup only: run it headless (`emulator -avd <AVD_NAME> -port 5560 -no-window`; `-port 5560` keeps it off 5554/5555, which a local Postgres in Docker may use), since macOS
 slows down a hidden emulator window, and give it 4 cores and the host GPU (`hw.cpu.ncore=4`, `-gpu host`).
 
-Fonts (Bricolage Grotesque, Figtree, Geist Mono) are under the SIL Open Font License, see `licenses/`.
+Fonts (Bricolage Grotesque, Figtree, Geist Mono, and the Inter, Nunito and Lora font choices from Google Fonts, built by `tools/fonts.py`) are under the SIL Open Font License, see `licenses/`.
 ML Kit telemetry is stripped by R8, so the "nothing leaves the phone" guarantee applies to release builds (the APKs in Releases), not debug builds.
 Place names come from [GeoNames](https://www.geonames.org) under CC BY 4.0, see `licenses/geonames-CC-BY-4.0.txt`.
 People finds faces with YuNet from [OpenCV Zoo](https://github.com/opencv/opencv_zoo) (MIT, see `licenses/yunet-MIT.txt`) and recognises them with EdgeFace-S by the [Idiap Research Institute](https://huggingface.co/Idiap/EdgeFace-S-GAMMA) under CC BY-NC-SA 4.0 (see `licenses/edgeface-CC-BY-NC-SA-4.0.txt`), so Album stays non-commercial while it ships this model.
