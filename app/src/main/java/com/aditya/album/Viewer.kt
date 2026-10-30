@@ -14,11 +14,15 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -28,14 +32,10 @@ import androidx.compose.foundation.MutatePriority
 import androidx.compose.foundation.MutatorMutex
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateRotation
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.draggable
-import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -48,24 +48,27 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.navigationBarsIgnoringVisibility
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsIgnoringVisibility
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerDefaults
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.GenericShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.SnackbarDuration
-import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -79,20 +82,26 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
-import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.lerp
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
@@ -103,30 +112,18 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
-import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.toSize
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.core.content.edit
+import androidx.compose.ui.util.lerp
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.exifinterface.media.ExifInterface
-import androidx.media3.common.C
-import androidx.media3.common.MediaItem
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.Player
-import androidx.media3.common.Tracks
-import androidx.media3.common.VideoSize
-import androidx.media3.exoplayer.DefaultRenderersFactory
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
-import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
@@ -134,11 +131,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import me.saket.telephoto.zoomable.DoubleClickToZoomListener
-import me.saket.telephoto.zoomable.ZoomableContentLocation
 import me.saket.telephoto.zoomable.ZoomableState
 import me.saket.telephoto.zoomable.coil3.ZoomableAsyncImage
 import me.saket.telephoto.zoomable.rememberZoomableImageState
-import me.saket.telephoto.zoomable.zoomable
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -152,8 +147,8 @@ import kotlin.math.floor
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
-/** The dock floats this far above the navigation bar (the design's 28px). */
-private val dockGap = Space.s6 + Space.s1
+/** The dock floats this far above the navigation bar (the design's 28px). The video bar sits above the dock. */
+internal val dockGap = Space.s6 + Space.s1
 
 /** Where snackbars sit over the viewer, above the navigation bar: just clear of the dock. For the shell's Undo too. */
 val viewerSnackbarGap = dockGap + Space.bar + Space.s3
@@ -167,7 +162,9 @@ internal val progressLine = 3.dp
  * More > Rotate, or a two-finger twist, opens rotate mode: the photo turns on screen and nothing is written until Save
  * (see [RotateMode]). A photo that settles on screen is read for QR codes and barcodes (see Codes); a badge opens them.
  * Panoramas get Pan, 360° photos a look-around view (see Panorama); photos of pages, Straighten document (DocumentScan).
+ * Videos bring their own bar above the dock, and hold and double-tap gestures (see VideoPage).
  */
+@OptIn(ExperimentalLayoutApi::class) // statusBarsIgnoringVisibility
 @Composable
 fun Viewer(
     items: List<Media>,
@@ -181,6 +178,7 @@ fun Viewer(
     onEditDate: ((Media) -> Unit)? = null, // Album's date fixer; no More row for it without one
     onEditPlace: ((Media) -> Unit)? = null,
     onShowOnMap: ((MapFocus) -> Unit)? = null, // the Places map, from the details sheet
+    onAddToCollection: ((Media) -> Unit)? = null, // the shell's collection picker; no More row for it without one
 ) {
     if (items.isEmpty()) {
         LaunchedEffect(Unit) { onClose() } // last photo was deleted
@@ -196,8 +194,9 @@ fun Viewer(
     val start = remember { items.indexOfFirst { it.id == startId }.coerceAtLeast(0) }
     val pager = rememberPagerState(start) { items.size }
     var chrome by remember { mutableStateOf(true) }
-    var showInfo by remember { mutableStateOf(false) }
+    var details by remember { mutableStateOf(false) } // the details sheet, the photo moved up above it
     var showMore by remember { mutableStateOf(false) }
+    var comparing by remember { mutableStateOf(false) } // More > Compare with next photo
     val confirm = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {}
     val current = items[pager.currentPage.coerceAtMost(items.lastIndex)]
     val scope = rememberCoroutineScope()
@@ -237,26 +236,51 @@ fun Viewer(
     var lookingAround by remember(current.id) { mutableStateOf(false) }
     // Straighten document, from More: over everything until Discard or Save
     var scan by remember { mutableStateOf<DocumentScan?>(null) }
-    // Videos play with sound unless it was turned off on one: then the next ones stay muted, after a restart too
-    val prefs = remember(context) { context.getSharedPreferences("settings", Context.MODE_PRIVATE) }
-    var videoMuted by remember { mutableStateOf(prefs.getBoolean(VIDEO_MUTED, false)) }
+    // Videos start as Settings says (Start videos muted, on unless turned off); the speaker then carries over to the next
+    // video until the viewer closes
+    var videoMuted by remember { mutableStateOf(PlayPrefs.startMuted.get(context)) }
+    val motionHold = remember { PlayPrefs.motionHold.get(context) } // Play motion photos on hold
 
     // Opening and closing fly the photo between its grid cell and its full-screen place: 0 = in the cell, 1 = full screen.
-    // The square cell crop grows into the whole photo (ContentScale.Crop on a rect that changes shape), so nothing stretches.
-    // With Remove animations the photo appears in place instead.
-    val fly = remember { Animatable(if (openFrom != null && !still) 0f else 1f) }
+    // The square cell crop grows into the whole photo (ContentScale.Crop on a rect that changes shape), so nothing stretches,
+    // and its corners straighten as it lands. Without a cell it grows a little as it fades in, and shrinks as it fades out.
+    // With Remove animations the photo appears in place instead; so does a file from another app, which has no thumbnail.
+    val fly = remember { Animatable(if (still || external) 1f else 0f) }
     var cell by remember { mutableStateOf(openFrom) }
     var closing by remember { mutableStateOf(false) }
     var screen by remember { mutableStateOf(Size.Zero) }
     val flying by remember { derivedStateOf { fly.value < 1f || closing } }
     LaunchedEffect(Unit) { fly.animateTo(1f, flight) }
 
-    // Vertical swipe on an unzoomed page: down closes, up opens details. One offset (px) shared by all pages.
+    // Details: the photo moves up and shrinks into the top 40% ([band]: 0 full screen, 1 up there) as the sheet slides up
+    // under it ([sheetDown]: 1 hidden, 0 open), together, with nothing dimmed. The dock and the video bar make way.
+    val band = remember { Animatable(0f) }
+    val sheetDown = remember { Animatable(1f) }
+    LaunchedEffect(details) {
+        val to = if (still) snap<Float>() else tween(360, easing = viewerEase)
+        launch { band.animateTo(if (details) 1f else 0f, to) }
+        sheetDown.animateTo(if (details) 0f else 1f, to)
+    }
+    // Where the band starts: under the top bar's buttons, measured as if the status bar showed so it never moves
+    val bandTop = WindowInsets.statusBarsIgnoringVisibility.getTop(density) + with(density) { 56.dp.toPx() }
+    var sheetHeight by remember { mutableFloatStateOf(1f) }
+
+    // Vertical swipes on an unzoomed page. Down pulls the photo to close it: it follows the finger (sideways at 0.6),
+    // shrinks, rounds its corners, and the black thins out. Up brings Details up from the bottom; with Details open, down
+    // takes it away. Offsets in px, shared by all pages, read only in layout, draw and layer blocks, so dragging never
+    // recomposes.
+    var dragX by remember { mutableFloatStateOf(0f) }
     var dragY by remember { mutableFloatStateOf(0f) }
-    val drag = rememberDraggableState { dragY += it }
-    // 0 at rest, 1 once pulled 360 dp down. Only read inside draw and layer blocks, so dragging never recomposes.
-    val pulled = { (dragY / with(density) { 360.dp.toPx() }).coerceIn(0f, 1f) }
+    var pulling by remember { mutableStateOf(false) } // pulled down to close: the bars go at once
+    var settle by remember { mutableStateOf<Job?>(null) } // springing back, until a new touch takes over
+    val pulled = { if (details) 0f else dragY.coerceAtLeast(0f) } // how far the photo itself is pulled down
+    val pullScale = { (1f - pulled() / with(density) { 900.dp.toPx() }).coerceAtLeast(0.65f) }
+    val backdrop = { (1f - pulled() / with(density) { 380.dp.toPx() }).coerceAtLeast(0f) }
+    // Up, Details shows a little of itself: all of it by 320dp
+    val peek = { (1f + dragY.coerceAtMost(0f) / with(density) { 320.dp.toPx() }).coerceAtLeast(0f) }
+    val sheetShown by remember { derivedStateOf { details || sheetDown.value < 1f || dragY < 0f } }
     val close = {
+        details = false // the sheet slides away as the photo flies back
         if (still) {
             onClose() // disappears from where the finger left it, without flying back
         } else if (!closing) {
@@ -268,17 +292,76 @@ fun Viewer(
             }
         }
     }
-    val release: suspend CoroutineScope.(Float) -> Unit = { velocity ->
-        val swipe = with(density) { swipeOf(dragY, velocity, distance = 96.dp.toPx(), speed = 1000.dp.toPx()) }
-        if (swipe != Swipe.None) CrashLog.note("swipe ${swipe.name.lowercase()}")
-        if (swipe == Swipe.Close) {
-            close() // flies back to its cell from where the finger left it
-        } else {
-            if (swipe == Swipe.Details) showInfo = true
-            // spring back inside drag() so a new touch interrupts it instead of fighting it
-            drag.drag { animate(dragY, 0f, velocity) { value, _ -> dragBy(value - dragY) } }
+    fun springBack() {
+        settle = scope.launch {
+            val to = if (still) snap<Float>() else tween(360, easing = viewerEase)
+            launch { animate(dragX, 0f, animationSpec = to) { value, _ -> dragX = value } }
+            animate(dragY, 0f, animationSpec = to) { value, _ -> dragY = value }
         }
     }
+    val closeDistance = with(density) { 120.dp.toPx() }
+    val swipeMove = { dx: Float, dy: Float, down: Boolean ->
+        when {
+            details -> dragY = dy.coerceAtLeast(0f) // Details follows the finger down
+            down -> {
+                pulling = true
+                if (dragY < closeDistance && dy >= closeDistance) haptics.tick() // let go now and it closes
+                dragX = dx * 0.6f
+                dragY = dy.coerceAtLeast(0f)
+            }
+            else -> dragY = dy.coerceAtMost(0f) // Details peeks up; the photo stays put
+        }
+    }
+    // Down closes past 120dp, up opens Details past 60dp, and down takes it away past 60dp; or a quick flick
+    val swipeEnd = { velocity: Float ->
+        pulling = false
+        val swipe = with(density) { swipeOf(dragY, velocity, distance = if (pulled() > 0f) closeDistance else 60.dp.toPx(), speed = 1000.dp.toPx()) }
+        if (swipe != Swipe.None) CrashLog.note("swipe ${swipe.name.lowercase()}")
+        when {
+            details && swipe == Swipe.Close -> scope.launch {
+                sheetDown.snapTo((dragY / sheetHeight).coerceIn(0f, 1f)) // it goes on from where the finger left it
+                dragY = 0f
+                details = false
+            }
+            details -> springBack()
+            swipe == Swipe.Close -> close() // flies back to its cell from where the finger left it
+            swipe == Swipe.Details -> scope.launch {
+                sheetDown.snapTo(peek())
+                dragY = 0f
+                details = true
+            }
+            else -> springBack()
+        }
+    }
+    val onSwipeMove by rememberUpdatedState(swipeMove)
+    val onSwipeEnd by rememberUpdatedState(swipeEnd)
+    // The sheet's own scroll: pulled down at its top, it goes down with the finger and then away past 60dp, or back up
+    val sheetDrag = remember {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (!details || dragY <= 0f || available.y >= 0f) return Offset.Zero
+                val back = maxOf(available.y, -dragY) // pushed back up: the sheet rises before its rows scroll
+                dragY += back
+                return Offset(0f, back)
+            }
+
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                if (!details || source != NestedScrollSource.UserInput || available.y <= 0f) return Offset.Zero
+                settle?.cancel()
+                dragY += available.y
+                return Offset(0f, available.y)
+            }
+
+            override suspend fun onPreFling(available: Velocity): Velocity {
+                if (!details || dragY <= 0f) return Velocity.Zero
+                onSwipeEnd(available.y)
+                return available
+            }
+        }
+    }
+    // A live photo grows a little while it's held, as in the design
+    var liveHeld by remember { mutableStateOf(false) }
+    val liveZoom by animateFloatAsState(if (liveHeld && !still) 1.05f else 1f, if (liveHeld && !still) tween(1400, easing = LinearOutSlowInEasing) else snap(), label = "live")
 
     // Rotate mode, from More > Rotate or a twist: the photo turns on screen, and nothing is written until Save
     var rotating by remember { mutableStateOf<RotateMode?>(null) }
@@ -420,6 +503,8 @@ fun Viewer(
     }
 
     BackHandler(onBack = close)
+    BackHandler(enabled = details) { details = false }
+    BackHandler(enabled = comparing) { comparing = false }
     BackHandler(enabled = lensOn) { lensOn = false }
     // Leaves rotate mode without saving; while saving, Back waits for it
     BackHandler(enabled = rotating != null) { if (rotating?.saving == false) leaveRotate() }
@@ -438,12 +523,15 @@ fun Viewer(
     Box(
         Modifier.fillMaxSize()
             .onSizeChanged { screen = it.toSize() }
-            .drawBehind { drawRect(c.void, alpha = (1f - pulled()) * fly.value) },
+            .drawBehind { drawRect(c.void, alpha = backdrop() * fly.value) },
     ) {
         HorizontalPager(
             pager,
             // composed from the start so the full photo loads during the flight, shown once it lands
             Modifier.fillMaxSize().graphicsLayer { alpha = if (flying) 0f else 1f },
+            // 16dp between photos; a swipe past a fifth of the width turns the page
+            pageSpacing = Space.s4,
+            flingBehavior = PagerDefaults.flingBehavior(pager, snapPositionalThreshold = 0.2f, snapAnimationSpec = if (still) snap() else tween(360, easing = viewerEase)),
             beyondViewportPageCount = 1,
             // a turned photo is saved or turned back first; a panorama being panned stays put at its ends
             userScrollEnabled = lens == null && !twisting && rotating == null && !tilted && !panning,
@@ -464,14 +552,23 @@ fun Viewer(
             val inRotate = rotating?.m?.id == m.id
             // Rotate mode shows the whole photo: a zoomed one zooms back out
             LaunchedEffect(inRotate) { if (inRotate) zoom.zoomableState.resetZoom(if (still) snap() else spring()) }
-            val canTwist = settled && turnable && !m.isVideo && !external && !flying && pageLens == null && rotating?.saving != true && !askSave && !panning
+            val canTwist = settled && turnable && !m.isVideo && !external && !flying && pageLens == null && rotating?.saving != true && !askSave && !panning && !details
             // Pan: the panorama fills the screen (Telephoto crops it to fit, then pans it) and drags no longer close it
             val panned = panning && m.id == current.id
             LaunchedEffect(panned) { zoom.zoomableState.resetZoom(snap()) } // Pan starts on the whole crop, and leaving it on the whole photo
+            LaunchedEffect(details) { if (details) zoom.zoomableState.resetZoom(snap()) } // Details shows the whole photo
+            val live = motion != null && m.id == current.id && !still && motionHold
+            // The pulled photo's corners round to the tiles' (none with square tiles)
+            val corner = with(density) { AlbumTheme.spec.tileCorner.toPx() }
+            val rounded = remember(m.width, m.height, corner) { GenericShape { box, _ -> addRoundRect(RoundRect(fitRect(m.width, m.height, box), CornerRadius(corner))) } }
             Box(
                 Modifier.fillMaxSize()
-                    // before graphicsLayer, so drag deltas are measured on screen and not inside the moving page
-                    .draggable(drag, Orientation.Vertical, enabled = settled && !zoomed && !twisting && lens == null && rotating == null && !tilted && !panned, onDragStopped = release)
+                    // before graphicsLayer, so drag offsets are measured on screen and not inside the moving page
+                    .then(
+                        if (!settled || zoomed || twisting || lens != null || rotating != null || tilted || panned) Modifier
+                        else Modifier.verticalSwipe(onStart = { settle?.cancel() }, onMove = { dx, dy, down -> onSwipeMove(dx, dy, down) }, onEnd = { onSwipeEnd(it) }),
+                    )
+                    .then(if (!live) Modifier else Modifier.held { liveHeld = it })
                     .then(
                         if (!canTwist) Modifier else Modifier.twistGesture(angle, onTwist = { turned ->
                             val shown = twistAngle(turned)
@@ -489,14 +586,28 @@ fun Viewer(
                     )
                     .then(if (pageLens == null) Modifier else Modifier.lensSelection(pageLens, { zoom.zoomableState.transformedContentBounds }, haptics))
                     .graphicsLayer {
+                        // Every page sits in Details' band while it's open, so a swipe brings the next photo in there too
+                        val inBand = band.value
+                        var shrink = 1f
+                        if (inBand > 0f) {
+                            val full = fitRect(m.width, m.height, size)
+                            val to = bandRect(m.width, m.height, size, bandTop)
+                            shrink = lerp(1f, minOf(to.width / full.width, to.height / full.height), inBand)
+                            translationY = (to.center.y - full.center.y) * inBand
+                        }
+                        scaleX = shrink
+                        scaleY = shrink
                         if (!settled) return@graphicsLayer
-                        translationY = dragY
+                        translationX = if (pulled() > 0f) dragX else 0f
+                        translationY += pulled()
                         val turned = if (turnable) angle.floatValue else 0f
                         // turned, it shrinks to fit (or grows), ending at the size it has once rotated for real
                         val fit = if (turned == 0f) 1f else twistScale(fitRect(m.width, m.height, size).size, size, turned)
                         rotationZ = turned
-                        scaleX = (1f - 0.25f * pulled()) * fit
+                        scaleX = shrink * pullScale() * fit * (if (live) liveZoom else 1f)
                         scaleY = scaleX
+                        clip = pulled() > 0f && corner > 0f
+                        shape = rounded
                     },
             ) {
                 if (m.isVideo) {
@@ -510,17 +621,13 @@ fun Viewer(
                         onSound = {
                             videoMuted = !videoMuted
                             CrashLog.note("video sound ${if (videoMuted) "off" else "on"}")
-                            prefs.edit { putBoolean(VIDEO_MUTED, videoMuted) }
                         },
                         onTap = { chrome = !chrome },
                         onHideChrome = { chrome = false },
+                        bar = !details && !pulling,
                     )
                 } else {
-                    // the grid's thumbnail (same Coil memory-cache key, see ThumbKeyer) shows until the full photo is ready
-                    val request = remember(m.uri, editVersion(m.uri)) {
-                        if (isRaw(m.name)) ImageRequest.Builder(context).raw(m.uri, thumb = false).placeholderMemoryCacheKey(rawThumbKey(m.uri)).build()
-                        else ImageRequest.Builder(context).data(m.uri).placeholderMemoryCacheKey("${m.uri}#${editVersion(m.uri)}").build()
-                    }
+                    val request = remember(m.uri, editVersion(m.uri)) { fullPhoto(context, m) }
                     val video = motion?.takeIf { m.id == current.id }
                     key(editVersion(m.uri)) { // rebuilt after an edit, like reopening the photo, so nothing stale is drawn
                     ZoomableAsyncImage(
@@ -531,7 +638,7 @@ fun Viewer(
                         contentScale = if (panned) ContentScale.Crop else ContentScale.Fit,
                         onClick = { if (pageLens != null) pageLens.selection = null else chrome = !chrome },
                         onDoubleClick = doubleTap,
-                        onLongClick = video?.takeIf { pageLens == null }?.let {
+                        onLongClick = video?.takeIf { pageLens == null && motionHold }?.let {
                             { _: Offset ->
                                 CrashLog.note("motion play (hold)")
                                 haptics.longPress()
@@ -555,27 +662,44 @@ fun Viewer(
             val thumb = remember(m.id, px) {
                 (if (isRaw(m.name)) ImageRequest.Builder(context).raw(m.uri, thumb = true) else ImageRequest.Builder(context).data(Thumb(m.uri))).size(px, px).build()
             }
+            val tile = AlbumTheme.spec.tileCorner
             AsyncImage(
                 thumb,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier
                     .layout { measurable, constraints ->
-                        // read only here (layout phase), so the flight relayouts each frame without recomposing
-                        val full = fitRect(m.width, m.height, screen).pulled(dragY, 1f - 0.25f * pulled())
-                        val r = cell?.let { lerp(it, full, fly.value) } ?: full
+                        // read only here (layout phase), so the flight relayouts each frame without recomposing; from where
+                        // the photo is shown, in Details' band or pulled down
+                        val shown = lerp(fitRect(m.width, m.height, screen), bandRect(m.width, m.height, screen, bandTop), band.value)
+                            .pulled(pulled(), pullScale(), dragX)
+                        val r = cell?.let { lerp(it, shown, fly.value) } ?: shown
                         val placeable = measurable.measure(Constraints.fixed(r.width.roundToInt().coerceAtLeast(1), r.height.roundToInt().coerceAtLeast(1)))
                         layout(constraints.maxWidth, constraints.maxHeight) { placeable.place(r.left.roundToInt(), r.top.roundToInt()) }
                     }
-                    .graphicsLayer { alpha = if (cell == null) fly.value else 1f }, // no cell to land in: fade out instead
+                    .graphicsLayer {
+                        // a photo pulled down keeps its rounded corners all the way back
+                        shape = RoundedCornerShape(if (pulled() > 0f) tile else androidx.compose.ui.unit.lerp(tile, 0.dp, fly.value))
+                        clip = true
+                        if (cell == null) { // no cell to land in: it fades and grows in, and shrinks as it fades out
+                            alpha = fly.value
+                            scaleX = 0.92f + 0.08f * fly.value
+                            scaleY = scaleX
+                        }
+                    },
             )
         }
 
-        val fade = Modifier.graphicsLayer { alpha = 1f - pulled() }
         if (lookingAround && sphere != null) SphereView(current, sphere, onClose = { lookingAround = false })
 
-        val bars = chrome && !flying && lens == null && rotating == null && !lookingAround && scan == null
-        AnimatedVisibility(bars, Modifier.align(Alignment.TopCenter).then(fade), enter = fadeIn(), exit = fadeOut()) {
+        // The top bar and the dock fade in as the photo starts flying in, and out as it flies back. A pull down hides them at
+        // once; Details keeps the top bar and sends the dock away.
+        val bars = chrome && !closing && lens == null && rotating == null && !lookingAround && scan == null && !comparing && !pulling
+        val topShown = remember { MutableTransitionState(false) }.apply { targetState = bars }
+        val dockShown = remember { MutableTransitionState(false) }.apply { targetState = bars && !details }
+        val barIn = if (still) EnterTransition.None else fadeIn(tween(200))
+        val barOut = if (still) ExitTransition.None else fadeOut(tween(200))
+        AnimatedVisibility(topShown, Modifier.align(Alignment.TopCenter), enter = barIn, exit = barOut) {
             Row(
                 Modifier.fillMaxWidth()
                     .background(Brush.verticalGradient(listOf(c.scrimPhoto, Color.Transparent)))
@@ -618,7 +742,7 @@ fun Viewer(
                         panning = !panning
                     }
                 }
-                // A motion photo's sound, while it plays. A video's is with its own controls (see VideoPage).
+                // A motion photo's sound, while it plays. A video's is in its own bar (see VideoPage).
                 if (playMotion) {
                     AlbumIconButton(
                         if (motionMuted) Sym.VolumeOff else Sym.VolumeUp,
@@ -634,7 +758,7 @@ fun Viewer(
             }
         }
 
-        AnimatedVisibility(bars, Modifier.align(Alignment.BottomCenter).then(fade), enter = fadeIn(), exit = fadeOut()) {
+        AnimatedVisibility(dockShown, Modifier.align(Alignment.BottomCenter), enter = barIn, exit = barOut) {
             Row(
                 Modifier.navigationBarsPadding().padding(bottom = dockGap).height(Space.bar).floating().padding(horizontal = Space.s2),
                 horizontalArrangement = Arrangement.spacedBy(Space.s1),
@@ -642,7 +766,7 @@ fun Viewer(
             ) {
                 AlbumIconButton(Sym.Share, "Share", {
                     CrashLog.note("share 1")
-                    context.startActivity(shareIntent(listOf(current)))
+                    shareMedia(context, listOf(current))
                 })
                 if (!external) {
                     AlbumIconButton(
@@ -656,7 +780,7 @@ fun Viewer(
                         active = current.isFavorite,
                     )
                 }
-                AlbumIconButton(Sym.Edit, "Edit", { edit(current) })
+                AlbumIconButton(Sym.Tune, "Edit", { edit(current) })
                 if (!external) {
                     onTrash?.let { trash ->
                         AlbumIconButton(Sym.Delete, "Move to trash", {
@@ -666,7 +790,7 @@ fun Viewer(
                     }
                 }
                 // Last, as in the design: Details first inside, then what's used less often
-                AlbumIconButton(Sym.MoreVert, "More", {
+                AlbumIconButton(Sym.MoreHoriz, "More", {
                     CrashLog.note("more")
                     showMore = true
                 })
@@ -692,6 +816,34 @@ fun Viewer(
             }
         }
 
+        if (sheetShown) {
+            val m = current
+            InfoSheet(
+                m,
+                placeOf[m.id],
+                onShowOnMap.takeUnless { external },
+                onFixDate = onEditDate?.takeUnless { external }?.let { edit ->
+                    {
+                        details = false
+                        edit(m)
+                    }
+                },
+                Modifier.align(Alignment.BottomCenter)
+                    .heightIn(max = with(density) { (screen.height * 0.6f).toDp() })
+                    .onSizeChanged { sheetHeight = it.height.toFloat().coerceAtLeast(1f) }
+                    .graphicsLayer {
+                        val hidden = when {
+                            details -> sheetDown.value + dragY.coerceAtLeast(0f) / size.height
+                            else -> minOf(sheetDown.value, peek())
+                        }
+                        translationY = size.height * hidden.coerceIn(0f, 1f)
+                    }
+                    .nestedScroll(sheetDrag),
+            )
+        }
+
+        if (comparing) items.getOrNull(pager.currentPage + 1)?.let { next -> CompareView(current, next, onClose = { comparing = false }) }
+
         if (lens != null) {
             TextLensBar(onClose = { lensOn = false }, Modifier.align(Alignment.TopCenter))
             TextLensPanel(lens, onCopied = { say("Copied") }, onLink = { showCodes = listOf(it) }, Modifier.align(Alignment.BottomCenter).onSizeChanged { lensPanel = it.height })
@@ -706,9 +858,8 @@ fun Viewer(
 
         val above = if (lens != null || scan != null) Modifier.padding(bottom = with(density) { lensPanel.toDp() } + Space.s3)
         else Modifier.navigationBarsPadding().padding(bottom = viewerSnackbarGap)
-        SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).then(above)) { AlbumSnackbar(it) }
+        AlbumSnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).then(above), overViewer = true)
     }
-    if (showInfo) InfoSheet(current, placeOf[current.id], onShowOnMap.takeUnless { external }) { showInfo = false }
     if (showMore) {
         val title = if (current.taken > 0) "${dayTitle(current.day)} · ${clock(current.taken)}" else current.name
         val m = current
@@ -718,13 +869,22 @@ fun Viewer(
             external,
             onDetails = {
                 CrashLog.note("details")
-                showInfo = true
+                details = true
+            },
+            // the next photo along, when both are photos
+            onCompare = items.getOrNull(pager.currentPage + 1)?.takeIf { !it.isVideo && !m.isVideo && !external }?.let {
+                {
+                    CrashLog.note("compare")
+                    chrome = true // its bar sits under the status bar
+                    comparing = true
+                }
             },
             onText = {
                 CrashLog.note("text lens")
                 chrome = true
                 lensOn = true
             },
+            onAddToCollection = onAddToCollection?.let { add -> { add(m) } },
             onRotate = { startRotate(m, 0) },
             onStraighten = {
                 CrashLog.note("straighten")
@@ -755,9 +915,10 @@ fun Viewer(
 }
 
 /**
- * The viewer's More sheet: Details first, then actions used less often than the dock's. Text, Rotate and Use as are for
- * photos in Album only; a file from another app ([external]) has Details alone. Straighten document only shows for what
- * may be a page (see mayBePage).
+ * The viewer's More sheet, in the design's order: Details, Add to collection, Rotate, Compare with next photo ([onCompare],
+ * when the next one is a photo too), Move to Private safe and Copy text from photo; then what only Album has. Rotate,
+ * Compare, Copy text and Use as are for photos in Album only; a file from another app ([external]) has Details alone.
+ * Straighten document only shows for what may be a page (see mayBePage).
  */
 @Composable
 private fun MoreSheet(
@@ -765,6 +926,8 @@ private fun MoreSheet(
     title: String,
     external: Boolean,
     onDetails: () -> Unit,
+    onCompare: (() -> Unit)?,
+    onAddToCollection: (() -> Unit)?,
     onText: () -> Unit,
     onRotate: () -> Unit,
     onStraighten: () -> Unit,
@@ -781,12 +944,21 @@ private fun MoreSheet(
             onDismiss()
             action()
         }
-        MenuRow(Sym.Info, "Details", closing(onDetails), sub = "Camera, place and file. Or swipe up")
-        if (!m.isVideo && !external) {
+        MenuRow(Sym.Info, "Details", closing(onDetails), sub = "Date, place, camera and file")
+        if (!external) {
+            onAddToCollection?.let { MenuRow(Sym.Add, "Add to collection", closing(it)) }
+        }
+        val photo = !m.isVideo && !external
+        if (photo) {
+            // In place where the file can say how it's turned (no quality lost), otherwise a copy
+            MenuRow(Sym.RotateRight, "Rotate", closing(onRotate), sub = "Lossless where possible")
+            onCompare?.let { MenuRow(Sym.Compare, "Compare with next photo", closing(it)) }
+        }
+        onMoveToSafe?.let { MenuRow(Sym.Lock, "Move to Private safe", closing(it)) }
+        if (photo) {
             // Read on the phone, offline: nothing leaves it
-            MenuRow(Sym.TextFields, "Text", closing(onText), sub = "Select and copy words in this photo")
+            MenuRow(Sym.ContentCopy, "Copy text from photo", closing(onText))
             if (page) MenuRow(Sym.Description, "Straighten document", closing(onStraighten), sub = "A flat copy of just the page")
-            MenuRow(Sym.RotateRight, "Rotate", closing(onRotate), sub = "Or twist the photo with two fingers")
             MenuRow(Sym.Wallpaper, "Use as", closing {
                 CrashLog.note("use as")
                 // Wallpaper, contact photo and the like. Some of those apps read the type from the "mimeType" extra.
@@ -801,9 +973,50 @@ private fun MoreSheet(
             onEditDate?.let { MenuRow(Sym.Schedule, "Edit date and time", closing(it), sub = "For a photo saved with the wrong date") }
             onEditPlace?.let { MenuRow(Sym.LocationOn, "Edit place", closing(it), sub = "Set where it was taken, or remove it") }
         }
-        onMoveToSafe?.let { MenuRow(Sym.Lock, "Move to Private safe", closing(it)) }
     }
 }
+
+/**
+ * Compare with next photo: this one above the next (side by side when the screen is wider than tall), each fitted to its
+ * half and zooming on its own, under a bar with Back.
+ */
+@Composable
+private fun CompareView(a: Media, b: Media, onClose: () -> Unit) {
+    val c = AlbumTheme.colors
+    val context = LocalContext.current
+    @Composable
+    fun Half(m: Media, modifier: Modifier) {
+        val request = remember(m.uri, editVersion(m.uri)) { fullPhoto(context, m) }
+        ZoomableAsyncImage(request, m.name, modifier.fillMaxSize().clipToBounds(), state = rememberZoomableImageState(), contentScale = ContentScale.Fit)
+    }
+    BoxWithConstraints(Modifier.fillMaxSize().background(c.void).pointerInput(Unit) {}) {
+        val halves = Modifier.fillMaxSize().statusBarsPadding().padding(top = Space.target + Space.s2).navigationBarsPadding()
+        if (maxWidth > maxHeight) {
+            Row(halves, horizontalArrangement = Arrangement.spacedBy(Space.s1)) {
+                Half(a, Modifier.weight(1f))
+                Half(b, Modifier.weight(1f))
+            }
+        } else {
+            Column(halves, verticalArrangement = Arrangement.spacedBy(Space.s1)) {
+                Half(a, Modifier.weight(1f))
+                Half(b, Modifier.weight(1f))
+            }
+        }
+        Row(
+            Modifier.fillMaxWidth().statusBarsPadding().padding(start = Space.s2, end = Space.s2, top = Space.s1),
+            horizontalArrangement = Arrangement.spacedBy(Space.s2),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            AlbumIconButton(Sym.ArrowBack, "Back", onClose, variant = IconButtonVariant.Photo)
+            Text("Compare with next photo", style = AlbumTheme.type.label, color = c.onPhoto)
+        }
+    }
+}
+
+/** The whole photo, for the viewer: the grid's thumbnail (same Coil memory-cache key, see ThumbKeyer) shows until it's ready. */
+private fun fullPhoto(context: Context, m: Media): ImageRequest =
+    if (isRaw(m.name)) ImageRequest.Builder(context).raw(m.uri, thumb = false).placeholderMemoryCacheKey(rawThumbKey(m.uri)).build()
+    else ImageRequest.Builder(context).data(m.uri).placeholderMemoryCacheKey("${m.uri}#${editVersion(m.uri)}").build()
 
 /**
  * A badge in the viewer's top bar that does something, as the Live badge plays: the badge itself is small, its touch
@@ -819,7 +1032,10 @@ private fun HeaderBadge(text: String, icon: Sym, clickLabel: String, active: Boo
     ) { Badge(text, tone = if (active == true) BadgeTone.Flash else BadgeTone.Photo, icon = icon) }
 }
 
-private val flight = tween<Float>(durationMillis = 280, easing = FastOutSlowInEasing)
+/** The design's curve for the viewer: the photo flying, Details, paging, letting go. Quick to start, gentle to land. */
+internal val viewerEase = CubicBezierEasing(0.2f, 0.9f, 0.25f, 1f)
+
+private val flight = tween<Float>(durationMillis = 360, easing = viewerEase)
 
 /** Where a [width] x [height] photo sits when fitted, centred, inside [box]. Unknown dimensions fill the box. */
 fun fitRect(width: Int, height: Int, box: Size): Rect {
@@ -829,9 +1045,54 @@ fun fitRect(width: Int, height: Int, box: Size): Rect {
     return Rect(Offset((box.width - size.width) / 2, (box.height - size.height) / 2), size)
 }
 
-/** This rect as the swipe-down gesture draws it: scaled by [scale] around its centre, then moved down by [dy]. */
-fun Rect.pulled(dy: Float, scale: Float): Rect =
-    Rect(center.x - width * scale / 2, center.y - height * scale / 2 + dy, center.x + width * scale / 2, center.y + height * scale / 2 + dy)
+/** This rect as the swipe-down gesture draws it: scaled by [scale] around its centre, then moved by [dx] and [dy]. */
+fun Rect.pulled(dy: Float, scale: Float, dx: Float = 0f): Rect =
+    Rect(center.x - width * scale / 2 + dx, center.y - height * scale / 2 + dy, center.x + width * scale / 2 + dx, center.y + height * scale / 2 + dy)
+
+/**
+ * Where a [width] x [height] photo sits while Details is open: fitted into the top 40% of [box] from [top] down, full
+ * width at most, centred in that band.
+ */
+fun bandRect(width: Int, height: Int, box: Size, top: Float): Rect = fitRect(width, height, Size(box.width, box.height * 0.4f)).translate(0f, top)
+
+/**
+ * A vertical drag: [onMove] gets how far the finger is from where the drag started (px, both ways) and whether it set off
+ * downwards; [onEnd] its speed (px per second, down positive) when it lifts. A sideways drag is left to the pager.
+ */
+private fun Modifier.verticalSwipe(onStart: () -> Unit, onMove: (dx: Float, dy: Float, down: Boolean) -> Unit, onEnd: (Float) -> Unit) = pointerInput(Unit) {
+    val velocity = VelocityTracker()
+    var from = Offset.Zero
+    var down: Boolean? = null
+    detectVerticalDragGestures(
+        onDragStart = {
+            from = it
+            down = null
+            velocity.resetTracking()
+            onStart()
+        },
+        onDragEnd = { onEnd(velocity.calculateVelocity().y) },
+        onDragCancel = { onEnd(0f) },
+    ) { change, amount ->
+        velocity.addPosition(change.uptimeMillis, change.position)
+        val way = down ?: (amount > 0f).also { down = it }
+        onMove(change.position.x - from.x, change.position.y - from.y, way)
+    }
+}
+
+/** [onHeld] gets true while a finger is down, false once all have lifted. It watches touches before the photo does, and takes none. */
+private fun Modifier.held(onHeld: (Boolean) -> Unit) = pointerInput(Unit) {
+    awaitEachGesture {
+        awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+        onHeld(true)
+        try {
+            do {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+            } while (event.changes.any { it.pressed })
+        } finally {
+            onHeld(false)
+        }
+    }
+}
 
 /** What a released vertical swipe on an unzoomed page does. */
 enum class Swipe { None, Close, Details }
@@ -924,192 +1185,6 @@ private object InstantDoubleTapZoom : DoubleClickToZoomListener {
 
 // ---------- Video ----------
 
-/** The player's own controls used to hide this long into playback; the viewer's chrome does the same. */
-private const val CONTROLS_MS = 5_000L
-
-/** The "settings" prefs key that remembers videos were muted. */
-private const val VIDEO_MUTED = "video_muted"
-
-/**
- * Plays only while it's the settled page; the player is released as soon as you swipe away. Tapping toggles the chrome;
- * with it comes a big play/pause in the middle. Always there: a progress line in flash along the video's bottom edge,
- * which seeks when dragged or tapped, and above its end the sound button ([muted], [onSound]), unless the video is silent.
- * The picture zooms as a photo does ([zoom], the page's, and [doubleTap]); the controls stay as they are.
- */
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun VideoPage(
-    m: Media,
-    active: Boolean,
-    chrome: Boolean,
-    zoom: ZoomableState,
-    doubleTap: DoubleClickToZoomListener,
-    muted: Boolean,
-    onSound: () -> Unit,
-    onTap: () -> Unit,
-    onHideChrome: () -> Unit,
-) {
-    if (!active) {
-        AsyncImage(Thumb(m.uri), null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
-        return
-    }
-    val context = LocalContext.current
-    val c = AlbumTheme.colors
-    // Hardware decoders occasionally choke on odd files; if that happens, retry once with the software decoder.
-    var softwareOnly by remember(m.id) { mutableStateOf(false) }
-    var failed by remember(m.id) { mutableStateOf(false) }
-    var playing by remember(m.id) { mutableStateOf(true) } // wants to play: paused and finished are both false
-    // As shown: the player turns sideways-stored phone videos upright, which MediaStore's width and height may not say
-    var shape by remember(m.id) { mutableStateOf(m.width to m.height) }
-    var hasSound by remember(m.id) { mutableStateOf(false) } // known once the player has read the file's tracks
-    val player = remember(m.id, softwareOnly) {
-        val renderers = DefaultRenderersFactory(context).setEnableDecoderFallback(true)
-        if (softwareOnly) {
-            renderers.setMediaCodecSelector { mime, secure, tunneling ->
-                MediaCodecSelector.DEFAULT.getDecoderInfos(mime, secure, tunneling).filter { it.softwareOnly }
-            }
-        }
-        ExoPlayer.Builder(context, renderers).build().apply {
-            addListener(object : Player.Listener {
-                override fun onEvents(player: Player, events: Player.Events) {
-                    playing = player.playWhenReady && player.playbackState != Player.STATE_ENDED
-                }
-
-                override fun onVideoSizeChanged(videoSize: VideoSize) {
-                    if (videoSize.width > 0) shape = (videoSize.width * videoSize.pixelWidthHeightRatio).roundToInt() to videoSize.height
-                }
-
-                override fun onTracksChanged(tracks: Tracks) {
-                    hasSound = tracks.containsType(C.TRACK_TYPE_AUDIO)
-                }
-
-                override fun onPlayerError(error: PlaybackException) {
-                    CrashLog.note("video error ${error.errorCodeName} (software=$softwareOnly): ${error.cause?.message}")
-                    val decoderProblem = error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED ||
-                        error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED
-                    if (decoderProblem && !softwareOnly) softwareOnly = true else failed = true
-                }
-            })
-            setMediaItem(MediaItem.fromUri(m.uri))
-            prepare()
-            playWhenReady = true
-        }
-    }
-    SideEffect { player.volume = if (muted) 0f else 1f }
-    DisposableEffect(player) { onDispose { player.release() } }
-    LaunchedEffect(chrome, playing) {
-        if (chrome && playing) {
-            delay(CONTROLS_MS)
-            onHideChrome()
-        }
-    }
-    // 0 to 1. Updated every frame while playing, but read only while drawing the line, so playback never recomposes.
-    val progress = remember(m.id) { mutableFloatStateOf(0f) }
-    val length = { player.duration.takeIf { it != C.TIME_UNSET && it > 0 } ?: m.durationMs }
-    LaunchedEffect(player, playing) {
-        while (true) {
-            val total = length()
-            if (total > 0) progress.floatValue = (player.currentPosition.toFloat() / total).coerceIn(0f, 1f)
-            if (!playing) break
-            withFrameMillis { }
-        }
-    }
-    val seek = { fraction: Float ->
-        val total = length()
-        if (total > 0) {
-            player.seekTo((fraction * total).toLong())
-            progress.floatValue = fraction
-        }
-    }
-
-    BoxWithConstraints(Modifier.fillMaxSize()) {
-        val density = LocalDensity.current
-        // Where the picture is drawn: fitted and centred, as the player draws it
-        val frame = with(density) { fitRect(shape.first, shape.second, Size(maxWidth.toPx(), maxHeight.toPx())) }
-        // Told to the zoom, so it stops at the picture's edges and a double-tap zooms in where it lands. Off until the
-        // video's size is known.
-        val known = shape.first > 0 && shape.second > 0
-        LaunchedEffect(zoom, frame.size, known) { zoom.setContentLocation(ZoomableContentLocation.scaledInsideAndCenterAligned(frame.size.takeIf { known })) }
-        // Only the picture zooms and pans; the controls drawn after it keep their size and place. Its tap shows or hides the chrome.
-        Box(Modifier.fillMaxSize().zoomable(zoom, onClick = { onTap() }, onDoubleClick = doubleTap)) {
-            AndroidView(
-                factory = {
-                    PlayerView(it).apply {
-                        useController = false // Album draws its own controls
-                        this.player = player
-                    }
-                },
-                update = { it.player = player }, // picks up the software-decoder retry
-                onRelease = { it.player = null },
-                modifier = Modifier.fillMaxSize(),
-            )
-            // Above the player view, which would otherwise take the touches; the zoom around them still sees them all
-            Box(Modifier.matchParentSize().pointerInput(Unit) {})
-        }
-        if (failed) {
-            Text("Can't play this video", Modifier.align(Alignment.Center), style = AlbumTheme.type.body, color = c.onPhoto)
-            return@BoxWithConstraints
-        }
-        AnimatedVisibility(chrome || !playing, Modifier.align(Alignment.Center), enter = fadeIn(), exit = fadeOut()) {
-            AlbumIconButton(
-                if (playing) Sym.Pause else Sym.PlayArrow,
-                if (playing) "Pause" else "Play",
-                onClick = {
-                    CrashLog.note(if (playing) "video pause" else "video play")
-                    if (playing) {
-                        player.pause()
-                    } else {
-                        if (player.playbackState == Player.STATE_ENDED) player.seekTo(0)
-                        player.play()
-                    }
-                },
-                Modifier.size(Space.bar), // the design's 64dp: the one big control on a video
-                variant = IconButtonVariant.Photo,
-            )
-        }
-
-        // The line runs along the bottom of the picture, but never so low that its touch strip (a full target tall) meets
-        // the dock: seeking works with the dock showing, as it is while paused. Measured as if the navigation bar showed,
-        // so neither it nor the sound button moves when the chrome comes and goes.
-        val lowest = with(density) {
-            maxHeight.toPx() - WindowInsets.navigationBarsIgnoringVisibility.getBottom(this) - (dockGap + Space.bar + Space.target / 2).toPx()
-        }
-        val lineY = minOf(frame.bottom, lowest)
-        Box(
-            Modifier
-                .offset { IntOffset(frame.left.roundToInt(), (lineY - Space.target.toPx() / 2).roundToInt()) }
-                .size(with(density) { frame.width.toDp() }, Space.target)
-                .pointerInput(Unit) { detectTapGestures { seek((it.x / size.width).coerceIn(0f, 1f)) } }
-                .pointerInput(Unit) {
-                    detectHorizontalDragGestures { change, _ ->
-                        change.consume() // so the pager doesn't turn the page meanwhile
-                        seek((change.position.x / size.width).coerceIn(0f, 1f))
-                    }
-                }
-                .drawBehind {
-                    val h = progressLine.toPx()
-                    drawRect(c.flash, Offset(0f, size.height / 2 - h), Size(size.width * progress.floatValue, h))
-                },
-        )
-        // Sound on or off, one tap away all through playback: just above the line's end, inside the picture, and clear of
-        // a curved screen edge. A video with no sound track gets none, rather than a button that does nothing.
-        if (hasSound) {
-            AlbumIconButton(
-                if (muted) Sym.VolumeOff else Sym.VolumeUp,
-                "Sound",
-                onSound,
-                Modifier
-                    .offset {
-                        val right = minOf(frame.right - Space.s3.toPx(), constraints.maxWidth - Space.edgeSafe.toPx())
-                        IntOffset((right - Space.target.toPx()).roundToInt(), (lineY - Space.s3.toPx() - Space.target.toPx()).roundToInt())
-                    }
-                    .semantics { stateDescription = if (muted) "Off" else "On" },
-                variant = IconButtonVariant.Photo,
-            )
-        }
-    }
-}
-
 /** Hides the status and navigation bars while not [visible], with light icons over the black viewer; restores them after. */
 @Composable
 internal fun ImmersiveBars(visible: Boolean) {
@@ -1131,12 +1206,20 @@ internal fun ImmersiveBars(visible: Boolean) {
 
 // ---------- Details ----------
 
+/**
+ * Details, inside the viewer: a panel at the bottom (60% of the screen at most, scrolling inside) that the photo moves up
+ * above rather than being covered. The day and time with the file's name (and Fix date, [onFixDate], beside them), then
+ * the camera and its settings with the size underneath, where it was taken (Show on map, [onShowOnMap]), the file's
+ * folder, size and type, and Remove location when sharing.
+ */
 @Composable
-private fun InfoSheet(m: Media, place: Place?, onShowOnMap: ((MapFocus) -> Unit)?, onDismiss: () -> Unit) {
+private fun InfoSheet(m: Media, place: Place?, onShowOnMap: ((MapFocus) -> Unit)?, onFixDate: (() -> Unit)?, modifier: Modifier) {
     val context = LocalContext.current
     val c = AlbumTheme.colors
     val type = AlbumTheme.type
     val clock = rememberClock()
+    remember(context) { SharePrefs.load(context) }
+    val strip by SharePrefs.strip.collectAsState()
     // Camera, exposure, location and format come from the file, read off the main thread; the rest is already in [m]
     val file by produceState<FileDetails?>(null, m.uri, editVersion(m.uri)) {
         value = withContext(Dispatchers.IO) { readDetails(context, m) }
@@ -1147,27 +1230,46 @@ private fun InfoSheet(m: Media, place: Place?, onShowOnMap: ((MapFocus) -> Unit)
         value = withContext(Dispatchers.IO) { runCatching { SmartIndex.placeOf(m.id) }.getOrNull() }
     }
     val where = indexed?.place ?: place
-    Sheet(onDismiss) {
-        Column(Modifier.padding(bottom = Space.s3)) {
-            if (m.taken > 0) {
-                val taken = Instant.ofEpochMilli(m.taken).atZone(ZoneId.systemDefault())
-                Text(taken.format(longDay), style = type.titleLg, color = c.ink)
-                Text("${clock(m.taken)} · ${m.name}", style = type.meta, color = c.inkMuted)
-            } else {
-                Text(m.name, style = type.titleLg, color = c.ink) // files from other apps usually have no date
+    Column(
+        modifier.fillMaxWidth()
+            .pointerInput(Unit) {} // its touches stay on it, off the photo underneath
+            .background(c.surface, RoundedCornerShape(topStart = Space.radiusLg, topEnd = Space.radiusLg))
+            .verticalScroll(rememberScrollState())
+            .navigationBarsPadding()
+            .padding(start = Space.s4, end = Space.s4, top = Space.s2, bottom = Space.s6),
+    ) {
+        Box(Modifier.align(Alignment.CenterHorizontally).padding(bottom = Space.s4).size(32.dp, 4.dp).background(c.lineStrong, CircleShape))
+        Row(Modifier.padding(bottom = Space.s3), horizontalArrangement = Arrangement.spacedBy(Space.s2)) {
+            Column(Modifier.weight(1f)) {
+                if (m.taken > 0) {
+                    val taken = Instant.ofEpochMilli(m.taken).atZone(ZoneId.systemDefault())
+                    Text(taken.format(longDay), style = type.titleLg, color = c.ink)
+                    Text("${clock(m.taken)} · ${m.name}", style = type.meta, color = c.inkMuted)
+                } else {
+                    Text(m.name, style = type.titleLg, color = c.ink) // files from other apps usually have no date
+                }
             }
+            // Its words line up with the sheet's edge, as in the design
+            onFixDate?.let { AlbumButton("Fix date", it, Modifier.offset(x = Space.s3), ButtonVariant.Quiet, Sym.Edit) }
         }
-        InfoRow(if (m.isVideo) Sym.Videocam else Sym.PhotoCamera) {
+        InfoRow(Sym.PhotoCamera) {
             // blank until the file is read, so the row doesn't jump from "No camera details" to the camera
             val camera = file?.let { it.camera ?: if (m.isVideo) "Video" else "No camera details" }.orEmpty()
             Text(camera, style = type.label, color = c.ink)
             file?.exif?.let { Text(it, style = type.metaLg, color = c.ink) }
-            if (m.width > 0) {
-                val pixels = "${m.width} × ${m.height} · ${"%.1f".format(m.width * m.height / 1_000_000f)} MP"
-                Text(if (m.durationMs > 0) "$pixels · ${duration(m.durationMs)}" else pixels, style = type.meta, color = c.inkMuted)
-            } else if (m.durationMs > 0) {
-                Text(duration(m.durationMs), style = type.meta, color = c.inkMuted)
-            }
+        }
+        // The size on a line of its own under the camera, lined up with its words: "4080×3060 · Ultra HDR", or the length
+        val size = listOfNotNull(
+            "${m.width}×${m.height}".takeIf { m.width > 0 && m.height > 0 },
+            if (m.durationMs > 0) duration(m.durationMs) else "Ultra HDR".takeIf { file?.hdr == true },
+        ).joinToString(" · ")
+        if (size.isNotEmpty()) {
+            Text(
+                size,
+                Modifier.offset(y = -Space.s2).padding(start = Space.icon + Space.s4, bottom = Space.s1),
+                style = type.meta,
+                color = c.inkMuted,
+            )
         }
         val latLng = file?.latLng
         if (where != null || latLng != null) {
@@ -1189,30 +1291,46 @@ private fun InfoSheet(m: Media, place: Place?, onShowOnMap: ((MapFocus) -> Unit)
         InfoRow(Sym.Folder) {
             // The real path, in full. Files from other apps have none, only a name.
             Text(m.path + m.name, style = type.meta, color = c.ink)
-            val size = m.size.takeIf { it > 0 }?.let { Formatter.formatShortFileSize(context, it) } // KB / MB / GB as fits
-            val caption = listOfNotNull(size, file?.format).joinToString(" · ")
+            val bytes = m.size.takeIf { it > 0 }?.let { Formatter.formatShortFileSize(context, it) } // KB / MB / GB as fits
+            val caption = listOfNotNull(bytes, file?.format).joinToString(" · ")
             if (caption.isNotEmpty()) Text(caption, style = type.caption, color = c.inkMuted)
         }
+        SwitchRow(
+            "Remove location when sharing",
+            "GPS and camera details are stripped from the copy you send.",
+            strip,
+            { on ->
+                CrashLog.note("strip location $on")
+                SharePrefs.set(on)
+            },
+            Modifier.hairline(),
+            icon = Sym.LocationOff,
+        )
     }
 }
 
-/** A details row under a hairline: an icon in ink-muted, then its lines. */
+/** A details row under a hairline: an icon in ink-muted, then its lines, 2dp apart. */
 @Composable
 private fun InfoRow(icon: Sym, content: @Composable ColumnScope.() -> Unit) {
     val c = AlbumTheme.colors
     Row(
-        Modifier.fillMaxWidth()
-            .drawBehind { drawRect(c.line, size = Size(size.width, 1.dp.toPx())) }
-            .padding(vertical = Space.s3),
+        Modifier.fillMaxWidth().hairline().padding(vertical = Space.s3),
         horizontalArrangement = Arrangement.spacedBy(Space.s4),
     ) {
         Icon(icon, null, tint = c.inkMuted)
-        Column(Modifier.weight(1f), content = content)
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp), content = content)
     }
 }
 
-/** What the details sheet reads from the file itself. [latLng] needs Album's location permission. */
-private class FileDetails(val camera: String?, val exif: String?, val latLng: DoubleArray?, val format: String?)
+/** A 1dp line along the top, as between the details rows. */
+@Composable
+private fun Modifier.hairline(): Modifier {
+    val line = AlbumTheme.colors.line
+    return drawBehind { drawRect(line, size = Size(size.width, 1.dp.toPx())) }
+}
+
+/** What the details sheet reads from the file itself. [latLng] needs Album's location permission; [hdr] is Ultra HDR. */
+private class FileDetails(val camera: String?, val exif: String?, val latLng: DoubleArray?, val format: String?, val hdr: Boolean = false)
 
 /** Blocking: call off the main thread. Never fails; whatever can't be read is left out. */
 private fun readDetails(context: Context, m: Media): FileDetails {
@@ -1238,6 +1356,8 @@ private fun readDetails(context: Context, m: Media): FileDetails {
         ),
         latLng = exif.latLong?.takeUnless { it[0] == 0.0 && it[1] == 0.0 }, // some cameras write 0,0 when they had no fix
         format = format,
+        // An Ultra HDR photo says so in its XMP, with its gain map's version
+        hdr = exif.getAttribute(ExifInterface.TAG_XMP)?.contains("hdrgm:Version") == true,
     )
 }
 

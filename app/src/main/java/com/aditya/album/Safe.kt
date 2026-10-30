@@ -239,18 +239,21 @@ fun restorePath(path: String, isVideo: Boolean): String? {
 }
 
 /** What the safe keeps about [m]: enough to show it, and to put it back where it was with its date and favourite. */
-fun safeItemOf(m: Media, mime: String, now: Long) = SafeItem(
+fun safeItemOf(m: Media, mime: String, now: Long, bucket: Int = SafeItem.SAFE) = SafeItem(
     name = m.name, mime = mime, isVideo = m.isVideo, taken = m.taken, width = m.width, height = m.height,
     durationMs = m.durationMs, path = m.path, favorite = m.isFavorite, size = 0, sha256 = null,
-    original = m.uri.toString(), added = now,
+    original = m.uri.toString(), added = now, bucket = bucket,
 )
 
-/** Snackbar text after moving into the safe; null when nothing was tried or the user said no to Android's pop-up. */
-fun movedInMessage(moved: Int, failed: Int): String? = when {
+/** The page a bucket's items are on, as messages name it. */
+fun placeOf(bucket: Int) = if (bucket == SafeItem.ID_CARDS) "ID cards" else "Private safe"
+
+/** Snackbar text after moving into [place]; null when nothing was tried or the user said no to Android's pop-up. */
+fun movedInMessage(moved: Int, failed: Int, place: String = "Private safe"): String? = when {
     failed == 0 && moved == 0 -> null
-    moved == 0 -> "Couldn't move ${itemCount(failed)} to Private safe. ${if (failed == 1) "It stays" else "They stay"} in the Library."
-    failed == 0 -> "Moved ${itemCount(moved)} to Private safe"
-    else -> "Moved ${itemCount(moved)} to Private safe. $failed couldn't be moved and ${if (failed == 1) "stays" else "stay"} in the Library."
+    moved == 0 -> "Couldn't move ${itemCount(failed)} to $place. ${if (failed == 1) "It stays" else "They stay"} in the Library."
+    failed == 0 -> "Moved ${itemCount(moved)} to $place"
+    else -> "Moved ${itemCount(moved)} to $place. $failed couldn't be moved and ${if (failed == 1) "stays" else "stay"} in the Library."
 }
 
 /** Why setup and Forgot PIN can't start: both check it's you with the screen lock (or a fingerprint, which needs one). */
@@ -262,12 +265,12 @@ const val KEY_ERASED = "Android erased this key when the screen lock was turned 
 /** Why a move into the safe is refused without ACCESS_MEDIA_LOCATION: Android would hand over photos with GPS blanked. */
 const val SAFE_NEEDS_LOCATION = "Album isn't allowed to read photo locations, so moving would lose where these were taken. Nothing was moved."
 
-/** Snackbar text after moving out of the safe. */
-fun movedOutMessage(moved: Int, failed: Int): String? = when {
+/** Snackbar text after moving out of [place]. */
+fun movedOutMessage(moved: Int, failed: Int, place: String = "Private safe"): String? = when {
     failed == 0 && moved == 0 -> null
-    moved == 0 -> "Couldn't move ${itemCount(failed)} out. ${if (failed == 1) "It stays" else "They stay"} in Private safe."
+    moved == 0 -> "Couldn't move ${itemCount(failed)} out. ${if (failed == 1) "It stays" else "They stay"} in $place."
     failed == 0 -> "Moved ${itemCount(moved)} back to the Library"
-    else -> "Moved ${itemCount(moved)} back to the Library. $failed couldn't be moved and ${if (failed == 1) "stays" else "stay"} in Private safe."
+    else -> "Moved ${itemCount(moved)} back to the Library. $failed couldn't be moved and ${if (failed == 1) "stays" else "stay"} in $place."
 }
 
 /**
@@ -287,6 +290,9 @@ fun movedOutMessage(moved: Int, failed: Int): String? = when {
  * Android erases Keystore keys that need the screen lock when the screen lock is turned off. The PIN's wrapping doesn't
  * need the screen lock, so the safe still opens with the PIN; the fingerprint and Forgot PIN come back once the screen
  * lock does ([rearm]). Adding a fingerprint does not erase the key (setInvalidatedByBiometricEnrollment false).
+ *
+ * ID cards ([IdCards]) keep their files here too, in filesDir/safe/id, listed in the same table under their own bucket
+ * and encrypted with a key of their own. Nothing here opens them, and the safe's reset never touches them.
  */
 object Safe {
     private const val ALIAS = "album_safe" // v1.0's wrapping key; one re-armed later has an alias of its own, named in the key file
@@ -297,6 +303,7 @@ object Safe {
     private lateinit var app: Context
     private val dao by lazy { Room.databaseBuilder(app, SafeDb::class.java, "safe.db").build().dao() }
     internal val dir by lazy { File(app.filesDir, "safe").apply { mkdirs() } }
+    internal val idDir by lazy { File(dir, "id").apply { mkdirs() } } // ID cards' files and key files
     private val keyFile by lazy { AtomicFile(File(dir, "key")) }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var job: Job? = null
@@ -321,10 +328,13 @@ object Safe {
     }
 
     /** Everything in the safe, newest first. Moves still waiting for Android to delete the original aren't in it yet. */
-    val items by lazy { dao.items() }
+    val items by lazy { dao.items(SafeItem.SAFE) }
 
-    /** Whether nothing has been moved in yet (or everything was moved out), so the first move explains the safe. */
-    suspend fun isEmpty() = dao.count() == 0
+    /** Everything in ID cards, the same way. */
+    val idItems by lazy { dao.items(SafeItem.ID_CARDS) }
+
+    /** Whether nothing has been moved into [bucket] yet (or everything was moved out), so the first move explains the safe. */
+    suspend fun isEmpty(bucket: Int = SafeItem.SAFE) = dao.count(bucket) == 0
 
     /** Call before anything else; safe to call again. Finishes moves the app was closed in the middle of. */
     fun init(context: Context) {
@@ -415,7 +425,7 @@ object Safe {
         return Unlock(cipher, fresh = true, wrapped = null)
     }
 
-    private fun newWrappingKey(alias: String): SecretKey {
+    internal fun newWrappingKey(alias: String): SecretKey {
         val spec = KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
@@ -605,10 +615,12 @@ object Safe {
         if (keyFile.baseFile.exists() && !wrapIsLost()) return@start null
         CrashLog.note("safe reset")
         lock()
-        dao.clear()
+        dao.clear(SafeItem.SAFE)
         val alias = runCatching { saved().alias }.getOrNull()
-        dir.deleteRecursively() // the key file and the PIN's file with it: both wrap the lost key
-        dir.mkdirs()
+        // The key file, the PIN's file and ID cards' escrow with them: all wrap the lost key. ID cards' own folder stays,
+        // less the copy of their key sealed to that escrow, which nothing can open any more.
+        dir.listFiles()?.forEach { if (it != idDir) it.deleteRecursively() }
+        File(idDir, IdCards.PIN_COPY).delete()
         alias?.let { runCatching { keyStore().deleteEntry(it) } }
         thumbs.evictAll()
         lostWrap.value = false
@@ -618,16 +630,17 @@ object Safe {
 
     // ---------- Reading ----------
 
-    private fun file(id: Long) = File(dir, "$id.bin")
-    private fun thumbFile(id: Long) = File(dir, "$id.thumb")
+    private fun folder(item: SafeItem) = if (item.bucket == SafeItem.ID_CARDS) idDir else dir
+    private fun file(item: SafeItem) = File(folder(item), "${item.id}.bin")
+    private fun thumbFile(item: SafeItem) = File(folder(item), "${item.id}.thumb")
 
-    fun reader(item: SafeItem, key: ByteArray) = SafeReader(file(item.id), key)
+    fun reader(item: SafeItem, key: ByteArray) = SafeReader(file(item), key)
 
     /** The grid thumbnail made at move-in, decrypted into memory (and kept there until the safe locks). Null if it couldn't be made or read. */
     fun thumbnail(item: SafeItem, key: ByteArray): ImageBitmap? {
         thumbs[item.id]?.let { return it }
         val image = runCatching {
-            val jpeg = SafeReader(thumbFile(item.id), key).use { it.readAll() }
+            val jpeg = SafeReader(thumbFile(item), key).use { it.readAll() }
             BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size).asImageBitmap()
         }.getOrNull() ?: return null
         synchronized(this) { if (openKey.value === key) thumbs.put(item.id, image) } // never kept for a safe that locked meanwhile
@@ -671,25 +684,26 @@ object Safe {
     }
 
     /**
-     * Moves [items] into the safe with [key] (a copy this job wipes when done). Each is encrypted, synced to disk, then
-     * decrypted again and checked against a fresh read of the original. Only then does Android's delete request remove
-     * the verified originals; anything that failed keeps its original and nothing of it stays in the safe.
+     * Moves [items] into the safe, or ID cards ([bucket]), with that bucket's [key] (a copy this job wipes when done). Each
+     * is encrypted, synced to disk, then decrypted again and checked against a fresh read of the original. Only then does
+     * Android's delete request remove the verified originals; anything that failed keeps its original and nothing of it
+     * stays in the safe.
      */
-    fun moveIn(context: Context, items: List<Media>, key: ByteArray) = start(libraryMessages, key) {
+    fun moveIn(context: Context, items: List<Media>, key: ByteArray, bucket: Int = SafeItem.SAFE) = start(libraryMessages, key) {
         val resolver = context.contentResolver
         if (context.checkSelfPermission(ACCESS_MEDIA_LOCATION) != PackageManager.PERMISSION_GRANTED) return@start SAFE_NEEDS_LOCATION
-        if (items.sumOf { it.size } + RESERVE > dir.usableSpace) return@start "Not enough space to move ${itemCount(items.size)} to Private safe"
+        if (items.sumOf { it.size } + RESERVE > dir.usableSpace) return@start "Not enough space to move ${itemCount(items.size)} to ${placeOf(bucket)}"
         val added = ArrayList<SafeItem>()
         var tried = 0
         for (m in items) {
             if (stopping) break
             progress.value = Progress(++tried, items.size, inSafe = false)
-            add(context, m, key)?.let { added += it }
+            add(context, m, key, bucket)?.let { added += it }
         }
         progress.value = null
         // With Media management on, Android deletes without asking; that's fine, every copy here is verified
         if (added.isNotEmpty()) ask(MediaStore.createDeleteRequest(resolver, added.map { Uri.parse(it.original) }))
-        movedInMessage(settle(resolver, added), tried - added.size)
+        movedInMessage(settle(resolver, added), tried - added.size, placeOf(bucket))
     }
 
     /** Puts [items] back in the Library with [key] (a copy this job wipes), each checked before its safe copy is deleted. */
@@ -702,13 +716,26 @@ object Safe {
             progress.value = Progress(++tried, items.size, inSafe = true)
             if (restore(context, item, key)) moved++
         }
-        movedOutMessage(moved, tried - moved)
+        movedOutMessage(moved, tried - moved, placeOf(items.firstOrNull()?.bucket ?: SafeItem.SAFE))
     }
 
     /** Deletes [items] and their files for good. Nothing else holds a copy, so callers confirm with a hold first. */
     fun delete(items: List<SafeItem>) = start(safeMessages, null) {
         items.forEach { remove(it) }
         "Deleted ${itemCount(items.size)} forever"
+    }
+
+    /**
+     * Empties ID cards once nothing can open them ([IdCards.reset]): [stillLost] checks again first, in turn with any move.
+     * Their folder goes whole, files and key file; the safe is never touched.
+     */
+    internal fun resetIdCards(stillLost: suspend () -> Boolean) = start(safeMessages, null) {
+        if (!stillLost()) return@start null
+        CrashLog.note("id cards reset")
+        dao.clear(SafeItem.ID_CARDS)
+        idDir.deleteRecursively()
+        idDir.mkdirs()
+        null
     }
 
     private fun start(messages: Channel<String>, key: ByteArray?, work: suspend () -> String?): Job {
@@ -741,26 +768,26 @@ object Safe {
      * Copies [m] into the safe and checks it. The row goes in first, marked with its original, so a copy cut short by a
      * crash is found and cleaned up by [settle]. Returns the verified item, or null (nothing of it kept) if anything failed.
      */
-    private suspend fun add(context: Context, m: Media, key: ByteArray): SafeItem? {
+    private suspend fun add(context: Context, m: Media, key: ByteArray, bucket: Int): SafeItem? {
         val resolver = context.contentResolver
         // Without this Android blanks the GPS tags in what it reads out, and the photo would come back without its place.
         // It needs ACCESS_MEDIA_LOCATION, which moveIn checks; without it the read fails and the original stays.
         val source = MediaStore.setRequireOriginal(m.uri)
         var item: SafeItem? = null
         return try {
-            val row = safeItemOf(m, checkNotNull(resolver.getType(m.uri)), System.currentTimeMillis())
+            val row = safeItemOf(m, checkNotNull(resolver.getType(m.uri)), System.currentTimeMillis(), bucket)
             item = row.copy(id = dao.insert(row))
             val id = item.id
-            val sha = write(file(id)) { out -> checkNotNull(resolver.openInputStream(source)).use { SafeCipher.encrypt(key, it, out) } }
+            val sha = write(file(item)) { out -> checkNotNull(resolver.openInputStream(source)).use { SafeCipher.encrypt(key, it, out) } }
             // Best effort: without a thumbnail the tile is plain, the photo itself is fine
             runCatching {
                 val thumb = resolver.loadThumbnail(m.uri, Size(THUMB, THUMB), null)
                 val jpeg = ByteArrayOutputStream().also { thumb.compress(Bitmap.CompressFormat.JPEG, 85, it) }.toByteArray()
                 thumb.recycle()
-                write(thumbFile(id)) { out -> SafeCipher.encrypt(key, ByteArrayInputStream(jpeg), out) }
-            }.onFailure { thumbFile(id).delete() }
+                write(thumbFile(item)) { out -> SafeCipher.encrypt(key, ByteArrayInputStream(jpeg), out) }
+            }.onFailure { thumbFile(item).delete() }
             // Decrypt what's on disk and read the original again: both must be the very bytes that were encrypted
-            val (size, copy) = SafeReader(file(id), key).use { it.size to sha256(it.inputStream()) }
+            val (size, copy) = SafeReader(file(item), key).use { it.size to sha256(it.inputStream()) }
             val again = checkNotNull(resolver.openInputStream(source)).use(::sha256)
             check(copy.contentEquals(sha) && again.contentEquals(sha)) { "copy differs" }
             dao.verified(id, size, sha.hex())
@@ -880,7 +907,7 @@ object Safe {
     private suspend fun remove(item: SafeItem) {
         thumbs.remove(item.id)
         dao.delete(item.id)
-        file(item.id).delete()
-        thumbFile(item.id).delete()
+        file(item).delete()
+        thumbFile(item).delete()
     }
 }

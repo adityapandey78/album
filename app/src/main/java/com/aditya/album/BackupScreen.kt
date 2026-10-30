@@ -1,7 +1,6 @@
 package com.aditya.album
 
 import android.text.format.Formatter
-import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -53,7 +52,7 @@ import java.util.Date
 
 private enum class BackupPage { Main, Albums, Pending }
 
-/** The Settings row that opens Backup, saying where the backup stands. */
+/** The row in Settings > Photos and videos that opens Backup, saying where the backup stands. */
 @Composable
 fun BackupRow(onOpen: () -> Unit, modifier: Modifier = Modifier) {
     val context = LocalContext.current
@@ -66,7 +65,7 @@ fun BackupRow(onOpen: () -> Unit, modifier: Modifier = Modifier) {
         s.last > 0 -> "Last backed up ${lastBackup(context, s.last)}"
         else -> "Not backed up yet"
     }
-    MenuRow(Sym.SdCard, "Backup", onOpen, modifier, sub = sub)
+    GroupRow("Backup", onOpen, modifier, icon = Sym.SdCard, sub = sub)
 }
 
 private fun backingUpLine(p: IndexProgress) = "Backing up · ${countLine(p)}"
@@ -106,13 +105,13 @@ fun BackupScreen(onBack: () -> Unit, onOpen: (Media) -> Unit) {
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { tree ->
         if (tree != null) {
             scope.launch {
-                withContext(Dispatchers.IO) { Backup.choose(tree) }?.let { Toast.makeText(context, it, Toast.LENGTH_LONG).show() }
+                withContext(Dispatchers.IO) { Backup.choose(tree) }?.let { Messages.post(context, it) }
             }
         }
     }
     val choose = {
         CrashLog.note("backup: open folder picker")
-        runCatching { pick.launch(null) }.onFailure { Toast.makeText(context, "No app on this phone can choose a folder", Toast.LENGTH_SHORT).show() }
+        runCatching { pick.launch(null) }.onFailure { Messages.post(context, "No app on this phone can choose a folder") }
         Unit
     }
     fun size(bytes: Long) = Formatter.formatShortFileSize(context, bytes) // KB, MB or GB as fits, in the phone's locale

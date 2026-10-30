@@ -65,4 +65,11 @@ class HiddenTest {
         assertEquals("3 albums", hiddenWhat(emptyList(), listOf("a", "b", "c")))
         assertEquals("1 person and 2 albums", hiddenWhat(listOf("Asha"), listOf("a", "b")))
     }
+
+    @Test fun hidingSaysWhatTheDesignSays() {
+        assertEquals("Hid 2 items", hiddenNote(listOf("Asha"), listOf("Goa trip"), hide = true, counted = true))
+        assertEquals("Unhid 1 item", hiddenNote(emptyList(), listOf("Goa trip"), hide = false, counted = true))
+        assertEquals("Hid Goa trip. It is in Hidden items.", hiddenNote(emptyList(), listOf("Goa trip"), hide = true, counted = false))
+        assertEquals("Unhid Asha", hiddenNote(listOf("Asha"), emptyList(), hide = false, counted = false))
+    }
 }

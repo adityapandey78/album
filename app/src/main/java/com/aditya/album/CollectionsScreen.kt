@@ -1,9 +1,16 @@
 package com.aditya.album
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.InteractionSource
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -15,9 +22,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.calculateEndPadding
 import androidx.compose.foundation.layout.calculateStartPadding
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -27,15 +34,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.systemBars
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridScope
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.progressSemantics
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -44,8 +48,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.TextSelectionColors
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.TextFieldColors
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextFieldColors
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -61,6 +65,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
@@ -69,6 +75,7 @@ import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -77,21 +84,18 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
-// The Collections tab (albums, people, places, things in one place), the All albums page, and the pieces their pages
-// and sheets share: AlbumCard, CoverRow, NameSheet and the pushed-page scaffold used by All albums, Places and People.
+// The Collections tab (albums and their groups; people and pets, places, things and videos; then Recently deleted when
+// Settings shows it here), the All albums page, an album's sheets, and the pieces pages and sheets share: AlbumCard,
+// CoverRow, NameSheet, SheetButtons and the pushed-page scaffold.
 
 /** The Albums section shows two rows of three; See all shows the rest. */
 const val ALBUMS_IN_SECTION = 6
-private const val PLACES_IN_ROW = 12
-
-/** The design's scroll-row card: covers in Places' horizontal row are this wide. */
-private val ROW_CARD = 96.dp
 
 /**
  * A card in the Albums section: a folder on the phone ([folder]), a collection ([collection], a virtual album whose
- * photos stay where they are) or a group of those ([group]). [id] is its album id, unique across all three, so it doubles
- * as the lazy key. [key] is what pins, groups and covers are saved under, and [recent] (epoch millis) orders the Default
- * and Recently updated sorts. [cover] is the photo on its card (see [pickCover]).
+ * photos stay where they are), a group of those ([group]) or Favourites ([special]). [id] is its album id, unique across
+ * all of them, so it doubles as the lazy key. [key] is what pins, groups and covers are saved under, and [recent] (epoch
+ * millis) orders the Default and Recently updated sorts. [cover] is the photo on its card (see [pickCover]).
  */
 class AlbumEntry(
     val id: Long,
@@ -103,6 +107,7 @@ class AlbumEntry(
     val folder: Album? = null,
     val collection: CollectionAlbum? = null,
     val group: GroupAlbum? = null,
+    val special: Special? = null,
     val cover: Media? = folder?.cover ?: collection?.items?.firstOrNull(),
 )
 
@@ -113,27 +118,39 @@ fun collectionEntry(c: CollectionAlbum, cover: Media? = c.items.firstOrNull()) =
     AlbumEntry(c.albumId, collectionKey(c.collection.id), c.name, c.items.size, c.collection.updated, collection = c, cover = cover)
 
 /**
- * Folders and collections as one list: pinned first, then [sort]. Default is albumsOf's order applied to both kinds:
- * Camera first, then the most recently changed.
+ * Folders and collections as one list: pinned first, then [sort]. Recent (Default) is albumsOf's order applied to both
+ * kinds: Camera first, then the most recently changed.
  */
 fun albumEntries(entries: List<AlbumEntry>, sort: AlbumSort, pinned: Set<String>): List<AlbumEntry> {
     val default = entries.sortedWith(compareByDescending<AlbumEntry> { it.camera }.thenByDescending { it.recent })
-    return orderAlbums(default, sort, { it.key in pinned }, { it.name }, { it.count }, { it.recent })
+    return orderAlbums(default, sort, { it.key in pinned }, { it.name }, { it.count })
 }
 
 /** The Albums section's cards: the first [ALBUMS_IN_SECTION] of [entries], which [albumEntries] put pinned first. */
 fun <T> albumsInSection(entries: List<T>): List<T> = entries.take(ALBUMS_IN_SECTION)
 
-/** Collections' subtitle: "12 albums · 3 people · 1 place". */
-fun collectionsSubtitle(albums: Int, people: Int, places: Int) =
-    "${counted(albums, "album", "albums")} · ${counted(people, "person", "people")} · ${counted(places, "place", "places")}"
+/** The Albums heading's link: "See all 14" when some are left out of the section, else "See all". */
+fun seeAllAlbums(total: Int) = if (total > ALBUMS_IN_SECTION) "See all ${"%,d".format(total)}" else "See all"
+
+/** Collections' and All albums' subtitle: how many cards there are, groups and Favourites included, "12 albums and groups". */
+fun albumsSubtitle(cards: Int) = if (cards == 1) "1 album" else "${"%,d".format(cards)} albums and groups"
 
 /**
- * The Collections tab: the top albums (folders, collections and groups of them together), utilities, people, places and
- * things, with Recently deleted, Private safe and Hidden items last. Every card opens through [onOpen] with an album id,
- * a group's through [onOpenGroup] with its group id; [onAllAlbums] opens the rest when there are more than fit.
- * [contentPadding] already clears the status bar and the floating bottom bar. [media] is every item Album shows, for
- * covers. Long-pressing a card opens its sheet; folder actions go through [actions].
+ * Where a folder the phone itself fills lives, as its card and page show it instead of a count: the camera's,
+ * Screenshots and an app's own ("DCIM/Camera"). [path] is the folder's RELATIVE_PATH. Null for the folders the user made.
+ */
+fun systemPath(name: String, path: String): String? =
+    path.trimEnd('/').takeIf { name == "Camera" || name.equals("Screenshots", ignoreCase = true) || MediaApp.of(name) != null }
+
+/** Whether a card shows under Pinned: Favourites always leads, the rest when the user pinned them. */
+private fun AlbumEntry.pinnedIn(pinned: Set<String>) = special != null || key in pinned
+
+/**
+ * The Collections tab: the top albums (folders, collections and groups of them together, Favourites first), then
+ * People and pets, Places, Things and Videos ([browseSections]), then Recently deleted when Settings shows it here.
+ * Every card opens through [onOpen] with an album id, a group's through [onOpenGroup] with its group id; [onAllAlbums]
+ * opens every album, [onPeople], [onPlaces] and [onThings] the whole of each. [contentPadding] already clears the status bar and the floating bottom bar. [media] is every item Album shows,
+ * for covers. Long-pressing a card opens its sheet; folder actions go through [actions].
  */
 @Composable
 fun CollectionsScreen(
@@ -147,41 +164,25 @@ fun CollectionsScreen(
     onOpen: (Long) -> Unit,
     onOpenGroup: (Long) -> Unit,
     onAllAlbums: () -> Unit,
-    onAllPlaces: () -> Unit,
-    onAllPeople: () -> Unit,
-    onReviewPeople: () -> Unit,
-    onOpenSafe: () -> Unit,
-    onOpenHidden: () -> Unit,
+    onPeople: () -> Unit,
+    onPlaces: () -> Unit,
+    onThings: () -> Unit,
     onSettings: () -> Unit,
 ) {
     val spec = AlbumTheme.spec
-    val places = Explore.places.collectAsState().value
-    val things = Explore.things.collectAsState().value
-    val everyone by People.albums.collectAsState()
-    val scanning by People.progress.collectAsState()
     val pinned by AlbumPrefs.pinned.collectAsState()
     val hidden by AlbumPrefs.hidden.collectAsState()
+    val sort by AlbumPrefs.sort.collectAsState()
     val view = rememberAlbumsView(albums, collections, media)
+    val browse = rememberBrowse(media)
     val entries = view.top
     val shown = remember(entries) { albumsInSection(entries) }
-    val people = remember(everyone) { shownPeople(everyone) }
-    val reviews by remember { People.review }.collectAsState(emptyList())
-    val anyHidden = remember(everyone) { everyone.any { it.hidden && !it.locked } }
-    val names = remember(places) { placeNames(places.orEmpty().map { it.key }) }
-    // Utilities open the same albums as the cards above, so like them they include folders hidden from the Library
-    val utilities = remember(albums, specialCounts) {
-        val screenshots = albums.filter { it.name.equals("Screenshots", ignoreCase = true) }.maxByOrNull { it.count }
-        listOfNotNull(
-            Utility(Sym.Favorite, Special.Favourites.title, specialCounts[Special.Favourites] ?: 0, Special.Favourites.id),
-            Utility(Sym.Videocam, Special.Videos.title, specialCounts[Special.Videos] ?: 0, Special.Videos.id),
-            screenshots?.let { Utility(Sym.ScreenshotMonitor, "Screenshots", it.count, it.id) }, // only when the phone has that folder
-        )
-    }
     var menu by remember { mutableStateOf<AlbumEntry?>(null) } // the card whose long-press sheet is open
-    var sorting by rememberSaveable { mutableStateOf(false) }
-    val open = { what: String, id: Long ->
-        CrashLog.note("open $what")
-        onOpen(id)
+    var more by rememberSaveable { mutableStateOf(false) }
+    var grouping by rememberSaveable { mutableStateOf(false) }
+    val allAlbums = {
+        CrashLog.note("all albums")
+        onAllAlbums()
     }
 
     LazyVerticalGrid(
@@ -192,126 +193,62 @@ fun CollectionsScreen(
         horizontalArrangement = Arrangement.spacedBy(Space.s3),
     ) {
         fullRow("top") {
-            // Counts albums, not groups: a group is a way of keeping them, not another album
-            LargeTopBar("Collections", subtitle = collectionsSubtitle(albums.size + collections.size, people.size, places.orEmpty().size)) {
+            // The cards, as See all counts them: a group is one, however many albums it holds
+            LargeTopBar("Collections", subtitle = albumsSubtitle(entries.size)) {
                 AlbumIconButton(Sym.Add, "New album", actions::newAlbum)
-                AlbumIconButton(Sym.Settings, "Settings", onSettings)
+                AlbumIconButton(Sym.MoreVert, "More", { more = true })
             }
         }
         // Draws nothing once every job is done
         fullRow("indexing") { IndexingCard(Modifier.padding(start = Space.s4, end = Space.s4, bottom = Space.s3)) }
 
-        // With more albums than fit, the heading leads to all of them, and the order is changed there
-        if (entries.isNotEmpty()) fullRow("albums") {
-            if (shown.size < entries.size) {
-                SectionHead("Albums", action = "See all", onAction = {
-                    CrashLog.note("all albums")
-                    onAllAlbums()
-                })
-            } else {
-                SectionHead("Albums", action = "Sort", onAction = { sorting = true })
-            }
-        }
+        if (entries.isNotEmpty()) fullRow("albums") { SectionHead("Albums", action = seeAllAlbums(entries.size), onAction = allAlbums) }
         albumCards(shown, pinned, hidden, onOpen, onOpenGroup) { menu = it }
 
-        fullRow("utilities") {
-            Column(Modifier.padding(horizontal = Space.s4), verticalArrangement = Arrangement.spacedBy(Space.s2)) {
-                utilities.chunked(2).forEach { pair ->
-                    Row(horizontalArrangement = Arrangement.spacedBy(Space.s2)) {
-                        pair.forEach { u ->
-                            UtilityTile(u.sym, u.title, "%,d".format(u.count), "${u.title}, ${itemCount(u.count)}", Modifier.weight(1f)) {
-                                open("utility ${u.title}", u.albumId)
-                            }
-                        }
-                        if (pair.size == 1) Box(Modifier.weight(1f))
-                    }
-                }
-            }
-        }
+        // What Album sorted (people and pets, places, things, videos) right here, not behind a Browse card: the user's call
+        browseSections(browse, onOpen, onPeople, onPlaces, onThings)
 
-        // Shows once people are found, or while looking; See all stays while only hidden people are left, so hiding can be undone
-        if (people.isNotEmpty() || anyHidden || scanning.total > 0) {
-            fullRow("people") {
-                PeopleHead(reviews.size, onReview = {
-                    CrashLog.note("people review")
-                    onReviewPeople()
-                }, onSeeAll = onAllPeople.takeIf { people.isNotEmpty() || anyHidden })
-            }
-            if (scanning.total > 0) fullRow("people scan") { Note(scanningText(scanning)) }
-            if (people.isNotEmpty()) fullRow("people row") { PeopleRow(people) { open("person", it.albumId) } }
-        }
-
-        fullRow("places") {
-            SectionHead("Places", action = "See all".takeIf { !places.isNullOrEmpty() }, onAction = {
-                CrashLog.note("all places")
-                onAllPlaces()
-            })
-        }
-        fullRow("place row") {
-            when {
-                places == null -> {} // loading: a moment on first open only
-                places.isEmpty() -> Note("Places appear for photos with a location")
-                else -> LazyRow(
-                    contentPadding = PaddingValues(horizontal = Space.s4),
-                    horizontalArrangement = Arrangement.spacedBy(Space.s3),
-                ) {
-                    items(places.take(PLACES_IN_ROW), key = { placeKey(it.key) }) {
-                        PlaceCard(it, names.getValue(it.key), Modifier.width(ROW_CARD)) { openPlace(it.key, onOpen) }
-                    }
-                }
-            }
-        }
-
-        fullRow("things") { SectionHead("Things") }
-        fullRow("thing chips") {
-            when {
-                things == null -> {}
-                things.isEmpty() -> Note("Food, pets, sunsets and more appear here as Album organises your photos")
-                else -> FlowRow(
-                    Modifier.padding(horizontal = Space.s4),
-                    horizontalArrangement = Arrangement.spacedBy(Space.s2),
-                    verticalArrangement = Arrangement.spacedBy(Space.s2),
-                ) {
-                    things.forEach { t -> Chip(t.key.title, { open("thing ${t.key.name}", thingIdOf(t.key)) }, count = "%,d".format(t.items.size), toggle = false) }
-                }
-            }
-        }
-
-        // The user's rule: private places sit quietly at the very end, and Settings can leave them out of here altogether
-        if (!spec.appearance.hidePrivate) fullRow("private") {
-            Column(Modifier.padding(start = Space.s4, end = Space.s4, top = Space.s8)) {
-                val trashed = specialCounts[Special.Trash] ?: 0
-                UtilityTile(Sym.Delete, Special.Trash.title, "%,d".format(trashed), "${Special.Trash.title}, ${itemCount(trashed)}", quiet = true) {
-                    open("trash", Special.Trash.id)
-                }
-                UtilityTile(Sym.Lock, "Private safe", "Locked", "Private safe, locked", quiet = true) {
-                    CrashLog.note("open safe")
-                    onOpenSafe()
-                }
-                // Like the safe, never a count or a cover from outside: whether anything is hidden stays private too
-                UtilityTile(Sym.VisibilityOff, "Hidden items", "Locked", "Hidden items, locked", quiet = true) {
-                    CrashLog.note("open hidden items")
-                    onOpenHidden()
-                }
+        // The user's rule: Recently deleted sits quietly at the very end, and only while Settings shows it here. Private
+        // safe and Hidden items live in Settings, under Privacy and safe.
+        if (spec.appearance.trashInCollections) fullRow("trash") {
+            val trashed = specialCounts[Special.Trash] ?: 0
+            Group(Modifier.padding(start = Space.s4, end = Space.s4, top = Space.s6)) {
+                GroupRow(Special.Trash.title, {
+                    CrashLog.note("open trash")
+                    onOpen(Special.Trash.id)
+                }, icon = Sym.Delete, value = "%,d".format(trashed))
             }
         }
     }
 
     menu?.let { AlbumEntrySheet(it, view, collections, media, pinned, hidden, actions) { menu = null } }
-    if (sorting) AlbumSortSheet { sorting = false }
-}
-
-/** Returns what Hide album does: after the privacy PIN (or at once while unlocked), the folder goes to Hidden items. */
-@Composable
-private fun rememberHideAlbum(): (Album) -> Unit {
-    val context = LocalContext.current
-    val privacy = rememberPrivacyAsk()
-    return { album -> privacy.run("Hide ${album.name}") { Hidden.hide(context, emptyList(), listOf(album)) } }
+    if (more) {
+        Sheet({ more = false }, "Collections") {
+            MenuRow(Sym.Add, "New album", {
+                more = false
+                actions.newAlbum()
+            })
+            MenuRow(Sym.CreateNewFolder, "New album group", {
+                more = false
+                grouping = true
+            }, sub = "Keep albums together, like Day 1 to Day 4 of a trip")
+            MenuRow(Sym.Sort, "Sort albums", {
+                more = false
+                allAlbums()
+            }, sub = sort.label)
+            MenuRow(Sym.Settings, "Settings", {
+                more = false
+                onSettings()
+            })
+        }
+    }
+    if (grouping) NewGroupSheets(view) { grouping = false }
 }
 
 /**
- * Every album, folders and collections together with groups of them, in the chosen order with pinned ones first: the
- * page the Albums section's See all opens. Draws its own background, insets and Back. Long-pressing a card opens its sheet.
+ * Every album, folders and collections together with groups of them: the sort chips, then Pinned (Favourites and what
+ * the user pinned) and the rest in the chosen order. The page the Albums section's See all opens. Draws its own
+ * background, insets and Back. Long-pressing a card opens its sheet.
  */
 @Composable
 fun AllAlbumsScreen(
@@ -328,60 +265,137 @@ fun AllAlbumsScreen(
     val hidden by AlbumPrefs.hidden.collectAsState()
     val sort by AlbumPrefs.sort.collectAsState()
     val view = rememberAlbumsView(albums, collections, media)
+    val (first, rest) = remember(view, pinned) { view.top.partition { it.pinnedIn(pinned) } }
     var menu by remember { mutableStateOf<AlbumEntry?>(null) }
-    var sorting by rememberSaveable { mutableStateOf(false) }
+    var grouping by rememberSaveable { mutableStateOf(false) }
 
-    PushedGridPage("Albums", counted(albums.size + collections.size, "album", "albums"), state, onBack, actions = {
+    PushedGridPage("Albums", albumsSubtitle(view.top.size), state, onBack, collapsed = true, actions = {
+        AlbumIconButton(Sym.CreateNewFolder, "New album group", { grouping = true })
         AlbumIconButton(Sym.Add, "New album", actions::newAlbum)
     }) {
-        // The heading names the order in use, so the Sort link beside it explains itself
-        fullRow("sort") { SectionHead(sort.order, action = "Sort", onAction = { sorting = true }) }
-        albumCards(view.top, pinned, hidden, onOpen, onOpenGroup) { menu = it }
+        fullRow("sort") { SortChips(sort) }
+        if (first.isNotEmpty()) {
+            fullRow("pinned") { SectionHead("Pinned") }
+            albumCards(first, pinned, hidden, onOpen, onOpenGroup) { menu = it }
+        }
+        if (rest.isNotEmpty()) {
+            fullRow("rest") { SectionHead(if (first.isEmpty()) "Albums" else "All albums") }
+            albumCards(rest, pinned, hidden, onOpen, onOpenGroup) { menu = it }
+        }
+        fullRow("note") { Note("Press and hold an album to pin it, rename it or move it into a group.") }
     }
 
     menu?.let { AlbumEntrySheet(it, view, collections, media, pinned, hidden, actions) { menu = null } }
-    if (sorting) AlbumSortSheet { sorting = false }
+    if (grouping) NewGroupSheets(view) { grouping = false }
 }
 
-/** A card for each of [entries]: its cover, name and count, or a group's album count. Long-press hands the entry to [onMenu]. */
+/** All albums' order, one chip each; pinned albums come first whatever the order. */
+@Composable
+private fun SortChips(sort: AlbumSort) {
+    FlowRow(
+        Modifier.padding(start = Space.s4, end = Space.s4, top = Space.s2, bottom = Space.s2),
+        horizontalArrangement = Arrangement.spacedBy(Space.s2),
+        verticalArrangement = Arrangement.spacedBy(Space.s2),
+    ) {
+        AlbumSort.entries.forEach { s ->
+            val on = s == sort
+            // A button that says it's selected: tapping the picked one again changes nothing, so it isn't a toggle
+            Chip(s.label, {
+                CrashLog.note("sort albums ${s.name}")
+                AlbumPrefs.setSort(s)
+            }, Modifier.semantics { selected = on }, selected = on, toggle = false)
+        }
+    }
+}
+
+/**
+ * A card for each of [entries]: its cover and name over its count (a system folder's path instead), or a group's covers
+ * as a folder over its album count. [sub] replaces the line under the name. Long-press hands the entry to [onMenu]. A tap
+ * opens it through [onOpen], or [onOpenGroup] for a group: every album and group card a screen shows opens from here.
+ */
 internal fun LazyGridScope.albumCards(
     entries: List<AlbumEntry>,
     pinned: Set<String>,
     hidden: Set<String>,
     onOpen: (Long) -> Unit,
     onOpenGroup: (Long) -> Unit,
+    sub: ((AlbumEntry) -> String)? = null,
     onMenu: (AlbumEntry) -> Unit,
 ) = items(entries, key = { it.id }) { e ->
     val folder = e.folder
     val group = e.group
     val isHidden = folder != null && folder.key in hidden
+    // Favourites leads whatever is pinned, so it needs no pin of its own
+    val isPinned = e.special == null && e.key in pinned
     AlbumCard(
         name = e.name,
         // A group shows how many albums it holds: the word "albums" is what tells it from an album at a glance
-        meta = listOf(if (group != null) counted(group.albums.size, "album", "albums") else "%,d".format(e.count) + (if (isHidden) " · Hidden" else "")),
+        meta = listOf(
+            sub?.invoke(e) ?: if (group != null) "${counted(group.albums.size, "album", "albums")} · ${"%,d".format(e.count)}"
+            else (folder?.let { systemPath(it.name, it.cover.path) } ?: "%,d".format(e.count)) + (if (isHidden) " · Hidden" else ""),
+        ),
         description = buildString {
-            if (group != null) append("${e.name}, group of ${counted(group.albums.size, "album", "albums")}") else append("${e.name}, ${itemCount(e.count)}")
+            if (group != null) append("${e.name}, album group of ${counted(group.albums.size, "album", "albums")}") else append("${e.name}, ${itemCount(e.count)}")
             if (e.collection != null) append(", collection")
-            if (e.key in pinned) append(", pinned")
+            if (isPinned) append(", pinned")
             if (isHidden) append(", hidden from Library")
         },
         onClick = {
-            CrashLog.note(if (folder != null) "open folder" else if (group != null) "open group" else "open collection")
+            CrashLog.note(if (folder != null) "open folder" else if (group != null) "open group" else if (e.special != null) "open favourites" else "open collection")
             if (group != null) onOpenGroup(group.id) else onOpen(e.id)
         },
         modifier = Modifier.padding(bottom = Space.s4),
         onLongClick = { onMenu(e) },
-    ) {
-        EntryCover(e)
-        if (e.key in pinned) Badge("Pinned", Modifier.align(Alignment.TopStart).padding(Space.s2), BadgeTone.Photo, Sym.PushPin)
+        shape = RoundedCornerShape(if (group != null) Space.radiusLg else Space.radiusMd),
+        badges = {
+            if (group != null) FolderMark() else kindOf(e)?.let { KindMark(it) }
+            if (isPinned) PinMark()
+        },
+    ) { if (group != null) FolderCover(group.albums) else EntryCover(e) }
+}
+
+/** What kind of album a card is, as a mark on its cover: Favourites, the camera's folder, screenshots or WhatsApp's. Null for the rest. */
+private fun kindOf(e: AlbumEntry): Sym? = when {
+    e.cover == null -> null // its empty cover already shows the icon
+    e.special != null -> Sym.Favorite
+    e.camera -> Sym.PhotoCamera
+    e.folder?.name.equals("Screenshots", ignoreCase = true) -> Sym.ScreenshotMonitor
+    e.folder?.name?.let(MediaApp::of).let { it == MediaApp.WhatsApp || it == MediaApp.WhatsAppBusiness } -> Sym.Chat
+    else -> null
+}
+
+/** The mark at a cover's bottom left saying what kind of album it is, on scrim-photo. */
+@Composable
+private fun BoxScope.KindMark(sym: Sym) {
+    val c = AlbumTheme.colors
+    Box(Modifier.align(Alignment.BottomStart).padding(Space.s2).size(28.dp).background(c.scrimPhoto, CircleShape), contentAlignment = Alignment.Center) {
+        Icon(sym, null, filled = true, size = Space.iconSm, tint = c.onPhoto)
     }
+}
+
+/** The pin at a pinned card's top right, on scrim-photo. TalkBack hears "pinned" from the card. */
+@Composable
+private fun BoxScope.PinMark() {
+    val c = AlbumTheme.colors
+    Box(Modifier.align(Alignment.TopEnd).padding(Space.s2).size(24.dp).background(c.scrimPhoto, CircleShape), contentAlignment = Alignment.Center) {
+        Icon(Sym.PushPin, null, filled = true, size = 14.dp, tint = c.onPhoto)
+    }
+}
+
+/** Returns what Hide album does: after the privacy PIN (or at once while unlocked), the folder goes to Hidden items. */
+@Composable
+private fun rememberHideAlbum(): (Album) -> Unit {
+    val context = LocalContext.current
+    val privacy = rememberPrivacyAsk()
+    return { album -> privacy.run("Hide ${album.name}") { Hidden.hide(context, emptyList(), listOf(album)) } }
 }
 
 private enum class EntryStep { Menu, Cover, Group }
 
 /**
- * The long-press sheet of an album card: a folder's own, a collection's or a group's. Change cover and the group row open
- * their own sheets in place of this one. [view] is the albums as grouped on screen; [media] every item Album shows.
+ * The long-press sheet of an album card, and an album page's Album options: a folder's own, a collection's, a group's or
+ * Favourites'. Change cover and the group row open their own sheets in place of this one. [view] is the albums as
+ * grouped on screen; [media] every item Album shows.
  */
 @Composable
 internal fun AlbumEntrySheet(
@@ -397,6 +411,14 @@ internal fun AlbumEntrySheet(
     val onHide = rememberHideAlbum()
     var step by rememberSaveable { mutableStateOf(EntryStep.Menu) }
     val group = view.groupOf(entry.key)?.name
+    val takeOut = {
+        onDismiss()
+        takeOutOfGroup(entry)
+    }
+    val share = {
+        onDismiss()
+        actions.shareZip(entry.name, entry.itemsIn(media))
+    }
     when (step) {
         EntryStep.Menu -> {
             entry.folder?.let {
@@ -408,10 +430,19 @@ internal fun AlbumEntrySheet(
                     },
                     onCover = { step = EntryStep.Cover },
                     onGroup = { step = EntryStep.Group },
+                    onTakeOut = takeOut,
+                    onShare = share,
                 ) { action -> onDismiss(); actions.onAlbum(it, action) }
             }
-            entry.collection?.let { CollectionSheet(it, collections, entry.key in pinned, group, { step = EntryStep.Cover }, { step = EntryStep.Group }, onDismiss) }
+            entry.collection?.let {
+                CollectionSheet(it, collections, entry.key in pinned, group, { step = EntryStep.Cover }, { step = EntryStep.Group }, takeOut, share, onDismiss)
+            }
             if (entry.group != null) GroupSheet(entry, view, media, actions, entry.key in pinned, onDismiss)
+            // No pin: Favourites always leads the albums
+            if (entry.special != null) Sheet(onDismiss, entry.name) {
+                MenuRow(Sym.Image, "Change cover", { step = EntryStep.Cover })
+                if (entry.count > 0) ShareZipRow(share)
+            }
         }
         EntryStep.Cover -> AlbumCoverSheet(entry, media, onDismiss)
         EntryStep.Group -> GroupPicker(entry, view, onDismiss)
@@ -419,9 +450,9 @@ internal fun AlbumEntrySheet(
 }
 
 /**
- * Long-press sheet of a folder album: pin, rename, change cover, its group ([group] names the one it's in), hide from the
- * Library (a tidier timeline; the album stays here), Hide album (it and its photos go to Hidden items, behind the privacy
- * PIN), delete.
+ * Long-press sheet of a folder album: pin, rename, change cover, its group ([group] names the one it's in), share as ZIP,
+ * hide from the Library (a tidier timeline; the album stays here), Hide album (it and its photos go to Hidden items,
+ * behind the privacy PIN), delete.
  */
 @Composable
 private fun AlbumSheet(
@@ -433,62 +464,87 @@ private fun AlbumSheet(
     onHide: () -> Unit,
     onCover: () -> Unit,
     onGroup: () -> Unit,
+    onTakeOut: () -> Unit,
+    onShare: () -> Unit,
     onAction: (AlbumAction) -> Unit,
 ) {
     Sheet(onDismiss, album.name) {
-        MenuRow(Sym.PushPin, if (pinned) "Unpin" else "Pin", { onAction(AlbumAction.Pin) }, sub = "Pinned albums come first".takeIf { !pinned }, trailing = null)
-        MenuRow(Sym.Edit, "Rename", { onAction(AlbumAction.Rename) }, trailing = null)
-        MenuRow(Sym.Image, "Change cover", onCover, trailing = null)
-        GroupRow(group, onGroup)
+        MenuRow(Sym.PushPin, if (pinned) "Unpin" else "Pin to the top", { onAction(AlbumAction.Pin) }, trailing = null)
+        MenuRow(Sym.Edit, "Rename", { onAction(AlbumAction.Rename) })
+        MenuRow(Sym.Image, "Change cover", onCover)
+        GroupMoveRows(group, onGroup, onTakeOut)
+        ShareZipRow(onShare)
         MenuRow(
             if (hidden) Sym.Visibility else Sym.VisibilityOff,
             if (hidden) "Show in Library" else "Hide from Library",
             { onAction(AlbumAction.Hide) },
-            sub = if (hidden) "Its photos show in the Library again" else "Its photos stay in this album",
+            sub = if (hidden) "Its photos show in the Library again" else "The photos stay in this folder",
             trailing = null,
         )
-        MenuRow(Sym.Lock, "Hide album", onHide, sub = "It and its photos show only in Hidden items", trailing = null)
-        MenuRow(Sym.Delete, "Delete", { onAction(AlbumAction.Delete) }, sub = "Moves its ${itemCount(album.count)} to Trash", trailing = null, danger = true)
+        MenuRow(Sym.VisibilityOff, "Hide album", onHide, sub = "Moves it to Hidden items, behind your PIN", trailing = null)
+        MenuRow(Sym.Delete, "Delete album", { onAction(AlbumAction.Delete) }, sub = "Moves its ${itemCount(album.count)} to Trash", trailing = null)
     }
 }
 
-/** The sheet row that opens [GroupPicker]: "Add to group", or "Change group" with the one it's in now. */
+/** Share as ZIP in an album's sheet: every photo and video in it, as one file. */
 @Composable
-fun GroupRow(group: String?, onClick: () -> Unit) {
-    MenuRow(Sym.Folder, if (group == null) "Add to group" else "Change group", onClick, sub = group?.let { "In $it" } ?: "Keep albums together, like Trips", trailing = null)
+internal fun ShareZipRow(onShare: () -> Unit) = MenuRow(Sym.Share, "Share as ZIP", onShare, trailing = null)
+
+/** Whether an album page has Album options: a folder (not one in Hidden items), a collection or Favourites. */
+fun hasAlbumOptions(id: Long, album: Album?, collection: CollectionAlbum?) =
+    (album != null && album.key !in AlbumPrefs.locked.value) || collection != null || id == Special.Favourites.id
+
+/** An album page's Album options: the sheet its card's long-press opens in Collections. */
+@Composable
+fun AlbumOptionsSheet(id: Long, albums: List<Album>, collections: List<CollectionAlbum>, media: List<Media>, actions: AlbumActions, onDismiss: () -> Unit) {
+    val pinned by AlbumPrefs.pinned.collectAsState()
+    val hidden by AlbumPrefs.hidden.collectAsState()
+    val view = rememberAlbumsView(albums, collections, media)
+    val entry = view.album(id)
+    if (entry == null) {
+        LaunchedEffect(Unit) { onDismiss() } // gone meanwhile
+        return
+    }
+    AlbumEntrySheet(entry, view, collections, media, pinned, hidden, actions, onDismiss)
 }
 
-private class Utility(val sym: Sym, val title: String, val count: Int, val albumId: Long)
-
-/**
- * Favourites, Videos, Screenshots, People's "Same person?": icon, label and [meta] (the count) on surface-high, read by
- * TalkBack as [description]. [quiet] drops the fill and adds a chevron, for the last rows.
- */
+/** People's "Same person?" tile: icon, label and [meta] (the count) on surface-high, read by TalkBack as [description]. */
 @Composable
-fun UtilityTile(sym: Sym, label: String, meta: String, description: String, modifier: Modifier = Modifier, quiet: Boolean = false, onClick: () -> Unit) {
+fun UtilityTile(sym: Sym, label: String, meta: String, description: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val c = AlbumTheme.colors
     val shape = RoundedCornerShape(Space.radiusMd)
     Row(
-        modifier.fillMaxWidth().heightIn(min = Space.target + Space.s2).clip(shape)
-            .then(if (quiet) Modifier else Modifier.background(c.surfaceHigh, shape))
+        modifier.fillMaxWidth().heightIn(min = Space.target + Space.s2).clip(shape).background(c.surfaceHigh, shape)
             .clickable(role = Role.Button, onClick = onClick)
             .semantics(mergeDescendants = true) { contentDescription = description }
-            .padding(horizontal = if (quiet) Space.s1 else Space.s4),
+            .padding(horizontal = Space.s4),
         horizontalArrangement = Arrangement.spacedBy(Space.s3),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(sym, null, tint = if (quiet) c.inkMuted else c.ink)
+        Icon(sym, null, tint = c.ink)
         Text(label, Modifier.weight(1f), style = AlbumTheme.type.label, color = c.ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Text(meta, style = AlbumTheme.type.meta, color = c.inkMuted)
-        if (quiet) Icon(Sym.ChevronRight, null, tint = c.inkMuted)
     }
 }
 
 // ---------- Shared pieces ----------
 
+/** Shrinks to [to] while [source] is pressed, springing back; with Remove animations on it changes at once. */
+@Composable
+internal fun Modifier.pressShrink(source: InteractionSource, to: Float): Modifier {
+    val pressed by source.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        if (pressed) to else 1f,
+        if (AlbumTheme.spec.still) snap() else spring(dampingRatio = 0.55f, stiffness = Spring.StiffnessMedium),
+        label = "press",
+    )
+    return graphicsLayer { scaleX = scale; scaleY = scale }
+}
+
 /**
- * The design system's AlbumCard: a square cover (round for a person) on surface-high, the name in label and [meta] lines
- * under it. TalkBack reads [description] instead of the bare lines. Long-press calls [onLongClick] when set.
+ * The design system's AlbumCard: a square cover (round for a person, [shape] otherwise) on surface-high that shrinks a
+ * little while pressed, the name in label and [meta] lines under it. [badges] sit over the cover's corners, unclipped.
+ * TalkBack reads [description] instead of the bare lines. Long-press calls [onLongClick] when set.
  */
 @Composable
 fun AlbumCard(
@@ -500,30 +556,36 @@ fun AlbumCard(
     round: Boolean = false,
     nameColor: Color = AlbumTheme.colors.ink,
     onLongClick: (() -> Unit)? = null,
+    shape: Shape = if (round) CircleShape else RoundedCornerShape(Space.radiusMd),
+    badges: @Composable BoxScope.() -> Unit = {},
     cover: @Composable BoxScope.() -> Unit,
 ) {
     val c = AlbumTheme.colors
     val haptics = rememberHaptics()
+    val source = remember { MutableInteractionSource() }
     val align = if (round) Alignment.CenterHorizontally else Alignment.Start
     Column(
         // Not clipped to rounded corners: that cut into the last text line, which sits in the bottom corner
         modifier
+            .opensScreen() // the album, person or place grows out of this card
             .combinedClickable(
+                source,
+                indication = null, // the cover shrinking is the feedback, as in the design
+                role = Role.Button,
                 onLongClickLabel = onLongClick?.let { "More options" },
                 onLongClick = onLongClick?.let { { haptics.longPress(); it() } },
                 hapticFeedbackEnabled = false, // Haptics follows Album's own haptics switch
                 onClick = onClick,
             )
             .semantics { contentDescription = description },
-        verticalArrangement = Arrangement.spacedBy(Space.s2),
+        verticalArrangement = Arrangement.spacedBy(10.dp), // the design's 8 under the cover and 2 between lines
         horizontalAlignment = align,
     ) {
-        Box(
-            Modifier.fillMaxWidth().aspectRatio(1f).clip(if (round) CircleShape else RoundedCornerShape(Space.radiusMd)).background(c.surfaceHigh),
-            contentAlignment = Alignment.Center,
-            content = cover,
-        )
-        Column(Modifier.clearAndSetSemantics {}, horizontalAlignment = align) {
+        Box(Modifier.fillMaxWidth().aspectRatio(1f).pressShrink(source, 0.96f)) {
+            Box(Modifier.matchParentSize().clip(shape).background(c.surfaceHigh), contentAlignment = Alignment.Center, content = cover)
+            badges()
+        }
+        Column(Modifier.clearAndSetSemantics {}, verticalArrangement = Arrangement.spacedBy(2.dp), horizontalAlignment = align) {
             Text(name, style = AlbumTheme.type.label, color = nameColor, maxLines = 1, overflow = TextOverflow.Ellipsis)
             meta.forEach { Text(it, style = AlbumTheme.type.meta, color = c.inkMuted, maxLines = 1, overflow = TextOverflow.Ellipsis) }
         }
@@ -553,8 +615,9 @@ fun CoverRow(label: String, sub: String?, onClick: () -> Unit, round: Boolean = 
 }
 
 /**
- * Asks for a name in a sheet: the field, one line under it ([note], in danger when [isError]), anything in [extra]
- * (suggestions), then Cancel and [confirm]. The caller owns the text and decides what's valid ([enabled]).
+ * Asks for a name in a sheet: [hint] above, the field (showing [placeholder] while empty), one line under it ([note], in
+ * danger when [isError]), anything in [extra] (suggestions), then Cancel and [confirm]. The caller owns the text and
+ * decides what's valid ([enabled]).
  */
 @Composable
 fun NameSheet(
@@ -568,17 +631,20 @@ fun NameSheet(
     note: String? = null,
     isError: Boolean = false,
     capitalization: KeyboardCapitalization = KeyboardCapitalization.Sentences,
+    hint: String? = null,
+    placeholder: String = "Name",
     extra: @Composable ColumnScope.() -> Unit = {},
 ) {
     val focus = remember { FocusRequester() }
     Sheet(onDismiss, title) {
-        Column(verticalArrangement = Arrangement.spacedBy(Space.s4)) {
+        Column(verticalArrangement = Arrangement.spacedBy(Space.s3)) {
+            hint?.let { Text(it, style = AlbumTheme.type.body, color = AlbumTheme.colors.inkMuted) }
             OutlinedTextField(
                 text,
                 onText,
                 Modifier.fillMaxWidth().focusRequester(focus),
                 textStyle = AlbumTheme.type.body,
-                label = { Text("Name") },
+                placeholder = { Text(placeholder) },
                 supportingText = note?.let { { Text(it) } },
                 isError = isError,
                 singleLine = true,
@@ -588,16 +654,22 @@ fun NameSheet(
                 colors = albumFieldColors(),
             )
             extra()
-            Row(horizontalArrangement = Arrangement.spacedBy(Space.s2)) {
-                AlbumButton("Cancel", onDismiss, Modifier.weight(1f))
-                AlbumButton(confirm, onConfirm, Modifier.weight(1.5f), ButtonVariant.Primary, enabled = enabled)
-            }
+            SheetButtons(confirm, enabled, onDismiss, onConfirm)
         }
         LaunchedEffect(focus) { focus.requestFocus() }
     }
 }
 
-/** The design's text field: surface-high with a line-strong edge, ink text, danger for problems. */
+/** A sheet's closing pair: Cancel, and the wider primary [confirm], off until [enabled]. */
+@Composable
+fun SheetButtons(confirm: String, enabled: Boolean, onCancel: () -> Unit, onConfirm: () -> Unit) {
+    Row(Modifier.padding(top = Space.s2), horizontalArrangement = Arrangement.spacedBy(Space.s2)) {
+        AlbumButton("Cancel", onCancel, Modifier.weight(1f).heightIn(min = 52.dp))
+        AlbumButton(confirm, onConfirm, Modifier.weight(1.4f).heightIn(min = 52.dp), ButtonVariant.Primary, enabled = enabled)
+    }
+}
+
+/** The design's text field: surface-high with a line-strong edge, a focus ring in flash-ink, ink text, danger for problems. */
 @Composable
 fun albumFieldColors(): TextFieldColors {
     val c = AlbumTheme.colors
@@ -606,7 +678,7 @@ fun albumFieldColors(): TextFieldColors {
         focusedContainerColor = c.surfaceHigh, unfocusedContainerColor = c.surfaceHigh, errorContainerColor = c.surfaceHigh,
         cursorColor = c.ink, errorCursorColor = c.danger,
         selectionColors = TextSelectionColors(handleColor = c.flashInk, backgroundColor = c.flashSoft),
-        focusedBorderColor = c.ink, unfocusedBorderColor = c.lineStrong, errorBorderColor = c.danger,
+        focusedBorderColor = c.flashInk, unfocusedBorderColor = c.lineStrong, errorBorderColor = c.danger,
         focusedLabelColor = c.inkMuted, unfocusedLabelColor = c.inkMuted, errorLabelColor = c.danger,
         focusedSupportingTextColor = c.inkMuted, unfocusedSupportingTextColor = c.inkMuted, errorSupportingTextColor = c.danger,
         focusedPlaceholderColor = c.inkMuted, unfocusedPlaceholderColor = c.inkMuted,
@@ -614,9 +686,9 @@ fun albumFieldColors(): TextFieldColors {
 }
 
 /**
- * A full-screen page pushed over the tabs (All albums, Places, People): a 3-column grid that starts with a large title,
- * with the one-row bar taking over once that title scrolls away. Both bars show [actions]. Draws its own background,
- * insets and Back.
+ * A full-screen page pushed over the tabs: a 3-column grid that starts with a large title, with the one-row bar taking
+ * over once that title scrolls away. [collapsed] keeps the one-row bar from the start, as the pages Collections opens
+ * have it (All albums, a group, Things). Both bars show [actions]. Draws its own background, insets and Back.
  */
 @Composable
 fun PushedGridPage(
@@ -625,11 +697,12 @@ fun PushedGridPage(
     state: LazyGridState,
     onBack: () -> Unit,
     actions: @Composable RowScope.() -> Unit = {},
+    collapsed: Boolean = false,
     content: LazyGridScope.() -> Unit,
 ) {
     val c = AlbumTheme.colors
     val collapseAt = with(LocalDensity.current) { (Space.target + Space.s6).roundToPx() } // about where the large title starts
-    val collapsed by remember(state) { derivedStateOf { state.firstVisibleItemIndex > 0 || state.firstVisibleItemScrollOffset > collapseAt } }
+    val scrolled by remember(state) { derivedStateOf { state.firstVisibleItemIndex > 0 || state.firstVisibleItemScrollOffset > collapseAt } }
     val bars = WindowInsets.systemBars.asPaddingValues()
     BackHandler(onBack = onBack)
     Box(Modifier.fillMaxSize().background(c.canvas).pointerInput(Unit) {}) { // catches taps that would reach the screen underneath
@@ -638,14 +711,16 @@ fun PushedGridPage(
             Modifier.fillMaxSize(),
             state = state,
             contentPadding = PaddingValues(
-                start = Space.s4, end = Space.s4, top = bars.calculateTopPadding(), bottom = bars.calculateBottomPadding() + Space.s8,
+                start = Space.s4, end = Space.s4, bottom = bars.calculateBottomPadding() + Space.s8,
+                // the one-row bar is 56dp and its hairline, then a little air
+                top = bars.calculateTopPadding() + if (collapsed) CollapsedBarHeight + Space.s2 else 0.dp,
             ),
             horizontalArrangement = Arrangement.spacedBy(Space.s3),
         ) {
-            fullRow("top") { LargeTopBar(title, subtitle = subtitle, onBack = onBack, actions = actions) }
+            if (!collapsed) fullRow("top") { LargeTopBar(title, subtitle = subtitle, onBack = onBack, actions = actions) }
             content()
         }
-        CollapsingBar(collapsed) {
+        CollapsingBar(collapsed || scrolled) {
             Box(Modifier.background(c.canvas).statusBarsPadding()) { CollapsedTopBar(title, subtitle = subtitle, onBack = onBack, actions = actions) }
         }
     }

@@ -92,10 +92,21 @@ class PrivacyTest {
     }
 
     @Test fun wrongPinNotesCountDownToTheWait() {
-        assertEquals("Wrong PIN", wrongPinNote(1))
-        assertEquals("Wrong PIN. 2 more tries before a wait.", wrongPinNote(FREE_TRIES - 2))
-        assertEquals("Wrong PIN. 1 more try before a wait.", wrongPinNote(FREE_TRIES - 1))
-        assertEquals("Wrong PIN", wrongPinNote(FREE_TRIES + 3)) // the wait itself says the rest
+        assertEquals("Wrong PIN. Try again.", wrongPinNote(1))
+        assertEquals("Wrong PIN. Try again.", wrongPinNote(2))
+        assertEquals("Wrong PIN. 2 tries left before a short wait.", wrongPinNote(FREE_TRIES - 2))
+        assertEquals("Wrong PIN. 1 try left before a short wait.", wrongPinNote(FREE_TRIES - 1))
+        assertEquals("Wrong PIN.", wrongPinNote(FREE_TRIES))
+        assertEquals("Wrong PIN.", wrongPinNote(FREE_TRIES + 3)) // the wait itself says the rest
+    }
+
+    @Test fun pinAndHidingMessagesCarryTheirIcons() {
+        assertEquals(Sym.Lock, messageIcon("PIN set"))
+        assertEquals(Sym.Lock, messageIcon("PIN changed"))
+        assertEquals(Sym.Fingerprint, messageIcon("PIN and fingerprint set"))
+        assertEquals(Sym.VisibilityOff, messageIcon("Hid 2 items"))
+        assertEquals(Sym.Visibility, messageIcon("Unhid 2 items"))
+        assertEquals(Sym.Info, messageIcon("Couldn't move everyone to Hidden items. Try again."))
     }
 
     @Test fun waitsReadAsMinutesAndSeconds() {

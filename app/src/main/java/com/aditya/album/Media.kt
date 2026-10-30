@@ -44,7 +44,6 @@ import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
-import android.widget.Toast
 
 /** One photo or video from Android's media index (MediaStore). Read-only: the app never edits files directly. */
 data class Media(
@@ -219,7 +218,7 @@ const val MAX_SHARE = 500
 /** Whether [count] items can go in one request or share, capped at [max]; if not, says why in a short message. */
 fun Context.canSend(count: Int, max: Int, verb: String): Boolean {
     if (count in 1..max) return true
-    if (count > max) Toast.makeText(this, "You can $verb up to ${"%,d".format(max)} items at a time", Toast.LENGTH_SHORT).show()
+    if (count > max) Messages.post(this, "You can $verb up to ${"%,d".format(max)} items at a time", Sym.Info)
     return false
 }
 
@@ -227,7 +226,7 @@ fun Context.canSend(count: Int, max: Int, verb: String): Boolean {
 fun Context.startSafely(intent: Intent) {
     runCatching { startActivity(intent) }.onFailure {
         CrashLog.note("no activity for ${intent.action}: $it")
-        Toast.makeText(this, "No app on this phone can do that", Toast.LENGTH_SHORT).show()
+        Messages.post(this, "No app on this phone can do that")
     }
 }
 

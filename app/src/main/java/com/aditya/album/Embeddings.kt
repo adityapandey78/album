@@ -551,7 +551,7 @@ fun DescribeSearchRow(modifier: Modifier = Modifier) {
     if (confirm) {
         ConfirmBar(
             title = "Remove describe-it search?",
-            body = "Frees $size. To search by description again, you'd download it again and wait for your photos to be read.",
+            body = "Frees $size. To use it again, download it and let Album read your photos again.",
             confirmLabel = "Remove",
             onConfirm = {
                 confirm = false

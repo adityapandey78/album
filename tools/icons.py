@@ -4,9 +4,11 @@ Writes app/src/main/res/font/symbols.ttf and app/src/main/java/com/aditya/album/
 To add an icon, add its name to ICONS and rerun:
 
     python3 -m venv /tmp/fv && /tmp/fv/bin/pip install fonttools==4.55.3
-    curl -L -o /tmp/s.ttf 'https://github.com/google/material-design-icons/raw/master/variablefont/MaterialSymbolsRounded%5BFILL,GRAD,opsz,wght%5D.ttf'
-    curl -L -o /tmp/s.codepoints 'https://github.com/google/material-design-icons/raw/master/variablefont/MaterialSymbolsRounded%5BFILL,GRAD,opsz,wght%5D.codepoints'
+    curl -L -o /tmp/s.ttf 'https://github.com/google/material-design-icons/raw/10ecc14790612ca8fd164e3f4ffe9c16fc50d5b7/variablefont/MaterialSymbolsRounded%5BFILL,GRAD,opsz,wght%5D.ttf'
+    curl -L -o /tmp/s.codepoints 'https://github.com/google/material-design-icons/raw/10ecc14790612ca8fd164e3f4ffe9c16fc50d5b7/variablefont/MaterialSymbolsRounded%5BFILL,GRAD,opsz,wght%5D.codepoints'
     /tmp/fv/bin/python tools/icons.py /tmp/s.ttf /tmp/s.codepoints
+Pinned to commit 10ecc147 (23 Oct 2026). SHA-256: ttf 7e74e36533ccee12c2b81e75bfcf3ccf123d3bb7e7e46d65d94445f23db0c97c,
+codepoints a7404d9e5a1b63f496cf05ace45d386075886b5a7f123fba9f29527cb6006fde.
 """
 import pathlib
 import sys
@@ -29,6 +31,7 @@ light_mode contrast play_circle stop skip_next skip_previous replay sd_card phon
 radio_button_unchecked more_horiz cancel help flag auto_delete hourglass_empty bolt burst_mode panorama gif today
 date_range view_module dashboard timer speed map forest nightlight local_florist directions_walk shopping_bag
 menu_book music_note brush groups label_off new_label photo_frame mail
+apps backspace blur_on calculate chat cloud create_new_folder explore exposure fast_forward filter_none folder_copy font_download forward forward_10 lock_reset login masks movie partly_cloudy_day pin rainy repeat replay_10 science stacks sticky_note_2 table_chart work
 """.split()
 
 

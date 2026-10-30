@@ -14,6 +14,7 @@ import android.os.Process
 import android.os.SystemClock
 import android.provider.MediaStore
 import android.provider.MediaStore.Files.FileColumns
+import androidx.core.content.edit
 import androidx.exifinterface.media.ExifInterface
 import androidx.room.Room
 import androidx.work.Constraints
@@ -39,6 +40,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -59,6 +61,7 @@ private const val BATCH = 32 // items per database transaction; also how often p
 /** Long side photos are decoded at for measuring: big enough to show defocus, and PDQ reads the same at any size. */
 const val LOOK_PX = 1024
 private const val JOB = "Clean-up" // as IndexStatus shows it; For you looks the pass up by this name
+private const val KEPT = "kept" // the ids Clean up's Keep took out of the categories, in the "cleanup" prefs
 
 // Tuning knobs, set conservatively: a missed suggestion costs nothing, a wrong one costs trust. CleanupEvalTest prints how
 // each does on its photos (copies, crops, bursts, night shots, documents, blur); retune there, then on a real library.
@@ -103,18 +106,18 @@ const val OLD_SCREENSHOT_MS = 30 * 24 * 60 * 60 * 1000L
 const val BIG_VIDEO_BYTES = 100_000_000L // 100 MB the way Android shows sizes (1,000-based)
 
 /**
- * Clean up's categories, in chip order, which is also the order they claim items in: each item shows under the first one
- * that explains it (see [cleanupOf]). [suggested] ones make up "N photos to review" and can be selected in one tap; the
- * others are there to browse and pick from. [app], when set, lends its launcher icon in place of [sym].
+ * Clean up's categories, in chip order. Each item shows under the one that explains it best (see [cleanupOf]).
+ * [suggested] ones make up "N photos to review" and can be selected in one tap; the others are there to browse and pick
+ * from. [app], when set, lends its launcher icon in place of [sym].
  */
 enum class CleanupKind(val label: String, val sym: Sym, val suggested: Boolean, val app: MediaApp? = null) {
     Copies("Copies", Sym.ContentCopy, true),
     Similar("Similar shots", Sym.BurstMode, true),
-    Exposure("Too dark or bright", Sym.LightMode, true), // each tile says which
-    Blurry("Blurry", Sym.Contrast, true),
+    Blurry("Blurry", Sym.BlurOn, true),
+    Exposure("Too dark or bright", Sym.Exposure, true), // each tile says which
     Screenshots("Old screenshots", Sym.ScreenshotMonitor, true),
-    BigVideos("Big videos", Sym.Videocam, false),
     WhatsApp("WhatsApp", Sym.Folder, false, MediaApp.WhatsApp),
+    BigVideos("Big videos", Sym.Videocam, false),
 }
 
 /** What cleanup reads of one item: a [Media] without its URI, so the rules run in plain unit tests. [modified] (seconds) is only known to the measuring pass. */
@@ -149,6 +152,8 @@ data class CleanupResult(
     val screenshots: List<Long>,
     val bigVideos: List<Long>, // biggest first
     val whatsApp: List<Long>,
+    /** The copies among [copies] with the same pixels as an original ([exactGroups]), so a set of only these was saved again. */
+    val exact: Set<Long> = emptySet(),
 ) {
     /** Originals of copies. A similar shot that has copies is one you shared or saved, so it stays like a best shot. */
     val originals: Set<Long> by lazy { copies.mapTo(HashSet()) { it.keep } }
@@ -180,6 +185,21 @@ data class CleanupResult(
         val going = trashed.toHashSet()
         return trashed.mapNotNull { copy -> keepOf[copy]?.takeIf { it !in going }?.let { it to copy } }
     }
+}
+
+/**
+ * [this] without what the user chose to keep ([kept]): no category lists it any more. A kept copy or similar shot leaves
+ * its group, but the group itself stays (even down to the one that stays), so an original still stands for its copies and
+ * is never suggested among similar shots.
+ */
+fun CleanupResult.without(kept: Set<Long>): CleanupResult {
+    if (kept.isEmpty()) return this
+    fun groups(gs: List<ShotGroup>) = gs.map { g -> g.copy(ids = g.ids.filter { it == g.keep || it !in kept }) }
+    fun ids(list: List<Long>) = list.filter { it !in kept }
+    return copy(
+        copies = groups(copies), similar = groups(similar), dark = ids(dark), bright = ids(bright), blurry = ids(blurry),
+        screenshots = ids(screenshots), bigVideos = ids(bigVideos), whatsApp = ids(whatsApp),
+    )
 }
 
 data class CleanupCount(val count: Int, val bytes: Long)
@@ -229,6 +249,7 @@ fun cleanupOf(shots: List<Shot>, rows: Map<Long, CleanupRow>, pairs: List<CopyPa
         screenshots = screenshots,
         bigVideos = bigVideos,
         whatsApp = shots.filter { it.id !in claimed && storageKind(it.isVideo, it.path, it.bucket, it.name) == StorageKind.WhatsApp }.map { it.id },
+        exact = exactCopies,
     )
 }
 
@@ -778,6 +799,11 @@ object Cleanup {
 
     private val passes = MutableStateFlow(0) // goes up after each pass, so the categories are worked out again
 
+    // What the user kept from Clean up: their choice, so it lives apart from the measurements, which may be dropped any time.
+    // ponytail: ids of deleted items stay in the set; prune against the Library if it ever grows past a few thousand.
+    private val prefs by lazy { app.getSharedPreferences("cleanup", Context.MODE_PRIVATE) }
+    private val kept = MutableStateFlow(emptySet<Long>())
+
     private val _result = MutableStateFlow<CleanupResult?>(null)
     private val _summary = MutableStateFlow<CleanupSummary?>(null)
 
@@ -803,17 +829,25 @@ object Cleanup {
         }
         // Categories come from the Library as it is now plus what's measured so far, so trashed photos leave at once.
         // Hidden items stay out of them (and out of For you's counts); they're still measured, so unhiding needs no pass.
+        // What the user kept stays out of them too.
         scope.launch {
-            combine(Gallery.media.filterNotNull(), Hidden.state.filterNotNull(), passes) { media, hidden, _ -> media.withoutHidden(hidden) }.collectLatest { media ->
+            kept.value = prefs.getStringSet(KEPT, null).orEmpty().mapNotNullTo(HashSet()) { it.toLongOrNull() }
+            combine(Gallery.media.filterNotNull(), Hidden.state.filterNotNull(), passes, kept) { media, hidden, _, k -> media.withoutHidden(hidden) to k }.collectLatest { (media, k) ->
                 val shots = media.map { it.toShot() }
                 val sizes = shots.associate { it.id to it.size }
                 // Rows of an older version or an edited file are as good as unmeasured until the pass redoes them
                 val rows = dao.all().filter { it.version == CLEANUP_VERSION && it.size == sizes[it.id] }.associateBy { it.id }
-                val result = cleanupOf(shots, rows, dao.pairs(), System.currentTimeMillis())
+                val result = cleanupOf(shots, rows, dao.pairs(), System.currentTimeMillis()).without(k)
                 _result.value = result
                 _summary.value = summaryOf(result) { sizes[it] ?: 0L }
             }
         }
+    }
+
+    /** Keeps [ids] out of every category from now on, as Clean up's Keep does; [keep] false lets them back in (Undo). */
+    fun keep(ids: Collection<Long>, keep: Boolean = true) {
+        val now = kept.updateAndGet { if (keep) it + ids else it - ids.toSet() }
+        prefs.edit { putStringSet(KEPT, now.mapTo(HashSet()) { it.toString() }) }
     }
 
     /** One pass: drops rows of deleted media, then measures new and changed files in batches, newest first, and plans again. */

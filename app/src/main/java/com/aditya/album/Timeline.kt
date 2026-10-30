@@ -2,7 +2,17 @@ package com.aditya.album
 
 import android.content.Context
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -122,6 +132,9 @@ fun <T> sections(media: List<T>, byMonth: Boolean, today: Long = LocalDate.now()
     }
     return out
 }
+
+/** A day's place under its date, as "Bengaluru, Karnataka": the town and its state, either alone when the other is unknown. */
+fun placeLine(place: Place): String? = listOf(place.city, place.admin1).filter { it.isNotEmpty() }.distinct().joinToString(", ").ifEmpty { null }
 
 /** A section's key: the epoch day, or year * 12 + month in month view. Newer sections have bigger keys. */
 private fun sectionKey(day: Long, byMonth: Boolean) = if (byMonth) LocalDate.ofEpochDay(day).let { it.year * 12L + it.monthValue } else day
@@ -298,9 +311,19 @@ private fun rowHeight(item: GridItem, width: Int, gutter: Int, shapeAt: (Int) ->
 /**
  * The scrubber's estimate of every lazy item's height in px (see [ScrollMap]), from the layout instead of measuring:
  * a line of cells counts once, on its last cell, so every cell of a line starts at the line's top. [top] and [header]
- * are the heights of the caller's header and a date header ([firstHeader] for the first, which has less room above).
+ * are the heights of the caller's header and a date header ([firstHeader] for the first, which has less room above);
+ * [headerExtra] adds to a section's header (its place line).
  */
-fun estimateHeights(layout: GridLayout, width: Int, gutter: Int, top: Int, header: Int, firstHeader: Int, shapeAt: (Int) -> Float): IntArray {
+fun estimateHeights(
+    layout: GridLayout,
+    width: Int,
+    gutter: Int,
+    top: Int,
+    header: Int,
+    firstHeader: Int,
+    shapeAt: (Int) -> Float,
+    headerExtra: (section: Int) -> Int = { 0 },
+): IntArray {
     val cell = cellWidths(width, layout.columns, gutter)[0]
     var run = 0 // cells so far in the current run of cells
     return IntArray(layout.items.size) { i ->
@@ -308,7 +331,7 @@ fun estimateHeights(layout: GridLayout, width: Int, gutter: Int, top: Int, heade
         if (item.slot != Slot.Cell) run = 0
         when (item.slot) {
             Slot.Top -> top + gutter
-            Slot.Header -> (if (item.section == 0) firstHeader else header) + gutter
+            Slot.Header -> (if (item.section == 0) firstHeader else header) + headerExtra(item.section) + gutter
             Slot.Row, Slot.Feature -> itemHeight(item, width, gutter, layout.columns, shapeAt) + gutter
             Slot.Cell -> {
                 run++
@@ -390,8 +413,14 @@ fun cellBounds(state: LazyGridState, mediaId: Long): Rect? {
 
 // ---------- The grid ----------
 
-/** The collapsed title bar (CollapsedTopBar) covers this much of the grid's top once it scrolls, so the scrubber starts below it. */
-private val collapsedBar = Space.target + Space.s2
+/** The scrubber starts this far below the top of a grid with a title: 15dp under the collapsed title bar. */
+private val scrubberTop = CollapsedBarHeight + 15.dp
+
+/** Where a calendar jump leaves the day's header: its top just under the collapsed title bar, so the date is readable. */
+private val jumpGap = 72.dp
+
+/** How long the column count shows after a pinch step. */
+private const val ZOOM_NOTE_MS = 900L
 
 /**
  * The photo grid of the Library and every album, in the gallery style chosen in Settings > Appearance.
@@ -399,7 +428,9 @@ private val collapsedBar = Space.target + Space.s2
  * [cellBounds] to find a photo's cell on screen. Long-press and drag selects a range; [onSelect] receives the whole new
  * selection. [header] scrolls with the photos above the first date (the screen's LargeTopBar).
  * [jumpTo] scrolls to that epoch day's date header (or its month's) and makes it glow once, as after a calendar jump;
- * [onJumped] runs once that's done so the caller can clear it, which keeps the jump from repeating later.
+ * [onJumped] runs once that's done so the caller can clear it, which keeps the jump from repeating later. [bar] is drawn
+ * over the grid (the screen's CollapsingBar), under the column count a pinch shows. Each day's header names where its
+ * newest placed photo was taken.
  */
 @Composable
 fun MediaGrid(
@@ -415,6 +446,8 @@ fun MediaGrid(
     jumpTo: Long? = null,
     onJumped: () -> Unit = {},
     selectMode: Boolean = false, // the top bar's Select: checks show before anything is picked
+    badge: ((Media) -> String?)? = null, // a badge on every tile, small ones too (Trash's days left); else the photo's own
+    bar: (@Composable () -> Unit)? = null,
 ) {
     val spec = AlbumTheme.spec
     val type = AlbumTheme.type
@@ -424,6 +457,12 @@ fun MediaGrid(
     val cols = columns.intValue
     val byMonth = cols >= MONTH_COLUMNS
     val sections = remember(media, byMonth) { sections(media, byMonth) { it.day } }
+    // The place of each day's newest photo that has one; months don't get one, they span too many
+    val placeOf = rememberPlaces()
+    val places = remember(sections, placeOf) {
+        if (byMonth || placeOf.isEmpty()) emptyList()
+        else sections.map { s -> s.items.firstNotNullOfOrNull { placeOf[it.id] }?.let(::placeLine) }
+    }
     val layout = remember(sections, cols, spec.appearance.gallery, header != null) {
         gridLayout(sections, cols, spec.appearance.gallery, top = header != null, ::shapeOf)
     }
@@ -440,14 +479,17 @@ fun MediaGrid(
     val endPadding = with(density) { contentPadding.calculateEndPadding(direction).roundToPx() }
     var width by remember { mutableIntStateOf(0) }
     val itemWidth = (width - startPadding - endPadding).coerceAtLeast(0)
-    val scrollMap = remember(layout, itemWidth, gutter, density, type) {
+    val scrollMap = remember(layout, itemWidth, gutter, density, type, places) {
         with(density) {
             val title = type.titleMd.lineHeight.roundToPx()
+            val placeLine = type.caption.lineHeight.roundToPx()
             // ponytail: the caller's header is guessed as a LargeTopBar (actions row, title, subtitle); a wrong guess only
             // nudges the scrubber near the top. Measuring it would need a remeasure pass for one item.
             val top = (Space.s2 + Space.target + Space.s6 + Space.s1 + Space.s3).roundToPx() + type.titleXl.lineHeight.roundToPx() + type.meta.lineHeight.roundToPx()
             ScrollMap(
-                estimateHeights(layout, itemWidth, gutter, top, title + (Space.s8 + Space.s3).roundToPx(), title + (Space.s2 + Space.s3).roundToPx(), shapeAt),
+                estimateHeights(
+                    layout, itemWidth, gutter, top, title + (Space.s8 + Space.s3).roundToPx(), title + (Space.s2 + Space.s3).roundToPx(), shapeAt,
+                ) { section -> if (places.getOrNull(section) != null) placeLine else 0 },
                 itemMonths(layout, sections) { it.day },
             )
         }
@@ -463,7 +505,7 @@ fun MediaGrid(
         val day = jumpTo ?: return@LaunchedEffect
         val target = latestLayout
         target.headerOf(sectionKey(day, target.columns >= MONTH_COLUMNS))?.let { position ->
-            state.requestScrollToItem(position)
+            state.requestScrollToItem(position, -with(density) { jumpGap.roundToPx() })
             pulse = latestSections[target.items[position].section].key
         }
         CrashLog.note("jump to date")
@@ -479,9 +521,18 @@ fun MediaGrid(
         pulse = null
     }
 
+    // Each pinch step shows the new column count for a moment; a new step restarts it
+    var zoomNote by remember { mutableStateOf<ZoomNote?>(null) }
+    LaunchedEffect(zoomNote) {
+        if (zoomNote == null) return@LaunchedEffect
+        delay(ZOOM_NOTE_MS)
+        zoomNote = null
+    }
+
     val selecting = selectMode || selected.isNotEmpty()
     val small = cols >= 5
     val toggle = { m: Media -> onSelect(if (m.id in selected) selected - m.id else selected + m.id) }
+    fun badgeOf(m: Media, small: Boolean) = badge?.invoke(m) ?: if (small) null else traitBadge(m)
     val latestHaptics by rememberUpdatedState(haptics)
     // Test tags double as resource ids so the benchmarks (UiAutomator) can find the grid, tiles and the scrubber
     Box(modifier.fillMaxSize().onSizeChanged { width = it.width }.semantics { testTagsAsResourceId = true }) {
@@ -495,6 +546,7 @@ fun MediaGrid(
                     if (next != columns.intValue) {
                         columns.intValue = next
                         latestHaptics.tick()
+                        zoomNote = ZoomNote(next)
                     }
                 }
                 .dragToSelect(state, media, layout, gutter, startPadding, shapeAt, rememberUpdatedState(selected), rememberUpdatedState(onSelect), haptics),
@@ -516,6 +568,7 @@ fun MediaGrid(
                         val section = sections[item.section]
                         DateHeader(
                             section.label,
+                            places.getOrNull(item.section),
                             first = item.section == 0,
                             selecting = selecting,
                             checked = selecting && section.items.all { it.id in selected },
@@ -525,34 +578,71 @@ fun MediaGrid(
                             onSelect(toggleAll(selected, section.items.map { it.id }))
                         }
                     }
-                    Slot.Cell -> GridTile(media[item.from], small, checkSizeFor(cols), selecting, media[item.from].id in selected, onOpen, toggle, Modifier.aspectRatio(1f))
+                    Slot.Cell -> GridTile(media[item.from], small, checkSizeFor(cols), selecting, media[item.from].id in selected, onOpen, toggle, badgeOf(media[item.from], small), Modifier.aspectRatio(1f))
                     Slot.Row, Slot.Feature -> TileRow(item, cols, gutter, shapeAt) { index, big ->
                         // Rows are reused for other rows as the grid scrolls; the key keeps a tile's selection animation its own
                         // a Mosaic 2x2 tile is as big as one at half the columns, so its check is too
-                        key(media[index].id) { GridTile(media[index], small && !big, checkSizeFor(if (big) cols / 2 else cols), selecting, media[index].id in selected, onOpen, toggle) }
+                        key(media[index].id) { GridTile(media[index], small && !big, checkSizeFor(if (big) cols / 2 else cols), selecting, media[index].id in selected, onOpen, toggle, badgeOf(media[index], small && !big)) }
                     }
                 }
             }
         }
-        FastScroller(state, scrollMap, contentPadding, Modifier.align(Alignment.TopEnd), topInset = if (header != null) collapsedBar else 0.dp)
+        FastScroller(state, scrollMap, contentPadding, Modifier.align(Alignment.TopEnd), topInset = if (header != null) scrubberTop else 0.dp)
+        bar?.invoke()
+        zoomNote?.let { note ->
+            key(note) { ZoomNotePill(note.columns, Modifier.align(Alignment.TopCenter).padding(top = contentPadding.calculateTopPadding() + Space.s3)) }
+        }
+    }
+}
+
+/** One pinch step's note; a new instance per step, so the same count twice still restarts it. */
+private class ZoomNote(val columns: Int)
+
+/** The column count after a pinch step: a small pill at the top that pops in, gone after [ZOOM_NOTE_MS]. */
+@Composable
+private fun ZoomNotePill(columns: Int, modifier: Modifier) {
+    val c = AlbumTheme.colors
+    val still = AlbumTheme.spec.still
+    val pop = remember { Animatable(if (still) 1f else 0f) }
+    LaunchedEffect(Unit) { pop.animateTo(1f, tween(220, easing = CubicBezierEasing(0.2f, 0.9f, 0.3f, 1.3f))) }
+    Row(
+        modifier
+            .graphicsLayer {
+                scaleX = 0.8f + 0.2f * pop.value
+                scaleY = scaleX
+                alpha = pop.value.coerceIn(0f, 1f)
+            }
+            .floating(CircleShape).background(c.surfaceHigh, CircleShape)
+            .semantics { liveRegion = LiveRegionMode.Polite }
+            .padding(horizontal = Space.s4, vertical = Space.s2),
+        horizontalArrangement = Arrangement.spacedBy(Space.s1),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Sym.Pinch, null, size = Space.iconSm, tint = c.ink)
+        Text("$columns columns", style = AlbumTheme.type.meta, color = c.ink)
     }
 }
 
 /**
- * Date header: the day ("Today", "Sat, 24 Oct") or month in title-md. While selecting, a check on the right and the
- * whole header select or clear that day (or month). [glow] (0..1) tints it flash-soft after a calendar jump.
+ * Date header: the day ("Today", "Sat, 24 Oct") or month in title-md, and under it in a caption the day's [place]. While
+ * selecting, a check on the right, level with the bottom line, and the whole header select or clear that day (or month).
+ * [glow] (0..1) tints it flash-soft after a calendar jump.
  */
 @Composable
-private fun DateHeader(label: String, first: Boolean, selecting: Boolean, checked: Boolean, glow: (() -> Float)?, onToggle: () -> Unit) {
+private fun DateHeader(label: String, place: String?, first: Boolean, selecting: Boolean, checked: Boolean, glow: (() -> Float)?, onToggle: () -> Unit) {
     val c = AlbumTheme.colors
     Row(
         Modifier.fillMaxWidth()
             .then(if (glow != null) Modifier.drawBehind { drawRoundRect(c.flashSoft, cornerRadius = CornerRadius(Space.radiusMd.toPx()), alpha = glow()) } else Modifier)
             .then(if (selecting) Modifier.toggleable(checked, role = Role.Checkbox, onValueChange = { onToggle() }) else Modifier)
             .padding(start = Space.s4, end = Space.s4, top = if (first) Space.s2 else Space.s8, bottom = Space.s3),
+        horizontalArrangement = Arrangement.spacedBy(Space.s4),
         verticalAlignment = Alignment.Bottom,
     ) {
-        Text(label, Modifier.weight(1f).semantics { heading() }, style = AlbumTheme.type.titleMd, color = c.ink)
+        Column(Modifier.weight(1f)) {
+            Text(label, Modifier.semantics { heading() }, style = AlbumTheme.type.titleMd, color = c.ink)
+            place?.let { Text(it, style = AlbumTheme.type.caption, color = c.inkMuted, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+        }
         if (selecting) SelectCheck(checked, onSurface = true)
     }
 }
@@ -567,17 +657,22 @@ private fun GridTile(
     selected: Boolean,
     onOpen: (Media) -> Unit,
     onToggle: (Media) -> Unit,
+    badge: String?,
     modifier: Modifier = Modifier,
 ) {
+    val source = remember { MutableInteractionSource() }
+    val pressed by source.collectIsPressedAsState()
     MediaTile(
         m, selecting, selected,
         modifier.testTag("media_tile")
-            // No ripple: the photo opening (or its check popping) is the feedback
-            .clickable(interactionSource = null, indication = null) { if (selecting) onToggle(m) else onOpen(m) }
+            // No ripple: the photo dipping while pressed, then opening (or its check popping), is the feedback
+            .clickable(interactionSource = source, indication = null) { if (selecting) onToggle(m) else onOpen(m) }
             // Touch long-press is handled by the grid's dragToSelect; this keeps it for TalkBack and switch access.
             .semantics { onLongClick("Select") { onToggle(m); true } },
         small = small,
+        badge = badge,
         checkSize = checkSize,
+        pressed = pressed,
     )
 }
 

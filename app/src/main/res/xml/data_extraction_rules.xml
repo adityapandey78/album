@@ -12,6 +12,7 @@
     </cloud-backup>
     <device-transfer>
         <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="cleanup.xml" /> <!-- Clean up's kept photos, by MediaStore id too -->
         <exclude domain="file" path="safe" />
     </device-transfer>
 </data-extraction-rules>

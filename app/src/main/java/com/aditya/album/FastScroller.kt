@@ -1,5 +1,17 @@
 package com.aditya.album
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.tween
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
@@ -7,6 +19,7 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
@@ -17,6 +30,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -120,7 +134,7 @@ private class Tick(val label: String, val at: Float)
 
 /**
  * Fast scroll for a long timeline: a floating thumb on the right edge that appears once the grid scrolls and fades
- * 1.5 s after it stops, only when there are more than about three screens of photos. Dragging it moves through the
+ * 1.5 s after it stops, only when there are at least two screens of photos. Dragging it moves through the
  * whole grid in proportion, with a bubble showing the month and year, a track with year ticks, and a haptic tick per
  * month (a stronger one per year). TalkBack treats it as an adjustable control that steps by month.
  * [topInset] keeps it clear of a title bar drawn over the top of the grid.
@@ -136,7 +150,7 @@ fun FastScroller(state: LazyGridState, map: ScrollMap, contentPadding: PaddingVa
     val tickGap = with(density) { Space.s6.toPx() } // year labels closer than this on the track would overlap
     val monthNames = remember { Month.entries.map { it.getDisplayName(TextStyle.FULL_STANDALONE, Locale.getDefault()) } }
     // derivedStateOf: recompose when the answer changes, not on every scrolled frame
-    val long by remember(state, map) { derivedStateOf { state.layoutInfo.viewportSize.height.let { it > 0 && map.total > it * 3 } } }
+    val long by remember(state, map) { derivedStateOf { state.layoutInfo.viewportSize.height.let { it > 0 && map.total >= it * 2 } } }
     val monthIndex by remember(state, map) { derivedStateOf { map.monthIndexOf(state.firstVisibleItemIndex) } }
     var dragging by remember { mutableStateOf(false) }
     var shown by remember { mutableStateOf(false) }
@@ -152,43 +166,66 @@ fun FastScroller(state: LazyGridState, map: ScrollMap, contentPadding: PaddingVa
     var travel by remember { mutableFloatStateOf(0f) } // how far the thumb can move, px
     var thumbY by remember { mutableFloatStateOf(0f) } // thumb top while dragging, px
     var month by remember { mutableIntStateOf(0) } // year * 12 + month - 1 under the thumb while dragging
+    // Where the finger let go: the thumb stays there until the grid is scrolled some other way, so it never jumps when the
+    // grid's real end differs from the estimate
+    var pinned by remember { mutableStateOf<Float?>(null) }
+    LaunchedEffect(state) {
+        snapshotFlow { state.isScrollInProgress }.collect { if (it && !dragging) pinned = null }
+    }
     var ticks by remember { mutableStateOf(emptyList<Tick>()) }
     val width by animateDpAsState(if (dragging) thumbWidthActive else thumbWidth, if (still) snap() else spring(stiffness = Spring.StiffnessMedium), label = "thumbWidth")
 
     Box(
+        // 8dp in from the edge, so the thumb's right edge sits 16dp from it
         modifier.fillMaxHeight()
-            .padding(top = contentPadding.calculateTopPadding() + topInset, bottom = contentPadding.calculateBottomPadding())
+            .padding(top = contentPadding.calculateTopPadding() + topInset, bottom = contentPadding.calculateBottomPadding(), end = Space.s2)
             .onSizeChanged { travel = it.height - thumbPx },
     ) {
         AnimatedVisibility(
             shown && long,
             Modifier.fillMaxHeight(),
-            enter = if (still) EnterTransition.None else fadeIn(),
-            exit = if (still) ExitTransition.None else fadeOut(),
+            enter = if (still) EnterTransition.None else fadeIn(tween(200)),
+            exit = if (still) ExitTransition.None else fadeOut(tween(200)),
         ) {
             Box(Modifier.fillMaxHeight()) {
-                if (dragging) {
-                    // The track, centred under the thumb
-                    Box(Modifier.align(Alignment.TopEnd).padding(end = Space.s2 + thumbWidthActive / 2 - 1.dp).width(2.dp).fillMaxHeight().background(c.line, CircleShape))
-                    ticks.forEach { tick ->
-                        Text(
-                            tick.label,
-                            Modifier.align(Alignment.TopEnd).padding(end = Space.target + Space.s1).layout { measurable, constraints ->
-                                val p = measurable.measure(constraints)
-                                // Level with the thumb's centre when the thumb is at that year
-                                layout(p.width, p.height) { p.place(0, (tick.at * travel + (thumbPx - p.height) / 2).roundToInt()) }
-                            },
-                            style = type.meta,
-                            color = c.inkMuted,
-                        )
+                // The track and the year ticks fade in while dragging
+                AnimatedVisibility(
+                    dragging,
+                    Modifier.fillMaxHeight(),
+                    enter = if (still) EnterTransition.None else fadeIn(tween(200)),
+                    exit = if (still) ExitTransition.None else fadeOut(tween(200)),
+                ) {
+                    Box(Modifier.fillMaxHeight()) {
+                        // The track, centred under the thumb
+                        Box(Modifier.align(Alignment.TopEnd).padding(end = Space.s2 + thumbWidthActive / 2 - 1.dp).width(2.dp).fillMaxHeight().background(c.line, CircleShape))
+                        ticks.forEach { tick ->
+                            Text(
+                                tick.label,
+                                Modifier.align(Alignment.TopEnd).padding(end = Space.target + Space.s1).layout { measurable, constraints ->
+                                    val p = measurable.measure(constraints)
+                                    // Level with the thumb's centre when the thumb is at that year
+                                    layout(p.width, p.height) { p.place(0, (tick.at * travel + (thumbPx - p.height) / 2).roundToInt()) }
+                                },
+                                style = type.meta,
+                                color = c.inkMuted,
+                            )
+                        }
                     }
                 }
-                Row(
+                Box(
                     // Read in the layout phase, so scrolling moves the thumb without recomposing
-                    Modifier.align(Alignment.TopEnd).offset { IntOffset(0, (if (dragging) thumbY else state.progress(map) * travel).roundToInt()) },
-                    verticalAlignment = Alignment.CenterVertically,
+                    Modifier.align(Alignment.TopEnd).offset { IntOffset(0, (if (dragging) thumbY else pinned ?: (state.progress(map) * travel)).roundToInt()) },
                 ) {
-                    if (dragging) Bubble(monthNames[month % 12], "${month / 12}")
+                    // The bubble hangs to the left of the thumb, centred on it, outside the thumb's own layout: its size
+                    // changing with the month's name never moves the thumb
+                    if (dragging) {
+                        Box(
+                            Modifier.layout { m, cs ->
+                                val p = m.measure(cs.copy(minWidth = 0, maxWidth = Constraints.Infinity, minHeight = 0, maxHeight = Constraints.Infinity))
+                                layout(0, 0) { p.place(-p.width - Space.s1.roundToPx(), ((thumbPx - p.height) / 2).roundToInt()) }
+                            },
+                        ) { Bubble(monthNames[month % 12], "${month / 12}") }
+                    }
                     val months = map.monthStarts.size
                     val current = monthIndex
                     Box(
@@ -239,7 +276,10 @@ fun FastScroller(state: LazyGridState, map: ScrollMap, contentPadding: PaddingVa
                                     dragging = true
                                     CrashLog.note("fast scroll")
                                 },
-                                onDragStopped = { dragging = false },
+                                onDragStopped = {
+                                    pinned = thumbY
+                                    dragging = false
+                                },
                             ),
                         contentAlignment = Alignment.CenterEnd,
                     ) {
@@ -268,11 +308,23 @@ fun FastScroller(state: LazyGridState, map: ScrollMap, contentPadding: PaddingVa
 private fun Bubble(month: String, year: String) {
     val c = AlbumTheme.colors
     val shape = RoundedCornerShape(Space.radiusMd)
+    val still = AlbumTheme.spec.still
     Column(
-        Modifier.floating(shape).background(c.surface, shape).padding(horizontal = Space.s4, vertical = Space.s2),
+        Modifier.floating(shape).background(c.surface, shape)
+            // The pill flows to each month's width instead of snapping
+            .animateContentSize(if (still) snap() else spring(dampingRatio = 0.8f, stiffness = Spring.StiffnessMediumLow))
+            .padding(horizontal = Space.s4, vertical = Space.s2),
         horizontalAlignment = Alignment.End,
     ) {
-        Text(month, style = AlbumTheme.type.titleMd, color = c.ink, maxLines = 1)
+        AnimatedContent(
+            month,
+            transitionSpec = {
+                if (still) fadeIn(snap()) togetherWith fadeOut(snap())
+                else (slideInVertically(tween(160)) { it / 2 } + fadeIn(tween(160))) togetherWith (slideOutVertically(tween(120)) { -it / 2 } + fadeOut(tween(120)))
+            },
+            contentAlignment = Alignment.CenterEnd,
+            label = "month",
+        ) { Text(it, style = AlbumTheme.type.titleMd, color = c.ink, maxLines = 1) }
         Text(year, style = AlbumTheme.type.meta, color = c.inkMuted)
     }
 }

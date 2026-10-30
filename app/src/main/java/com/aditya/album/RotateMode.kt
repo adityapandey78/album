@@ -1,6 +1,5 @@
 package com.aditya.album
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -17,7 +16,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -112,41 +110,19 @@ fun SaveRotatedSheet(inPlace: Boolean, onDismiss: () -> Unit, onSave: (choice: R
     }
 }
 
-/** For Settings > Behaviour: what Save in rotate mode does. Tapping opens the three choices. */
+/** For Settings > Editing: what Save in rotate mode does, one chip per choice, each applying at once. */
 @Composable
 fun RotateSaveRow(modifier: Modifier = Modifier) {
     RotatePrefs.load(LocalContext.current)
     val choice by RotatePrefs.choice.collectAsState()
-    var choosing by remember { mutableStateOf(false) }
-    MenuRow(Sym.RotateRight, "Saving rotated photos", { choosing = true }, modifier, sub = choice.label)
-    if (!choosing) return
-    val c = AlbumTheme.colors
-    Sheet({ choosing = false }, "Saving rotated photos") {
-        RotateSave.entries.forEach { option ->
-            val on = option == choice
-            MenuRow(
-                when (option) {
-                    RotateSave.Ask -> Sym.Help
-                    RotateSave.Copy -> Sym.ContentCopy
-                    RotateSave.Original -> Sym.Image
-                },
-                option.label,
-                {
-                    CrashLog.note("rotate save ${option.name}")
-                    RotatePrefs.set(option)
-                    choosing = false
-                },
-                // The check carries the choice; the tint only backs it up
-                if (on) Modifier.background(c.flashSoft, RoundedCornerShape(Space.radiusMd)) else Modifier,
-                sub = when (option) {
-                    RotateSave.Ask -> null
-                    RotateSave.Copy -> "The original stays as it is"
-                    RotateSave.Original -> "Lossless where possible, otherwise a copy"
-                },
-                trailing = if (on) Sym.Check else null,
-            )
-        }
-    }
+    ChipRow(
+        "Saving rotated photos", RotateSave.entries.map { it to it.label }, choice,
+        { option ->
+            CrashLog.note("rotate save ${option.name}")
+            RotatePrefs.set(option)
+        },
+        modifier,
+    )
 }
 
 /** How the photo in rotate mode is turned, [quarters] clockwise: TalkBack hears it on the rotate buttons. */

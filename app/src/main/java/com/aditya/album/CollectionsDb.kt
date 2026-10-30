@@ -204,6 +204,23 @@ interface CollectionsDao {
         return GroupMove(before, dropEmptyGroups(), id)
     }
 
+    /** A new group called [name] holding albums [keys], each taken out of any group it was in. Returns its id. */
+    @Transaction
+    suspend fun newGroupOf(name: String, keys: List<String>, now: Long): Long {
+        val id = insert(AlbumGroup(name = name, created = now))
+        putMembers(keys.map { GroupMember(it, id, now) })
+        dropEmptyGroups() // a group whose last album came over
+        return id
+    }
+
+    /** Moves albums [keys] into group [id], each out of any group it was in. Nothing happens if the group is gone. */
+    @Transaction
+    suspend fun addToGroup(keys: List<String>, id: Long, now: Long) {
+        if (group(id) == null) return
+        putMembers(keys.map { GroupMember(it, id, now) })
+        dropEmptyGroups()
+    }
+
     /** Moves album [key] into group [id], or out of its group when [id] is null. */
     @Transaction
     suspend fun moveToGroup(key: String, id: Long?, now: Long): GroupMove {

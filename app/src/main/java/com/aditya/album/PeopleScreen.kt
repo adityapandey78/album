@@ -1,6 +1,5 @@
 package com.aditya.album
 
-import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.EnterTransition
@@ -13,7 +12,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -48,17 +47,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
@@ -181,86 +177,34 @@ fun PeopleScreen(state: LazyGridState, onBack: () -> Unit, onOpenPerson: (albumI
 }
 
 /**
- * A person as a round AlbumCard: their cover face, name (or "Add a name", muted) and photo count, centred. A pet's cover
- * carries a paw, so it reads as a pet in a row of faces.
+ * A person as a round AlbumCard: their cover face, name (or "Add a name", muted) and photo count, centred. A pet's circle
+ * carries a paw on its edge, so it reads as a pet in a row of faces.
  */
 @Composable
-fun PersonCard(p: PersonAlbum, modifier: Modifier = Modifier, count: Boolean = true, onClick: () -> Unit) {
+fun PersonCard(p: PersonAlbum, modifier: Modifier = Modifier, onClick: () -> Unit) {
     AlbumCard(
         name = p.name ?: NO_NAME,
-        meta = if (count) listOf("%,d".format(p.items.size)) else emptyList(),
+        meta = listOf("%,d".format(p.items.size)),
         description = "${spokenName(p)}, ${photoCount(p)}",
         onClick = onClick,
         modifier = modifier,
         round = true,
         nameColor = if (p.name == null) AlbumTheme.colors.inkMuted else AlbumTheme.colors.ink,
-    ) {
-        FaceImage(p.cover, Modifier.matchParentSize())
-        if (p.species != null) PetMark(Modifier.align(Alignment.BottomCenter).padding(bottom = Space.s1))
-    }
+        badges = { if (p.species != null) PetMark() },
+    ) { FaceImage(p.cover, Modifier.matchParentSize()) }
 }
 
 /**
- * The paw on a pet's cover: Badge's photo tone and size with the icon alone, so it reads on any photo and fits inside a
- * small circle (at the bottom, where the circle is narrow). TalkBack says "dog" or "cat" from the card instead.
+ * The paw on a pet's circle: a flash disc ringed with canvas, over the circle's bottom-right edge. TalkBack says "dog" or
+ * "cat" from the card instead.
  */
 @Composable
-private fun PetMark(modifier: Modifier) {
+private fun BoxScope.PetMark() {
     val c = AlbumTheme.colors
-    Box(modifier.size(20.dp).background(c.scrimPhoto, CircleShape), contentAlignment = Alignment.Center) {
-        Icon(Sym.Pets, null, filled = true, size = 14.dp, tint = c.onPhoto)
-    }
-}
-
-/**
- * Collections' People heading: the title, a quiet "3 to review" while there are "Same person?" questions, and See all
- * when [onSeeAll] is set. Spaced like SectionHead.
- */
-@Composable
-fun PeopleHead(reviews: Int, onReview: () -> Unit, onSeeAll: (() -> Unit)?) {
-    val c = AlbumTheme.colors
-    Row(
-        Modifier.fillMaxWidth().padding(start = Space.s4, end = Space.s4, top = Space.s6, bottom = Space.s3),
-        horizontalArrangement = Arrangement.spacedBy(Space.s1),
-        verticalAlignment = Alignment.Bottom,
-    ) {
-        Text("People", Modifier.weight(1f), style = AlbumTheme.type.titleMd, color = c.ink)
-        if (reviews > 0) HeadLink(reviewCount(reviews), c.inkMuted, onReview)
-        onSeeAll?.let { HeadLink("See all", c.flashInk, it) }
-    }
-}
-
-@Composable
-private fun HeadLink(text: String, color: Color, onClick: () -> Unit) {
-    Text(
-        text,
-        Modifier.clip(CircleShape).clickable(role = Role.Button, onClick = onClick).padding(horizontal = Space.s2, vertical = Space.s1),
-        style = AlbumTheme.type.label,
-        color = color,
-        maxLines = 1,
-    )
-}
-
-/**
- * Collections' People row: the first five of [people] as round faces with their names under them, in one row that
- * never scrolls sideways. Four instead when "Add a name" wouldn't fit under five (a narrow screen, a large font), so
- * the row never shows a clipped prompt. Empty places keep the faces' size.
- */
-@Composable
-fun PeopleRow(people: List<PersonAlbum>, onOpen: (PersonAlbum) -> Unit) {
-    val measurer = rememberTextMeasurer()
-    val label = AlbumTheme.type.label
-    val prompt = remember(measurer, label) { measurer.measure(NO_NAME, label).size.width }
-    BoxWithConstraints(Modifier.fillMaxWidth().padding(start = Space.s4, end = Space.s4, bottom = Space.s4)) {
-        val five = with(LocalDensity.current) { ((maxWidth - Space.s2 * 4) / 5).toPx() } >= prompt
-        val slots = if (five) 5 else 4
-        Row(horizontalArrangement = Arrangement.spacedBy(Space.s2)) {
-            for (i in 0 until slots) {
-                val p = people.getOrNull(i)
-                if (p == null) Spacer(Modifier.weight(1f)) else PersonCard(p, Modifier.weight(1f), count = false) { onOpen(p) }
-            }
-        }
-    }
+    Box(
+        Modifier.align(Alignment.BottomEnd).size(32.dp).background(c.canvas, CircleShape).padding(2.dp).background(c.flash, CircleShape),
+        contentAlignment = Alignment.Center,
+    ) { Icon(Sym.Pets, null, filled = true, size = Space.iconSm, tint = c.onFlash) }
 }
 
 /** A face cut from its photo, in a circle. Cached by face id, so each one is cut once per session. */
@@ -296,7 +240,7 @@ fun PersonHeader(person: PersonAlbum, onBack: () -> Unit, onOpenPerson: (albumId
     // [done] gets the person's id afterwards: by default, its page opens if the id changed
     fun change(note: String, edit: suspend () -> Long, done: (Long) -> Unit = { if (it != person.cluster) onOpenPerson(personAlbumId(it)) }) {
         CrashLog.note(note)
-        scope.launch { safely(edit)?.let(done) ?: Toast.makeText(context, COULDNT_SAVE, Toast.LENGTH_SHORT).show() }
+        scope.launch { safely(edit)?.let(done) ?: Messages.post(context, COULDNT_SAVE) }
     }
     val rename = if (person.name == null) NO_NAME else "Rename"
     val pet = person.species != null
@@ -455,12 +399,13 @@ private fun MergeSheet(person: PersonAlbum, others: List<PersonAlbum>, onDismiss
         val name = t.name ?: person.name
         ConfirmBar(
             title = if (name != null) "Merge into $name?" else if (pet) "Merge these pets?" else "Merge these people?",
-            body = "Their photos will show as one ${if (pet) "pet" else "person"}. Remove any that don't belong with Not ${name ?: titleOf(person)}.",
+            body = "Their photos show as one ${if (pet) "pet" else "person"}. Take out any that don't belong with Not ${name ?: titleOf(person)}.",
             confirmLabel = "Merge",
             onConfirm = { onMerge(t) },
             onCancel = { target = null },
             icon = Sym.Merge,
             tone = ConfirmTone.Flash,
+            face = t.cover,
         )
         return
     }
@@ -497,7 +442,7 @@ fun PeopleReviewScreen(onBack: () -> Unit) {
         scope.launch {
             if (safely(edit) == null) {
                 answered = answered.minusElement(key)
-                Toast.makeText(context, COULDNT_SAVE, Toast.LENGTH_SHORT).show()
+                Messages.post(context, COULDNT_SAVE)
             }
         }
     }

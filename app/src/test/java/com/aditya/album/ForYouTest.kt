@@ -61,16 +61,24 @@ class ForYouTest {
             "thisMonth" to day(2026, 10, 3), "end" to day(2026, 8, 31), "start" to day(2026, 8, 1), "july" to day(2026, 7, 31),
         )
         val m = monthRecap(p, today, dayOf)!!
-        assertEquals("August", m.title) // September had no photos
-        assertEquals("Recap · 2026", m.eyebrow)
+        assertEquals("August recap", m.eyebrow) // September had no photos
+        assertEquals("A month in photos", m.title) // none has a place
         assertEquals(listOf("start", "end"), names(m))
         assertNull(monthRecap(photos("thisMonth" to day(2026, 10, 3)), today, dayOf))
     }
 
     @Test fun recapCrossesTheYear() {
         val m = monthRecap(photos("nye" to day(2025, 12, 31)), LocalDate.of(2026, 1, 10), dayOf)!!
-        assertEquals("December", m.title)
-        assertEquals("Recap · 2025", m.eyebrow)
+        assertEquals("December recap", m.eyebrow)
+    }
+
+    @Test fun memoriesAreNamedForWhereMostPhotosWereTaken() {
+        val goa = Place("Calangute", "Goa", "IN", "India")
+        val mumbai = Place("Mumbai", "Maharashtra", "IN", "India")
+        val placeOf = mapOf("a" to goa, "b" to goa, "c" to mumbai)
+        val p = photos("a" to day(2025, 10, 25), "b" to day(2025, 10, 25), "c" to day(2025, 10, 25), "d" to day(2025, 10, 25))
+        assertEquals("Calangute", onThisDay(p, today, dayOf) { placeOf[it.first] }!!.title)
+        assertEquals("Calangute", monthRecap(p, today, dayOf) { placeOf[it.first] }!!.title)
     }
 
     @Test fun heroIsOnThisDayElseTheNewestTripElseTheLatestRecap() {
@@ -87,12 +95,6 @@ class ForYouTest {
         assertEquals(listOf("month", "week", "year"), titles(memoriesOf(null, emptyList(), month, week, year)))
         assertEquals(listOf("year"), titles(memoriesOf(null, emptyList(), null, null, year))) // a Library that starts this month
         assertEquals(emptyList<String>(), titles(memoriesOf<Int>(null, emptyList(), null, null, null)))
-    }
-
-    @Test fun opensOnTheSectionPickedLastTime() {
-        assertEquals(ForYouSection.Memories, forYouSection(null)) // first launch
-        assertEquals(ForYouSection.Cleanup, forYouSection("Cleanup"))
-        assertEquals(ForYouSection.Memories, forYouSection("Trips")) // a section that's gone
     }
 
     @Test fun stillCheckingOnlyForALongerPassAndUntilItEnds() {
@@ -131,12 +133,11 @@ class ForYouTest {
     @Test fun yearRecapIsLastYearInJanuaryAndThisYearFromJuly() {
         val p = photos("nye" to day(2025, 12, 31), "newYear" to day(2026, 1, 1), "june" to day(2026, 6, 30), "lastYear" to day(2025, 3, 1))
         val january = yearRecap(p, LocalDate.of(2026, 1, 10), dayOf)!!
-        assertEquals("Year recap", january.eyebrow)
-        assertEquals("2025", january.title)
+        assertEquals("Your 2025", january.eyebrow)
+        assertEquals("A year in photos", january.title)
         assertEquals(listOf("lastYear", "nye"), names(january))
         val soFar = yearRecap(p, LocalDate.of(2026, 7, 1), dayOf)!!
-        assertEquals("So far this year", soFar.eyebrow)
-        assertEquals("2026", soFar.title)
+        assertEquals("Your 2026", soFar.eyebrow)
         assertEquals(listOf("newYear", "june"), names(soFar))
         assertNull(yearRecap(p, LocalDate.of(2026, 6, 30), dayOf)) // February to June: none
         assertNull(yearRecap(p, LocalDate.of(2028, 1, 5), dayOf)) // 2027 had no photos
@@ -166,5 +167,21 @@ class ForYouTest {
             "VID : 9134 5678 9012 3456", // an Aadhaar virtual ID alone, no network or card words
         )
         notCards.forEach { assertEquals(it, false, looksLikeIdCard(it)) }
+    }
+
+    @Test fun ringCaptionIsTheMemorysFewWords() {
+        assertEquals("On this day", ringCaption("On this day · 2025", "Goa"))
+        assertEquals("This week", ringCaption("This week · 2025", "20 to 26 Oct"))
+        assertEquals("September", ringCaption("September recap", "Mumbai"))
+        assertEquals("2025", ringCaption("Your 2025", "A year in photos"))
+        assertEquals("Manali", ringCaption("Trip · 4 days", "Manali"))
+    }
+
+    @Test fun markPlayedAddsAndForgetsMemoriesNoLongerShown() {
+        val shown = listOf("a", "b")
+        assertEquals(setOf("a"), markPlayed(emptySet(), "a", shown))
+        assertEquals(setOf("a", "b"), markPlayed(setOf("a"), "b", shown))
+        assertEquals(setOf("b"), markPlayed(setOf("old"), "b", shown)) // "old" left For you
+        assertEquals(setOf("a"), markPlayed(setOf("a"), "a", shown))
     }
 }

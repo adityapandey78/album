@@ -74,7 +74,13 @@ data class CollectionAlbum(val collection: MediaCollection, val items: List<Medi
 }
 
 /** Album groups, their albums and chosen covers, as collections.db has them. */
-class Organisation(val groups: List<AlbumGroup>, val members: List<GroupMember>, val covers: List<AlbumCover>)
+class Organisation(val groups: List<AlbumGroup>, val members: List<GroupMember>, val covers: List<AlbumCover>) {
+    /** The name of the group each grouped album is in, by album key. */
+    fun groupNames(): Map<String, String> {
+        val names = groups.associate { it.id to it.name }
+        return members.mapNotNull { m -> names[m.groupId]?.let { m.albumKey to it } }.toMap()
+    }
+}
 
 /** The user's collections, kept in their own database (collections.db) because, unlike the smart index, they can't be rebuilt. */
 object Collections {
@@ -145,6 +151,12 @@ object Collections {
 
     /** Moves album [key] into group [id], or out of its group when [id] is null. */
     suspend fun moveToGroup(key: String, id: Long?): GroupMove = write { it.moveToGroup(key, id, System.currentTimeMillis()) }
+
+    /** A new group called [name] holding albums [keys], from New album group. Returns its id. */
+    suspend fun groupAlbums(name: String, keys: List<String>): Long = write { it.newGroupOf(name.trim(), keys, System.currentTimeMillis()) }
+
+    /** Moves albums [keys] into group [id], from a group's Add albums. */
+    suspend fun addToGroup(keys: List<String>, id: Long) = write { it.addToGroup(keys, id, System.currentTimeMillis()) }
 
     /** Undo for [newGroup] and [moveToGroup]. */
     suspend fun moveBack(key: String, move: GroupMove) = write { it.moveBack(key, move.before) }
@@ -234,8 +246,8 @@ fun rememberRemoveFromCollection(snackbar: SnackbarHostState): (CollectionAlbum,
 
 /**
  * Long-press sheet of a collection in Collections: pin, rename, change cover ([onCover]), its group ([group] names the one
- * it's in; [onGroup] picks) or delete it. Deleting asks first; the photos are never touched. [onDismiss] runs when it's
- * finished, whichever way.
+ * it's in; [onGroup] picks another, [onTakeOut] takes it out), share as ZIP ([onShare]) or delete it. Deleting asks first;
+ * the photos are never touched. [onDismiss] runs when it's finished, whichever way.
  */
 @Composable
 fun CollectionSheet(
@@ -245,21 +257,24 @@ fun CollectionSheet(
     group: String?,
     onCover: () -> Unit,
     onGroup: () -> Unit,
+    onTakeOut: () -> Unit,
+    onShare: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     var step by rememberSaveable { mutableStateOf(CollectionStep.Menu) }
     val id = c.collection.id
     when (step) {
         CollectionStep.Menu -> Sheet(onDismiss, c.name) {
-            MenuRow(Sym.PushPin, if (pinned) "Unpin" else "Pin", {
+            MenuRow(Sym.PushPin, if (pinned) "Unpin" else "Pin to the top", {
                 CrashLog.note(if (pinned) "unpin collection" else "pin collection")
                 AlbumPrefs.setPinned(collectionKey(id), !pinned)
                 onDismiss()
-            }, sub = "Pinned albums come first".takeIf { !pinned }, trailing = null)
-            MenuRow(Sym.Edit, "Rename", { step = CollectionStep.Rename }, trailing = null)
-            MenuRow(Sym.Image, "Change cover", onCover, trailing = null)
-            GroupRow(group, onGroup)
-            MenuRow(Sym.Delete, "Delete collection", { step = CollectionStep.Delete }, sub = "Its photos stay on your phone", trailing = null, danger = true)
+            }, trailing = null)
+            MenuRow(Sym.Edit, "Rename", { step = CollectionStep.Rename })
+            MenuRow(Sym.Image, "Change cover", onCover)
+            GroupMoveRows(group, onGroup, onTakeOut)
+            if (c.items.isNotEmpty()) ShareZipRow(onShare)
+            MenuRow(Sym.Delete, "Delete collection", { step = CollectionStep.Delete }, sub = "Its photos stay on your phone", trailing = null)
         }
         CollectionStep.Rename -> CollectionNameSheet("Rename collection", c.name, "Rename", all.filter { it !== c }.map { it.name }, onDismiss) { name ->
             onDismiss()
@@ -268,7 +283,7 @@ fun CollectionSheet(
         }
         CollectionStep.Delete -> ConfirmBar(
             title = "Delete ${c.name}?",
-            body = "Only the collection is deleted. Its ${itemCount(c.items.size)} stay on your phone.",
+            body = "Only the collection goes. Its ${if (c.items.size == 1) "1 item stays" else "${itemCount(c.items.size)} stay"} on your phone.",
             confirmLabel = "Delete collection",
             onConfirm = {
                 onDismiss()
@@ -277,7 +292,7 @@ fun CollectionSheet(
                 Collections.delete(id)
             },
             onCancel = onDismiss,
-            thumbs = c.items.take(3),
+            thumbs = c.items.take(2),
         )
     }
 }
@@ -292,13 +307,14 @@ fun AddToCollectionSheet(count: Int, collections: List<CollectionAlbum>, onPick:
         CollectionNameSheet("New collection", "", "Create", collections.map { it.name }, onDismiss) { onPick(null, it) }
         return
     }
-    val covers = Collections.organisation.collectAsState().value?.covers
-    val chosen = remember(covers) { covers.orEmpty().associate { it.albumKey to it.mediaId } }
+    val organisation = Collections.organisation.collectAsState().value
+    val chosen = remember(organisation) { organisation?.covers.orEmpty().associate { it.albumKey to it.mediaId } }
+    val groupOf = remember(organisation) { organisation?.groupNames().orEmpty() }
     Sheet(onDismiss, "Add ${itemCount(count)} to") {
         LazyColumn {
             item(key = "new") { MenuRow(Sym.LibraryAdd, "New collection", { naming = true }, sub = "Photos stay where they are, without copies", trailing = null) }
             items(collections, key = { it.albumId }) { c ->
-                CoverRow(c.name, itemCount(c.items.size), { onPick(c.collection.id, c.name) }) {
+                CoverRow(pickerName(c.name, groupOf[collectionKey(c.collection.id)]), itemCount(c.items.size), { onPick(c.collection.id, c.name) }) {
                     val cover = pickCover(chosen[collectionKey(c.collection.id)], { id -> c.items.find { it.id == id } }, { true }, c.items.firstOrNull())
                     if (cover != null) Thumbnail(cover, Modifier.matchParentSize()) else Icon(Sym.CollectionsBookmark, null, tint = AlbumTheme.colors.inkMuted)
                 }

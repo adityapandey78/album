@@ -2,26 +2,26 @@ package com.aditya.album
 
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Environment
+import android.os.StatFs
 import android.text.format.Formatter
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -45,9 +45,12 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.graphics.drawable.toBitmap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -79,19 +82,32 @@ private class LoadedIcon(val bitmap: ImageBitmap?)
 private val appIcons = HashMap<MediaApp, LoadedIcon>()
 
 /**
- * [app]'s launcher icon, as the phone shows it, or [fallback] when the app isn't installed. Decorative: a label always sits
- * next to it. Blank for the moment it takes to load, rather than flashing the fallback first.
+ * [app]'s launcher icon, as the phone shows it, or a stand-in (its initial on its colour) when the app isn't installed.
+ * Decorative: a label always sits next to it. Blank for the moment it takes to load, rather than flashing the stand-in.
  */
 @Composable
-fun AppIcon(app: MediaApp, fallback: Sym, modifier: Modifier = Modifier, size: Dp = Space.icon, tint: Color = AlbumTheme.colors.inkMuted) {
+fun AppIcon(app: MediaApp, modifier: Modifier = Modifier, size: Dp = Space.icon) {
     val context = LocalContext.current
     val px = with(LocalDensity.current) { (Space.icon * 2).roundToPx() } // one size for every place it shows, drawn down
     val icon by produceState(appIcons[app], app) {
         if (value == null) value = withContext(Dispatchers.IO) { LoadedIcon(launcherIcon(context, app, px)) }.also { appIcons[app] = it }
     }
     when (val bitmap = icon?.bitmap) {
-        null -> if (icon == null) Spacer(modifier.size(size)) else Icon(fallback, null, modifier, size = size, tint = tint)
+        null -> if (icon == null) Spacer(modifier.size(size)) else StandInIcon(app, modifier.size(size))
         else -> Image(bitmap, null, modifier.size(size))
+    }
+}
+
+/** The design's stand-in for an app's icon: the app's initial in white on its colour, in a rounded square. */
+@Composable
+private fun StandInIcon(app: MediaApp, modifier: Modifier) {
+    val tint = when (app) {
+        MediaApp.WhatsApp, MediaApp.WhatsAppBusiness -> Color(0xFF2E9E5B)
+        MediaApp.Telegram -> Color(0xFF2A8BD6)
+        else -> AlbumTheme.colors.inkMuted
+    }
+    Box(modifier.background(tint, RoundedCornerShape(6.dp)), contentAlignment = Alignment.Center) {
+        Text(app.name.take(1), style = AlbumTheme.type.label.copy(fontSize = 12.sp, fontWeight = FontWeight.Bold), color = Color.White)
     }
 }
 
@@ -108,7 +124,7 @@ private fun launcherIcon(context: Context, app: MediaApp, px: Int): ImageBitmap?
 @Composable
 fun KindIcon(kind: CleanupKind, modifier: Modifier = Modifier, size: Dp = Space.icon, tint: Color = AlbumTheme.colors.inkMuted) {
     val app = kind.app
-    if (app != null) AppIcon(app, kind.sym, modifier, size, tint) else Icon(kind.sym, null, modifier, size = size, tint = tint)
+    if (app != null) AppIcon(app, modifier, size) else Icon(kind.sym, null, modifier, size = size, tint = tint)
 }
 
 /** A folder's share of the space: its name as albums show it, how many items, how many bytes. */
@@ -121,40 +137,44 @@ fun topFolders(shots: List<Shot>, n: Int): List<FolderSize> =
         .sortedByDescending { it.bytes }
         .take(n)
 
+
 private const val TOP_FOLDERS = 5
-private const val LARGEST_FILES = 10
-private val StorageBarHeight = 10.dp
+private const val LARGEST_FILES = 8 // two rows of four
+private val BigBarHeight = 14.dp
 private val StorageBarGap = 2.dp
-private val LegendDot = 8.dp
-private val LegendIcon = 16.dp
+private val DiscSize = 36.dp // as RowIcon's
+private val AppIconInDisc = 22.dp
 
 private class StorageModel(
     val parts: List<Pair<StorageKind, Long>>,
-    val photos: Int,
-    val videos: Int,
+    val counts: Map<StorageKind, Int>,
+    val free: Long,
     val folders: List<FolderSize>,
     val largest: List<Media>,
 )
 
-private fun storageModelOf(media: List<Media>) = StorageModel(
-    storageOf(media, { storageKind(it.isVideo, it.path, it.bucketName, it.name) }, Media::size),
-    media.count { !it.isVideo },
-    media.count { it.isVideo },
-    topFolders(media.map { it.toShot() }, TOP_FOLDERS),
-    media.sortedByDescending { it.size }.take(LARGEST_FILES),
-)
+private fun storageModelOf(media: List<Media>): StorageModel {
+    val kindOf = { m: Media -> storageKind(m.isVideo, m.path, m.bucketName, m.name) }
+    return StorageModel(
+        storageOf(media, kindOf, Media::size),
+        media.groupingBy(kindOf).eachCount(),
+        StatFs(Environment.getDataDirectory().path).availableBytes, // shared storage lives on the data partition
+        topFolders(media.map { it.toShot() }, TOP_FOLDERS),
+        media.sortedByDescending { it.size }.take(LARGEST_FILES),
+    )
+}
 
 /**
- * The storage dashboard, pushed over the tabs: what photos and videos take (a segmented bar and legend), how much each
- * cleanup category would free (each row opens Clean up on that category: [onOpenCategory] gets a [CleanupKind] name),
- * the biggest folders and the largest files ([onOpen] opens one). [report] gets the largest files, the photos the viewer
- * swipes through when one of them is opened.
+ * The storage page, pushed over the tabs: what photos and videos take as one big number over a bar split by kind, a row
+ * per kind, the biggest items ([onOpen] opens one) and the biggest folders, then Free up space with what Clean up
+ * suggests, which opens it on All ([onOpenCategory] gets null; a [CleanupKind] name would open that category). [report]
+ * gets the biggest items, the photos the viewer swipes through when one of them is opened.
  */
 @Composable
 fun StorageScreen(
     media: List<Media>,
     onBack: () -> Unit,
-    onOpenCategory: (String) -> Unit,
+    onOpenCategory: (String?) -> Unit,
     onOpen: (Media) -> Unit = {},
     report: (List<Media>) -> Unit = {},
 ) {
@@ -166,114 +186,114 @@ fun StorageScreen(
     LaunchedEffect(model) { model?.let { report(it.largest) } }
     fun size(bytes: Long) = Formatter.formatShortFileSize(context, bytes) // KB, MB or GB as fits, in the phone's locale
     val bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val inGroup = Modifier.padding(start = Space.s4, end = Space.s4, top = Space.s6)
 
     BackHandler(onBack = onBack)
     Column(Modifier.fillMaxSize().background(c.canvas)) {
-        val m = model
-        Box(Modifier.statusBarsPadding()) {
-            CollapsedTopBar("Storage", subtitle = m?.let { "${size(it.parts.sumOf { p -> p.second })} used by photos and videos" }, onBack = onBack)
-        }
-        if (m == null) return@Column // a few ms
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(top = Space.s3, bottom = bottom + Space.s8)) {
-            item(key = "bar") { StorageBar(m, ::size, Modifier.padding(horizontal = Space.s4)) }
-
-            item(key = "free") { SectionHead("Free up space") }
-            val kinds = CleanupKind.entries.mapNotNull { kind -> summary?.kinds?.get(kind)?.takeIf { it.count > 0 }?.let { kind to it } }
-            when {
-                summary == null -> item(key = "looking") { Note("Looking for copies, similar shots and blurry photos. This stays on this phone.") }
-                kinds.isEmpty() -> item(key = "clean") { Note("Nothing to clean up right now.") }
-                else -> items(kinds, key = { "kind:${it.first}" }) { (kind, n) ->
-                    // The same rows as For you's Clean up, so a category looks the same wherever it shows
-                    LinkRow(
-                        { KindIcon(kind) }, kind.label,
-                        caption = if (kind.suggested) "Frees ${size(n.bytes)}" else "Uses ${size(n.bytes)}",
-                        count = n.count,
-                        onClickLabel = "Review",
-                        onClick = { onOpenCategory(kind.name) },
-                        modifier = Modifier.padding(horizontal = Space.s1),
+        Box(Modifier.statusBarsPadding()) { CollapsedTopBar("Storage", onBack = onBack) }
+        val m = model ?: return@Column // a few ms
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = bottom + Space.s8)) {
+            item(key = "total") {
+                HeroNumber(size(m.parts.sumOf { it.second }), "used by photos and videos. ${size(m.free)} is free on this phone.") {
+                    // The rows below say the same in words; TalkBack hears the split here in one go
+                    val spoken = m.parts.joinToString { (kind, bytes) -> "${kind.label} ${size(bytes)}" }
+                    if (m.parts.isNotEmpty()) SplitBar(m.parts, BigBarHeight, Modifier.padding(top = Space.s2).semantics { contentDescription = spoken })
+                }
+            }
+            if (m.parts.isNotEmpty()) item(key = "types") {
+                Group(inGroup, title = "By type") {
+                    m.parts.forEach { (kind, bytes) ->
+                        GroupRow(kind.label, null, sub = itemCount(m.counts[kind] ?: 0), value = size(bytes), leading = { TypeDisc(kind) }, valueColor = c.ink)
+                    }
+                }
+            }
+            if (m.largest.isNotEmpty()) {
+                item(key = "largest") { SectionHead("Biggest items") }
+                items(m.largest.chunked(CLEAN_COLUMNS), key = { "file:${it.first().id}" }) { row ->
+                    CleanGridRow(row) { f ->
+                        MediaTile(
+                            f, selecting = false, selected = false,
+                            Modifier.aspectRatio(1f).clickable(role = Role.Button, onClickLabel = "Open") { onOpen(f) },
+                            badge = size(f.size),
+                        )
+                    }
+                }
+            }
+            if (m.folders.isNotEmpty()) item(key = "folders") {
+                Group(inGroup, title = "Biggest folders") {
+                    m.folders.forEach { f ->
+                        GroupRow(f.name, null, sub = itemCount(f.count), value = size(f.bytes), leading = {
+                            IconDisc { MediaApp.of(f.name)?.let { AppIcon(it, size = AppIconInDisc) } ?: Icon(Sym.Folder, null, tint = c.ink) }
+                        })
+                    }
+                }
+            }
+            item(key = "free") {
+                Group(inGroup) {
+                    GroupRow(
+                        "Free up space", { onOpenCategory(null) }, icon = Sym.CleaningServices,
+                        sub = summary?.let { if (it.toReview == 0) "Nothing to suggest" else "${size(it.reviewBytes)} suggested in Clean up" }
+                            ?: "Looking through your photos",
                     )
                 }
             }
-
-            item(key = "folders") { SectionHead("Biggest folders") }
-            items(m.folders) { f ->
-                SizeRow(f.name, itemCount(f.count), size(f.bytes)) {
-                    MediaApp.of(f.name)?.let { AppIcon(it, Sym.Folder) } ?: Icon(Sym.Folder, null, tint = c.inkMuted)
-                }
-            }
-
-            item(key = "largest") { SectionHead("Largest files") }
-            items(m.largest, key = { "file:${it.id}" }) { f ->
-                SizeRow(f.name, f.bucketName, size(f.size), onClick = { onOpen(f) }) {
-                    Thumbnail(f, Modifier.size(Space.target).clip(RoundedCornerShape(Space.s2)))
-                }
-            }
         }
-    }
-}
-
-/** The total, then the bar split by kind and its legend. */
-@Composable
-private fun StorageBar(m: StorageModel, size: (Long) -> String, modifier: Modifier = Modifier) {
-    val c = AlbumTheme.colors
-    val type = AlbumTheme.type
-    val shape = RoundedCornerShape(Space.radiusLg)
-    Column(
-        modifier.fillMaxWidth().clip(shape).background(c.surface).border(1.dp, c.line, shape).padding(Space.s4),
-        verticalArrangement = Arrangement.spacedBy(Space.s4),
-    ) {
-        Column(verticalArrangement = Arrangement.spacedBy(Space.s1)) {
-            Text(size(m.parts.sumOf { it.second }), style = type.titleXl, color = c.ink)
-            Text("${counted(m.photos, "photo", "photos")} and ${counted(m.videos, "video", "videos")}", style = type.caption, color = c.inkMuted)
-        }
-        if (m.parts.isNotEmpty()) StorageSplit(m.parts, size)
     }
 }
 
 /**
- * A bar split by kind (Photos ink, Videos flash-ink, WhatsApp line-strong, Screenshots line) and its legend, a dot per kind
- * and, for an app's kind, the app's icon. Storage and For you's storage card both show it.
+ * A big figure and one line on what it means (the design's hero number), then [below], such as Storage's bar. Clean up
+ * and Storage open on one.
  */
 @Composable
-fun StorageSplit(parts: List<Pair<StorageKind, Long>>, size: (Long) -> String) {
+fun HeroNumber(figure: String, line: String, modifier: Modifier = Modifier, below: @Composable () -> Unit = {}) {
     val c = AlbumTheme.colors
-    fun colorOf(kind: StorageKind) = when (kind) {
+    Column(
+        modifier.fillMaxWidth().padding(start = Space.s4, end = Space.s4, top = Space.s4, bottom = Space.s2),
+        verticalArrangement = Arrangement.spacedBy(Space.s2),
+    ) {
+        Text(figure, style = AlbumTheme.type.display, color = c.ink)
+        Text(line, style = AlbumTheme.type.body, color = c.inkMuted)
+        below()
+    }
+}
+
+/** A cleanup category's icon on [RowIcon]'s disc: WhatsApp's own launcher icon, else its symbol. */
+@Composable
+fun KindDisc(kind: CleanupKind) = IconDisc { KindIcon(kind, size = if (kind.app != null) AppIconInDisc else Space.icon, tint = AlbumTheme.colors.ink) }
+
+// A storage kind's icon on the disc
+@Composable
+private fun TypeDisc(kind: StorageKind) = IconDisc {
+    val ink = AlbumTheme.colors.ink
+    when (kind) {
+        StorageKind.Photos -> Icon(Sym.Image, null, tint = ink)
+        StorageKind.Videos -> Icon(Sym.Videocam, null, tint = ink)
+        StorageKind.WhatsApp -> AppIcon(MediaApp.WhatsApp, size = AppIconInDisc)
+        StorageKind.Screenshots -> Icon(Sym.ScreenshotMonitor, null, tint = ink)
+    }
+}
+
+// [RowIcon]'s disc around something other than a symbol, such as an app's launcher icon
+@Composable
+private fun IconDisc(content: @Composable () -> Unit) =
+    Box(Modifier.size(DiscSize).background(AlbumTheme.colors.surfaceHigh, CircleShape), contentAlignment = Alignment.Center) { content() }
+
+@Composable
+private fun storageColor(kind: StorageKind): Color {
+    val c = AlbumTheme.colors
+    return when (kind) {
         StorageKind.Photos -> c.ink
         StorageKind.Videos -> c.flashInk
         StorageKind.WhatsApp -> c.lineStrong
         StorageKind.Screenshots -> c.line
     }
-    // The legend below says the same in words, so the bar itself needs nothing for TalkBack
-    Row(Modifier.fillMaxWidth().height(StorageBarHeight).clip(CircleShape), horizontalArrangement = Arrangement.spacedBy(StorageBarGap)) {
-        parts.forEach { (kind, bytes) -> Box(Modifier.weight(bytes.toFloat()).fillMaxHeight().background(colorOf(kind))) }
-    }
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.s4), verticalArrangement = Arrangement.spacedBy(Space.s1)) {
-        parts.forEach { (kind, bytes) ->
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Space.s2)) {
-                Box(Modifier.size(LegendDot).background(colorOf(kind), CircleShape))
-                kind.app?.let { AppIcon(it, Sym.Folder, size = LegendIcon) }
-                Text("${kind.label} ${size(bytes)}", style = AlbumTheme.type.caption, color = c.inkMuted)
-            }
-        }
-    }
 }
 
-/** A folder or a file: [leading] (icon or thumbnail), its name and a second line, its size on the right. */
+/** The bar split by kind, [height] tall: Photos ink, Videos flash-ink, WhatsApp line-strong, Screenshots line. */
 @Composable
-private fun SizeRow(label: String, sub: String, size: String, onClick: (() -> Unit)? = null, leading: @Composable () -> Unit) {
-    val c = AlbumTheme.colors
-    Row(
-        Modifier.fillMaxWidth().heightIn(min = 56.dp)
-            .then(if (onClick != null) Modifier.clickable(role = Role.Button, onClickLabel = "Open", onClick = onClick) else Modifier)
-            .padding(horizontal = Space.s4, vertical = Space.s1),
-        horizontalArrangement = Arrangement.spacedBy(Space.s4),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        leading()
-        Column(Modifier.weight(1f)) {
-            Text(label, style = AlbumTheme.type.body, color = c.ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(sub, style = AlbumTheme.type.caption, color = c.inkMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        Text(size, style = AlbumTheme.type.label, color = c.ink)
+private fun SplitBar(parts: List<Pair<StorageKind, Long>>, height: Dp, modifier: Modifier = Modifier) {
+    Row(modifier.fillMaxWidth().height(height).clip(CircleShape), horizontalArrangement = Arrangement.spacedBy(StorageBarGap)) {
+        parts.forEach { (kind, bytes) -> Box(Modifier.weight(bytes.toFloat()).fillMaxHeight().background(storageColor(kind))) }
     }
 }

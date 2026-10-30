@@ -15,13 +15,23 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -32,15 +42,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.ModalBottomSheetProperties
-import androidx.compose.material3.SheetValue
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
@@ -88,12 +93,11 @@ enum class Transfer(val verb: String, val doing: String, val done: String) {
     Copy("copy", "Copying", "Copied"),
 }
 
-/** How albums are ordered: [label] in the Sort sheet, [order] as All albums' heading. */
-enum class AlbumSort(val label: String, val order: String) {
-    Default("Default", "Camera first, then recent"),
-    Name("Name", "By name"),
-    Count("Most items", "Most items first"),
-    Updated("Recently updated", "Recently updated first"),
+/** How albums are ordered: [label] on All albums' chips and under Sort albums. Recent puts Camera first, then the newest. */
+enum class AlbumSort(val label: String) {
+    Default("Recent"),
+    Name("Name"),
+    Count("Most items"),
 }
 
 /** The progress card's line for jobs where every item is done whole. */
@@ -123,20 +127,17 @@ fun <T> orderAlbums(
     isPinned: (T) -> Boolean,
     name: (T) -> String,
     count: (T) -> Int,
-    newest: (T) -> Long,
 ): List<T> {
     val sorted = when (sort) {
         AlbumSort.Default -> albums
         AlbumSort.Name -> albums.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER, name))
         AlbumSort.Count -> albums.sortedByDescending(count)
-        // ponytail: newest photo's date, so a moved-in old photo doesn't count; add DATE_ADDED to Media if that matters
-        AlbumSort.Updated -> albums.sortedByDescending(newest)
     }
     return sorted.sortedByDescending(isPinned) // stable, so both parts keep the sort order
 }
 
 fun List<Album>.ordered(sort: AlbumSort, pinned: Set<String>) =
-    orderAlbums(this, sort, { it.key in pinned }, Album::name, Album::count) { it.cover.taken }
+    orderAlbums(this, sort, { it.key in pinned }, Album::name, Album::count)
 
 /**
  * Names for files arriving in a folder that already holds [taken]: a clash gets " (1)", " (2)"… before the
@@ -460,7 +461,7 @@ class AlbumActions internal constructor(private val context: Context, private va
         class NewName(val pick: Pick?) : Step
         class Choose(val name: String) : Step
         class Rename(val album: Album) : Step
-        class Delete(val album: Album) : Step
+        class Delete(val album: Album, val ask: Boolean = true) : Step
         /** A move Android won't ask about itself (Media management is on), so Album asks before files leave their folder. */
         class ConfirmMove(val items: List<Media>, val path: String, val album: String) : Step
         /** Share as ZIP's sheet, for [parts] in a ZIP called [name]. */
@@ -543,7 +544,8 @@ class AlbumActions internal constructor(private val context: Context, private va
                         "so open the album and delete its photos in parts.",
                 )
             } else {
-                step = Step.Delete(album)
+                // Without Media management access Android asks itself, and once is enough
+                step = Step.Delete(album, ask = MediaStore.canManageMedia(context))
             }
         }
     }
@@ -627,13 +629,15 @@ fun AlbumActionsHost(actions: AlbumActions, media: List<Media>, albums: List<Alb
             val targets = remember(albums, step, pinned, sort) {
                 albums.ordered(sort, pinned).filter { a -> step.items.all { canHold(a.cover.path, it.isVideo) } && step.items.any { it.bucketId != a.id } }
             }
-            val covers = Collections.organisation.collectAsState().value?.covers
+            val organisation = Collections.organisation.collectAsState().value
+            val covers = organisation?.covers
+            val groupOf = remember(organisation) { organisation?.groupNames().orEmpty() }
             val coverOf = remember(covers, media) {
                 val chosen = covers.orEmpty().associate { it.albumKey to it.mediaId }
                 val byId = media.associateBy { it.id };
                 { a: Album -> pickCover(chosen[a.key], byId::get, { it.bucketId == a.id }, a.cover)!! }
             }
-            AlbumPicker(step, targets, coverOf, close, onNew = { actions.step = AlbumActions.Step.NewName(step) }) { a ->
+            AlbumPicker(step, targets, coverOf, { pickerName(it.name, groupOf[it.key]) }, close, onNew = { actions.step = AlbumActions.Step.NewName(step) }) { a ->
                 actions.start(step.items, a.cover.path, a.name, step.transfer, into = a.cover.uri)
             }
         }
@@ -650,32 +654,33 @@ fun AlbumActionsHost(actions: AlbumActions, media: List<Media>, albums: List<Alb
         }
         is AlbumActions.Step.Delete -> {
             val items = remember(media, step) { media.filter { it.bucketId == step.album.id } }
-            ConfirmBar(
+            val delete = {
+                close()
+                CrashLog.note("delete album ${items.size}")
+                // a future folder at the same path must not silently inherit this one's pin or hiding
+                AlbumPrefs.setPinned(step.album.key, false)
+                AlbumPrefs.setHidden(step.album.key, false)
+                AlbumPrefs.setLocked(step.album.key, false)
+                trashWithUndo(items)
+            }
+            if (!step.ask) LaunchedEffect(step) { delete() } else ConfirmBar(
                 title = "Delete ${step.album.name}?",
-                body = "${if (items.size == 1) "Its 1 item goes" else "Its ${itemCount(items.size)} go"} to Trash for 30 days. You can undo right after.",
-                confirmLabel = "Move to trash",
-                onConfirm = {
-                    close()
-                    CrashLog.note("delete album ${items.size}")
-                    // a future folder at the same path must not silently inherit this one's pin or hiding
-                    AlbumPrefs.setPinned(step.album.key, false)
-                    AlbumPrefs.setHidden(step.album.key, false)
-                    AlbumPrefs.setLocked(step.album.key, false)
-                    trashWithUndo(items)
-                },
+                body = "Its ${if (items.size == 1) "1 item moves" else "${itemCount(items.size)} move"} to Trash. You can restore ${if (items.size == 1) "it" else "them"} for 30 days.",
+                confirmLabel = "Delete album",
+                onConfirm = delete,
                 onCancel = close,
-                thumbs = items.take(3),
+                thumbs = items.take(2),
             )
         }
         is AlbumActions.Step.ConfirmMove -> ConfirmBar(
-            title = "Move ${itemCount(step.items.size)} to ${step.album}?",
-            body = "The files leave their folders for ${step.album}. To put them back, move them again.",
+            title = "Move ${these(step.items.size, step.items.first().isVideo)} to ${step.album}?",
+            body = "${if (step.items.size == 1) "It leaves its current folder" else "They leave their current folders"}. To put ${if (step.items.size == 1) "it" else "them"} back, move ${if (step.items.size == 1) "it" else "them"} again.",
             confirmLabel = "Move",
             onConfirm = { actions.start(step.items, step.path, step.album, Transfer.Move, confirmed = true) },
             onCancel = close,
             icon = Sym.DriveFileMove,
             tone = ConfirmTone.Flash,
-            thumbs = step.items.take(3),
+            thumbs = step.items.take(2),
         )
         is AlbumActions.Step.Zip -> ZipSheet(step.name, step.parts, close) { toFolder, keepLocation ->
             if (toFolder) {
@@ -701,14 +706,14 @@ fun AlbumActionsHost(actions: AlbumActions, media: List<Media>, albums: List<Alb
     }
 }
 
-/** Where a move or copy goes: a new album first, then every folder that can hold these items, with its cover ([coverOf]). */
+/** Where a move or copy goes: a new album first, then every folder that can hold these items, with its cover ([coverOf]) and name ([nameOf], with its group). */
 @Composable
-private fun AlbumPicker(pick: AlbumActions.Step.Pick, albums: List<Album>, coverOf: (Album) -> Media, onDismiss: () -> Unit, onNew: () -> Unit, onPick: (Album) -> Unit) {
+private fun AlbumPicker(pick: AlbumActions.Step.Pick, albums: List<Album>, coverOf: (Album) -> Media, nameOf: (Album) -> String, onDismiss: () -> Unit, onNew: () -> Unit, onPick: (Album) -> Unit) {
     Sheet(onDismiss, "${pick.transfer.name} ${itemCount(pick.items.size)} to") {
         LazyColumn {
             item(key = "new") { MenuRow(Sym.AddPhotoAlternate, "New album", onNew, trailing = null) }
             items(albums, key = { it.id }) { a ->
-                CoverRow(a.name, itemCount(a.count), { onPick(a) }) { Thumbnail(coverOf(a), Modifier.matchParentSize()) }
+                CoverRow(nameOf(a), itemCount(a.count), { onPick(a) }) { Thumbnail(coverOf(a), Modifier.matchParentSize()) }
             }
         }
     }
@@ -757,65 +762,44 @@ private fun ChoosePhotos(name: String, media: List<Media>, onBack: () -> Unit, o
 
 /**
  * A move, copy or rename at work, as a bottom card like the ConfirmBar: "Moving 3 of 40" and Stop. It can't be swiped or
- * backed away, because only Stop ends the job cleanly.
+ * backed away, because only Stop ends the job cleanly. It rises as the sheets do, over a scrim fading in; it goes at once.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ProgressCard(p: AlbumOps.Progress) {
     val c = AlbumTheme.colors
+    val still = AlbumTheme.spec.still
     val shape = RoundedCornerShape(Space.radiusLg)
-    ModalBottomSheet(
-        onDismissRequest = {},
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true, confirmValueChange = { it != SheetValue.Hidden }),
-        sheetMaxWidth = 640.dp,
-        sheetGesturesEnabled = false,
-        containerColor = Color.Transparent,
-        contentColor = c.ink,
-        scrimColor = c.scrim,
-        dragHandle = null,
-        contentWindowInsets = { WindowInsets(0) }, // the card pads for the navigation bar itself
-        properties = ModalBottomSheetProperties(shouldDismissOnBackPress = false, shouldDismissOnClickOutside = false),
-    ) {
-        Column(
-            Modifier.padding(horizontal = Space.s3).padding(bottom = Space.s4).navigationBarsPadding()
-                .floating(shape).background(c.surface, shape).padding(Space.s6),
-            verticalArrangement = Arrangement.spacedBy(Space.s4),
-        ) {
-            Text("${p.doing} ${"%,d".format(p.current)} of ${"%,d".format(p.total)}", style = AlbumTheme.type.titleLg, color = c.ink)
-            Text(p.note, style = AlbumTheme.type.body, color = c.inkMuted)
-            ProgressLine(p.fraction ?: ((p.current - 1f) / p.total))
-            AlbumButton("Stop", AlbumOps::stop, Modifier.fillMaxWidth().heightIn(min = Space.target + Space.s2))
-        }
+    val shown = remember { Animatable(if (still) 1f else 0f) }
+    val scrim = remember { Animatable(if (still) 1f else 0f) }
+    LaunchedEffect(Unit) {
+        launch { scrim.animateTo(1f, tween(200, easing = Ease)) }
+        shown.animateTo(1f, tween(320, easing = CubicBezierEasing(0.2f, 0.9f, 0.3f, 1f)))
     }
-}
-
-/** How albums in Collections are ordered. Pinned ones always come first. */
-@Composable
-fun AlbumSortSheet(onDismiss: () -> Unit) {
-    val c = AlbumTheme.colors
-    val sort by AlbumPrefs.sort.collectAsState()
-    Sheet(onDismiss, "Sort albums") {
-        Text("Pinned albums always come first.", Modifier.padding(bottom = Space.s2), style = AlbumTheme.type.caption, color = c.inkMuted)
-        AlbumSort.entries.forEach { s ->
-            val on = s == sort
-            MenuRow(
-                when (s) {
-                    AlbumSort.Default -> Sym.PhotoCamera
-                    AlbumSort.Name -> Sym.TextFields
-                    AlbumSort.Count -> Sym.PhotoLibrary
-                    AlbumSort.Updated -> Sym.Schedule
-                },
-                s.label,
-                {
-                    CrashLog.note("sort albums ${s.name}")
-                    AlbumPrefs.setSort(s)
-                    onDismiss()
-                },
-                // The check carries the choice; the tint only backs it up
-                if (on) Modifier.background(c.flashSoft, RoundedCornerShape(Space.radiusMd)) else Modifier,
-                sub = "Camera first, then the most recently changed".takeIf { s == AlbumSort.Default },
-                trailing = if (on) Sym.Check else null,
-            )
+    Dialog(
+        onDismissRequest = {},
+        properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false, usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
+    ) {
+        // Album draws its own scrim and motion; the window adds neither
+        (LocalView.current.parent as? DialogWindowProvider)?.window?.let { w ->
+            SideEffect {
+                w.setDimAmount(0f)
+                w.setWindowAnimations(0)
+            }
+        }
+        Box(Modifier.fillMaxSize()) {
+            Box(Modifier.fillMaxSize().graphicsLayer { alpha = scrim.value }.background(c.scrim))
+            Column(
+                Modifier.align(Alignment.BottomCenter).widthIn(max = 640.dp).fillMaxWidth()
+                    .graphicsLayer { translationY = (1f - shown.value) * 1.1f * size.height }
+                    .padding(horizontal = Space.s3).padding(bottom = Space.s4).navigationBarsPadding()
+                    .floating(shape).background(c.surface, shape).padding(Space.s6),
+                verticalArrangement = Arrangement.spacedBy(Space.s4),
+            ) {
+                Text("${p.doing} ${"%,d".format(p.current)} of ${"%,d".format(p.total)}", style = AlbumTheme.type.titleLg, color = c.ink)
+                Text(p.note, style = AlbumTheme.type.body, color = c.inkMuted)
+                ProgressLine(p.fraction ?: ((p.current - 1f) / p.total))
+                AlbumButton("Stop", AlbumOps::stop, Modifier.fillMaxWidth().heightIn(min = Space.target + Space.s2))
+            }
         }
     }
 }

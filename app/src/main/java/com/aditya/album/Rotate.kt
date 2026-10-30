@@ -99,7 +99,7 @@ fun editVersion(uri: Uri) = edits[uri] ?: 0
 // ---------- How Save saves ----------
 
 /** What Save does in rotate mode: picked in its sheet with "Don't ask again", or in Settings. [label] is Settings' wording. */
-enum class RotateSave(val label: String) { Ask("Ask each time"), Copy("Save a copy"), Original("Update original") }
+enum class RotateSave(val label: String) { Ask("Ask"), Copy("Keep a copy"), Original("Update original") }
 
 /** The [RotateSave] choice, in the "settings" prefs. */
 object RotatePrefs {

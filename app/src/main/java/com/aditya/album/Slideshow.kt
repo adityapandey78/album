@@ -193,7 +193,7 @@ fun Slideshow(items: List<Media>, startId: Long, onClose: (Long) -> Unit, title:
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 // The mark follows the theme; over a photo it's always the dark-ground version
-                AlbumTheme(AlbumTheme.spec.appearance.copy(theme = ThemeMode.Dark)) { LogoMark(size = Space.iconSm) }
+                AlbumTheme(AlbumTheme.spec.appearance.copy(theme = ThemeMode.Dark)) { LogoGlyph() }
                 if (eyebrow != null) Text(eyebrow, Modifier.weight(1f), style = type.meta, color = c.onPhoto) else Spacer(Modifier.weight(1f))
                 AlbumIconButton(Sym.Close, "Close", close, variant = IconButtonVariant.Photo)
             }

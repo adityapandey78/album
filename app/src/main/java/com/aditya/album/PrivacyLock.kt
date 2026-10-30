@@ -95,7 +95,7 @@ object PinSeal {
         }
     }
 
-    /** How many digits the PIN in [record] has, so the pad can check it as soon as the last one is in. */
+    /** How many digits the PIN in [record] has, so the calculator disguise knows which numbers to try as the PIN. */
     fun length(record: ByteArray): Int = record[5].toInt()
 
     private fun pinKey(pin: String, salt: ByteArray, iterations: Int, device: (ByteArray) -> ByteArray): ByteArray {
@@ -139,13 +139,14 @@ fun waitLeft(s: Strikes, elapsed: Long, wall: Long, boot: Int): Long {
     return (wait - since.coerceAtLeast(0)).coerceIn(0, wait)
 }
 
-/** What a wrong PIN shows: a plain "Wrong PIN" until the last free tries, then how many are left before a wait. */
+/** What a wrong PIN shows: "Try again" until the last free tries, then how many are left before a wait. */
 fun wrongPinNote(strikes: Int): String {
     val left = FREE_TRIES - strikes
     return when {
-        left > 2 || left <= 0 -> "Wrong PIN"
-        left == 1 -> "Wrong PIN. 1 more try before a wait."
-        else -> "Wrong PIN. $left more tries before a wait."
+        left > 2 -> "Wrong PIN. Try again."
+        left <= 0 -> "Wrong PIN." // the wait itself says the rest
+        left == 1 -> "Wrong PIN. 1 try left before a short wait."
+        else -> "Wrong PIN. $left tries left before a short wait."
     }
 }
 
@@ -246,6 +247,7 @@ object PrivacyLock {
 
     /** Opens privacy with [key], the safe key (this takes it). An unlock while already open keeps the open one. */
     internal fun open(key: ByteArray) {
+        IdCards.keepCopyWith(key) // the escrow that lets the PIN keep a copy of ID cards' key; never opens them
         if (Safe.key.value == null) Safe.open(key) else key.fill(0)
         touch()
     }
@@ -284,7 +286,7 @@ object PrivacyLock {
 
     // ---------- The PIN ----------
 
-    /** The PIN's length, so the pad knows when it's complete; null without a readable PIN file. */
+    /** The PIN's length, for the calculator disguise (the pad never shows it); null without a readable PIN file. */
     fun pinLength(): Int? = runCatching { PinSeal.length(pinFile.readFully()) }.getOrNull()
 
     /** Checks [pin], counting wrong ones (they survive a restart) and refusing while a wait is on. */

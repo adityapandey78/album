@@ -8,7 +8,6 @@ import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,8 +16,8 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -47,6 +46,7 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -56,8 +56,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.contentDescription
@@ -80,7 +87,19 @@ private const val DEBOUNCE_MS = 150L // typing pauses this long before a search 
 private const val RECENT_KEY = "search_recent" // in the "settings" preferences, which AlbumApp loads at start
 private const val MAX_RECENT = 8
 private const val MAX_SUGGESTIONS = 8
-private const val TIP = "Try a place, a thing like food or dogs, a date like March 2024 or last week, or words from a photo. Quotes find exact text."
+
+/** "Try describing": what the describe-it search reads, as the design suggests it. */
+private val DESCRIBING = listOf("sunset at the beach", "red car", "birthday cake", "invoice")
+
+/** Words in photos that are worth finding again, as chips once any photo has them: the papers people photograph. */
+private val DOCUMENT_WORDS = listOf(
+    "invoice", "tax invoice", "receipt", "bill", "ticket", "boarding pass", "Aadhaar", "passport", "licence", "warranty",
+    "prescription", "menu",
+)
+
+/** Of [words], those found in any photo ([count] says in how many), most first, at most [max]. */
+fun wordsInPhotos(words: List<String>, max: Int, count: (String) -> Int): List<String> =
+    words.map { it to count(it) }.filter { it.second > 0 }.sortedByDescending { it.second }.take(max).map { it.first }
 
 /**
  * What a search found: its terms (for the chips), the best matches best first, the rest newest first, the terms that
@@ -107,11 +126,13 @@ class SearchState(
     query: MutableState<TextFieldValue>,
     things: State<List<CategoryCount>>,
     places: State<List<PlaceCount>>,
+    people: State<Map<String, Set<Long>>>,
     private val prefs: SharedPreferences,
 ) {
     var query by query
     val things by things // most photos first, for suggestions
     val places by places
+    val people by people // named people (not hidden) and their photos
     var result by mutableStateOf<SearchResult?>(null) // the latest finished search; kept while the next one runs
     var recent by mutableStateOf(prefs.getString(RECENT_KEY, null)?.split('\n').orEmpty())
         private set
@@ -162,7 +183,7 @@ fun rememberSearch(photos: List<Media>, collections: List<CollectionAlbum>): Sea
     val placeNames = remember { SmartIndex.placeNames() }.collectAsState(emptyList())
     val labels = remember { SmartIndex.labels() }.collectAsState(emptyList())
     val people = remember { People.mediaIdsByName() }.collectAsState(emptyMap()) // named, not hidden
-    val search = remember { SearchState(query, things, places, context.getSharedPreferences("settings", Context.MODE_PRIVATE)) }
+    val search = remember { SearchState(query, things, places, people, context.getSharedPreferences("settings", Context.MODE_PRIVATE)) }
     val library = remember(photos, collections) { Library(photos, collections) }
     // The query and the index are read here, not in composition: this runs inside AlbumShell, which shouldn't recompose
     // on every keystroke or index batch. Equal snapshots (a batch that changed no counts) don't search again.
@@ -261,7 +282,7 @@ fun SearchPage(
     LaunchedEffect(text) { grid.requestScrollToItem(0) } // a new query starts at the top; back from the viewer keeps the place
     // Scrolling the results means reading them: the keyboard goes
     LaunchedEffect(grid) { snapshotFlow { grid.isScrollInProgress }.collect { if (it) focusManager.clearFocus() } }
-    val top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 57.dp // the one-row title bar and its hairline
+    val top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 80.dp // under the one-row title bar, as the design spaces it
     // Content clears the field, and the keyboard when it is up
     val bottom = WindowInsets.ime.union(WindowInsets.navigationBars).asPaddingValues().calculateBottomPadding() + FIELD_HEIGHT + Space.s4 + Space.s8
     val padding = PaddingValues(top = top, bottom = bottom)
@@ -279,7 +300,8 @@ fun SearchPage(
                     search.keep()
                     onOpen(m)
                 }
-                // The rest are the grid's own photos, newest first with date headers; the top matches sit above them
+                // The rest are the grid's own photos, newest first with date headers; the top matches sit above them, and
+                // words left out or an index still going say so first
                 MediaGrid(
                     result.more,
                     columns,
@@ -291,7 +313,7 @@ fun SearchPage(
                     gridModifier,
                     header = {
                         Column {
-                            MatchLine(result, note)
+                            Notes(listOfNotNull(leftOut(result.ignored), note))
                             TopMatches(result, columns.intValue, selected, selecting, open, onSelect)
                         }
                     },
@@ -319,12 +341,16 @@ fun SearchPage(
 
 private val FIELD_HEIGHT = 52.dp
 
-/** The search field: it stretches out of the search disc at the right, at the same height, as search opens. */
+/**
+ * The search field: a flat pill that stretches out of the search disc at the right, at the same height, as search opens.
+ * Focused, a flash-ink ring sits 2dp outside it. On-device always shows; Clear comes before it once there's a query.
+ */
 @Composable
 private fun SearchField(search: SearchState, modifier: Modifier, onSearch: () -> Unit) {
     val c = AlbumTheme.colors
     val still = AlbumTheme.spec.still
     val focus = remember { FocusRequester() }
+    var focused by remember { mutableStateOf(false) }
     // Only a fresh search brings the keyboard up, not coming back to one after selecting or rotating
     LaunchedEffect(Unit) { if (search.query.text.isEmpty()) focus.requestFocus() }
     val grow = remember { Animatable(if (still) 1f else 0f) }
@@ -332,12 +358,19 @@ private fun SearchField(search: SearchState, modifier: Modifier, onSearch: () ->
     Row(
         modifier.fillMaxWidth().height(FIELD_HEIGHT)
             .drawWithContent {
-                // the disc's width at the right edge grows to the full width
+                // the disc at the right edge stretches left into the full pill
                 val left = (size.width - Space.bar.toPx()).coerceAtLeast(0f) * (1f - grow.value)
-                // only the left edge moves; the other sides stay open so the shadow isn't cut square
-                clipRect(left = left, top = -size.height, right = size.width * 2, bottom = size.height * 2) { this@drawWithContent.drawContent() }
+                val round = CornerRadius(size.height / 2)
+                clipPath(Path().apply { addRoundRect(RoundRect(left, 0f, size.width, size.height, round)) }) { this@drawWithContent.drawContent() }
+                if (focused) {
+                    val out = 3.dp.toPx() // a 2dp ring, 2dp out
+                    drawRoundRect(
+                        c.flashInk, Offset(left - out, -out), Size(size.width - left + 2 * out, size.height + 2 * out),
+                        CornerRadius(size.height / 2 + out), style = Stroke(2.dp.toPx()),
+                    )
+                }
             }
-            .floating().background(c.surfaceHigh, CircleShape)
+            .background(c.surfaceHigh, CircleShape)
             .padding(start = Space.s4, end = Space.s2),
         horizontalArrangement = Arrangement.spacedBy(Space.s3),
         verticalAlignment = Alignment.CenterVertically,
@@ -345,12 +378,12 @@ private fun SearchField(search: SearchState, modifier: Modifier, onSearch: () ->
         Icon(Sym.Search, null, tint = c.ink)
         Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
             if (search.query.text.isEmpty()) {
-                Text("Places, things, people or dates", style = AlbumTheme.type.body, color = c.inkMuted, maxLines = 1)
+                Text("Describe a photo, or words in it", style = AlbumTheme.type.body, color = c.inkMuted, maxLines = 1)
             }
             BasicTextField(
                 value = search.query,
                 onValueChange = { search.query = it },
-                modifier = Modifier.fillMaxWidth().focusRequester(focus).semantics { contentDescription = "Search photos" },
+                modifier = Modifier.fillMaxWidth().focusRequester(focus).onFocusChanged { focused = it.isFocused }.semantics { contentDescription = "Search photos" },
                 textStyle = AlbumTheme.type.body.copy(color = c.ink),
                 singleLine = true,
                 cursorBrush = SolidColor(c.flashInk),
@@ -363,20 +396,36 @@ private fun SearchField(search: SearchState, modifier: Modifier, onSearch: () ->
                 search.query = TextFieldValue()
                 focus.requestFocus()
             })
-        } else {
-            Badge("On-device", Modifier.padding(end = Space.s2), BadgeTone.Soft, Sym.Shield)
         }
+        Badge("On-device", tone = BadgeTone.Soft, icon = Sym.Shield)
     }
 }
 
+/**
+ * Before typing: Try describing, then Recent, People, Places, Things and Words in photos, each from this phone's own photos
+ * (a section with nothing in it stays out), and a note while the index is still going.
+ */
 @Composable
 private fun Suggestions(search: SearchState, note: String?, padding: PaddingValues, onPick: (String) -> Unit) {
+    val people = remember(search.people) { search.people.entries.sortedByDescending { it.value.size }.map { it.key }.take(MAX_SUGGESTIONS) }
     val places = remember(search.places) { search.places.map { it.place.city }.distinct().take(MAX_SUGGESTIONS) }
     val things = remember(search.things) { search.things.map { it.category }.filter { it != Category.Other }.take(MAX_SUGGESTIONS) }
+    // One quick full-text lookup a word, off the main thread
+    val words by produceState(emptyList<String>()) {
+        value = withContext(Dispatchers.IO) {
+            wordsInPhotos(DOCUMENT_WORDS, MAX_SUGGESTIONS) { runCatching { SmartIndex.idsWithPhrase(ftsTokens(it)).size }.getOrDefault(0) }
+        }
+    }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(padding)) {
+        SectionHead("Try describing")
+        Chips(DESCRIBING, Sym.Search, onPick)
         if (search.recent.isNotEmpty()) {
             SectionHead("Recent", action = "Clear", onAction = search::clearRecent)
             Chips(search.recent, Sym.History, onPick)
+        }
+        if (people.isNotEmpty()) {
+            SectionHead("People")
+            Chips(people, Sym.Person, onPick)
         }
         if (places.isNotEmpty()) {
             SectionHead("Places")
@@ -386,12 +435,11 @@ private fun Suggestions(search: SearchState, note: String?, padding: PaddingValu
             SectionHead("Things")
             Chips(things.map { it.title }, Sym.Category, onPick)
         }
-        Text(
-            listOfNotNull(TIP, note).joinToString("\n\n"),
-            Modifier.padding(horizontal = Space.s4, vertical = Space.s6),
-            color = AlbumTheme.colors.inkMuted,
-            style = AlbumTheme.type.body,
-        )
+        if (words.isNotEmpty()) {
+            SectionHead("Words in photos")
+            Chips(words, Sym.ContentCopy, onPick)
+        }
+        note?.let { Text(it, Modifier.padding(horizontal = Space.s4, vertical = Space.s6), color = AlbumTheme.colors.inkMuted, style = AlbumTheme.type.body) }
     }
 }
 
@@ -406,29 +454,12 @@ private fun Chips(texts: List<String>, icon: Sym, onPick: (String) -> Unit) {
     }
 }
 
-/** "[Goa] [Food] [2024]   42 results": what the query was read as, so a surprising result explains itself. */
+/** Captions above the results, when there's something to say: words left out, the index still going. */
 @Composable
-private fun MatchLine(result: SearchResult, note: String?) {
-    val c = AlbumTheme.colors
-    Column(Modifier.padding(start = Space.s4, end = Space.s4, top = Space.s2, bottom = Space.s3)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), Arrangement.spacedBy(Space.s2)) {
-                result.terms.filter { it !in result.ignored }.forEach { term ->
-                    Row(
-                        Modifier.background(c.flashSoft, CircleShape).padding(start = Space.s2, end = Space.s3, top = 6.dp, bottom = 6.dp)
-                            .semantics(mergeDescendants = true) {}, // read as "Place, Goa"
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Icon(term.kind.sym, term.kind.name, size = 16.dp, tint = c.flashInk)
-                        Text(term.label, color = c.ink, style = AlbumTheme.type.label)
-                    }
-                }
-            }
-            Text(countOf(result.items.size, "result"), Modifier.padding(start = Space.s3), color = c.inkMuted, style = AlbumTheme.type.meta)
-        }
-        val notes = listOfNotNull(leftOut(result.ignored), note)
-        notes.forEach { Text(it, Modifier.padding(top = 6.dp), color = c.inkMuted, style = AlbumTheme.type.caption) }
+private fun Notes(notes: List<String>) {
+    if (notes.isEmpty()) return
+    Column(Modifier.padding(start = Space.s4, end = Space.s4, top = Space.s2, bottom = Space.s3), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        notes.forEach { Text(it, color = AlbumTheme.colors.inkMuted, style = AlbumTheme.type.caption) }
     }
 }
 
@@ -495,16 +526,17 @@ private fun TierHead(text: String, modifier: Modifier) {
     )
 }
 
+/** No matches, at the top as in the design, saying which words found nothing where that's why. */
 @Composable
 private fun NoResults(result: SearchResult, note: String?, padding: PaddingValues) {
     val known = result.terms - result.ignored.toSet()
-    val title = when {
-        result.unmatched.isNotEmpty() -> "Nothing found for ${namesOf(result.unmatched.map { it.label })}"
-        known.size > 1 -> "Nothing matches ${namesOf(known.map { it.label })} together"
-        else -> "Nothing found"
+    val why = when {
+        result.unmatched.isNotEmpty() -> "Nothing found for ${namesOf(result.unmatched.map { it.label })}."
+        known.size > 1 -> "Nothing matches ${namesOf(known.map { it.label })} together."
+        else -> null
     }
-    Column(Modifier.fillMaxSize().padding(padding), verticalArrangement = Arrangement.Center) {
-        EmptyState(Sym.SearchOff, title, listOfNotNull(TIP, note).joinToString("\n\n"))
+    Column(Modifier.fillMaxSize().padding(padding)) {
+        EmptyState(Sym.Search, "No matches", listOfNotNull(why, "Try a thing, a place, a person, a year, or words in a photo.", note).joinToString(" "))
     }
 }
 
@@ -514,14 +546,3 @@ fun namesOf(names: List<String>): String = if (names.size < 2) names.joinToStrin
 /** Why results may be missing photos: the smart index is still going. Null once it's done. */
 private fun indexingNote(p: IndexProgress) =
     if (p.done >= p.total) null else "Album is still going through your photos (%,d of %,d), so some can't be found yet.".format(p.done, p.total)
-
-private val MatchKind.sym
-    get() = when (this) {
-        MatchKind.Thing -> Sym.Category
-        MatchKind.Place -> Sym.LocationOn
-        MatchKind.Date -> Sym.Event
-        MatchKind.Album -> Sym.PhotoAlbum
-        MatchKind.Type -> Sym.Image
-        MatchKind.Text -> Sym.TextFields
-        MatchKind.Person -> Sym.Person
-    }

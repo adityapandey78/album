@@ -5,7 +5,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInstaller
-import android.widget.Toast
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -135,7 +134,7 @@ class InstallResultReceiver : BroadcastReceiver() {
                 }
                 CrashLog.note("update result: $detail")
                 Updater.installMessage = message
-                Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                Messages.post(context, message)
             }
         }
     }

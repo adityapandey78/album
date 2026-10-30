@@ -1,10 +1,10 @@
 package com.aditya.album
 
-import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
-import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,6 +28,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
@@ -37,9 +38,10 @@ import java.time.format.DateTimeFormatter
 
 /**
  * One photo or video in a grid (the design system's MediaTile). The caller sizes it and handles taps. When [selected] the
- * image shrinks to 0.84 and rounds from the look's tile corner to radius-md, and the flash check pops in; with Remove
- * animations on both change at once. [small] (5 or more columns) leaves out the footer. [badge] is one short trait in
- * mono ("HDR", "29d"); left out, it's the photo's own ([traitBadge]) unless [small]. TalkBack reads [tileLabel].
+ * image shrinks to 0.84 and rounds from the look's tile corner to radius-md, and the flash check pops in; while [pressed]
+ * (and not selected) it dips to 0.96; with Remove animations on these change at once. The footer (play mark and length,
+ * favourite) shows at every size. [badge] is one short trait in mono ("HDR", "29d"); left out, it's the photo's own
+ * ([traitBadge]) unless [small] (5 or more columns). TalkBack reads [tileLabel].
  */
 @Composable
 fun MediaTile(
@@ -51,15 +53,20 @@ fun MediaTile(
     badge: String? = if (small) null else traitBadge(m), // tiny tiles keep only what the caller insists on
     badgeTone: BadgeTone = BadgeTone.Photo,
     checkSize: Dp = Space.check,
+    pressed: Boolean = false,
 ) {
     val spec = AlbumTheme.spec
     val c = spec.colors
     val scale by animateFloatAsState(
-        if (selected) 0.84f else 1f,
-        if (spec.still) snap() else spring(dampingRatio = 0.7f, stiffness = Spring.StiffnessMediumLow),
+        when {
+            selected -> 0.84f
+            pressed -> 0.96f
+            else -> 1f
+        },
+        if (spec.still) snap() else tween(280, easing = CubicBezierEasing(0.2f, 0.9f, 0.3f, 1.15f)),
         label = "tileScale",
     )
-    val corner by animateDpAsState(if (selected) Space.radiusMd else spec.tileCorner, if (spec.still) snap() else spring(), label = "tileCorner")
+    val corner by animateDpAsState(if (selected) Space.radiusMd else spec.tileCorner, if (spec.still) snap() else tween(280, easing = Ease), label = "tileCorner")
     // Built only when TalkBack (or a test) asks: semantics are computed lazily
     Box(modifier.semantics { contentDescription = tileLabel(m, selected) }) {
         Box(
@@ -75,7 +82,7 @@ fun MediaTile(
             } else Thumb(m.uri)
             AsyncImage(model, contentDescription = null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             badge?.let { Badge(it, Modifier.align(Alignment.TopEnd).padding(Space.s1), badgeTone) }
-            if (!small && (m.isVideo || m.isFavorite)) {
+            if (m.isVideo || m.isFavorite) {
                 Row(
                     Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                         .background(Brush.verticalGradient(0f to Color.Transparent, 0.6f to c.scrimPhoto))
@@ -84,11 +91,11 @@ fun MediaTile(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     if (m.isVideo) {
-                        Icon(Sym.PlayArrow, null, filled = true, size = 16.dp, tint = c.onPhoto)
-                        Text(duration(m.durationMs), style = AlbumTheme.type.meta, color = c.onPhoto, maxLines = 1)
-                    }
-                    Spacer(Modifier.weight(1f))
-                    if (m.isFavorite) Icon(Sym.Favorite, null, filled = true, size = 16.dp, tint = c.onPhoto)
+                        Icon(Sym.PlayArrow, null, filled = true, size = Space.iconSm, tint = c.onPhoto)
+                        // Takes the room between the marks; on a small tile the length gives way before they do
+                        Text(duration(m.durationMs), Modifier.weight(1f), style = AlbumTheme.type.meta, color = c.onPhoto, maxLines = 1, softWrap = false, overflow = TextOverflow.Clip)
+                    } else Spacer(Modifier.weight(1f))
+                    if (m.isFavorite) Icon(Sym.Favorite, null, filled = true, size = Space.iconSm, tint = c.onPhoto)
                 }
             }
         }

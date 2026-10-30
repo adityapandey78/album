@@ -107,6 +107,20 @@ class CollectionsDbTest {
         assertEquals("Family", dao.group(dao.memberOf(manali)!!.groupId)?.name)
     }
 
+    @Test fun aNewGroupOfSeveralAlbumsTakesThemFromTheirGroups() = runBlocking {
+        val trips = dao.newGroup("Trips", goa, now = 1).made!!
+        val beaches = dao.newGroupOf("Beaches", listOf(goa, manali), now = 2)
+        assertEquals(listOf(goa, manali), dao.membersOf(beaches).map { it.albumKey }.sorted())
+        assertNull(dao.group(trips)) // Goa was its only album
+        val family = dao.newGroupOf("Family", listOf(manali), now = 3)
+        assertEquals(listOf(goa), dao.membersOf(beaches).map { it.albumKey })
+        dao.addToGroup(listOf(manali), beaches, now = 4)
+        assertEquals(beaches, dao.memberOf(manali)?.groupId)
+        assertNull(dao.group(family)) // its only album went back
+        dao.addToGroup(listOf(goa), trips, now = 5) // that group is gone: nothing moves
+        assertEquals(beaches, dao.memberOf(goa)?.groupId)
+    }
+
     @Test fun deletingACollectionTakesItOutOfItsGroup() = runBlocking {
         val bills = newCollection("Bills")
         val trips = dao.newGroup("Trips", collectionKey(bills), now = 1).made!!

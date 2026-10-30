@@ -9,7 +9,6 @@ import android.os.storage.StorageManager
 import android.provider.MediaStore
 import android.provider.MediaStore.MediaColumns
 import android.text.format.Formatter
-import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -175,7 +174,7 @@ object SavePrefs {
             prefs.edit { putBoolean(TOLD, true) }
             val app = context.applicationContext
             app.mainExecutor.execute {
-                Toast.makeText(app, "Your ${chosen.label} isn't in. Album saves to the phone's storage until it's back.", Toast.LENGTH_LONG).show()
+                Messages.post(app, "Your ${chosen.label} isn't in. Album saves to the phone's storage until it's back.")
             }
         }
         return chosen.copy(volume = PHONE_STORAGE, label = PHONE_LABEL)
@@ -216,14 +215,14 @@ fun SaveLocationStep() {
     }
 }
 
-/** For Settings > Behaviour: where Album saves. Tapping opens the same choices as the first-run step, each applying at once. */
+/** For Settings > Photos and videos: where Album saves. Tapping opens the same choices as the first-run step, each applying at once. */
 @Composable
 fun SaveLocationRow(modifier: Modifier = Modifier) {
     SavePrefs.load(LocalContext.current)
     val location by SavePrefs.location.collectAsState()
     var open by remember { mutableStateOf(false) }
     var naming by remember { mutableStateOf(false) }
-    MenuRow(Sym.Folder, "Where Album saves", { open = true }, modifier, sub = placeName(location))
+    GroupRow("Where Album saves", { open = true }, modifier, icon = Sym.Folder, sub = placeName(location))
     // One sheet at a time: naming a folder takes the choices' place, and closing it brings them back
     when {
         naming -> OwnFolderSheet(location.folder, { naming = false }) {

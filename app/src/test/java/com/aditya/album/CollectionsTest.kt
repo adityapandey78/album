@@ -63,10 +63,23 @@ class CollectionsTest {
         assertTrue(collectionKey(1) != collectionKey(11))
     }
 
-    @Test fun subtitleCountsEachKind() {
-        assertEquals("12 albums · 3 people · 5 places", collectionsSubtitle(12, 3, 5))
-        assertEquals("1 album · 1 person · 1 place", collectionsSubtitle(1, 1, 1))
-        assertEquals("0 albums · 0 people · 0 places", collectionsSubtitle(0, 0, 0))
+    @Test fun systemFoldersShowWhereTheyLive() {
+        assertEquals("DCIM/Camera", systemPath("Camera", "DCIM/Camera/"))
+        assertEquals("Pictures/Screenshots", systemPath("Screenshots", "Pictures/Screenshots/"))
+        assertEquals("Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images", systemPath("WhatsApp Images", "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/"))
+        assertNull(systemPath("Family", "Pictures/Family/")) // a folder the user made shows its count
+    }
+
+    @Test fun subtitleCountsTheCards() {
+        assertEquals("1,204 albums and groups", albumsSubtitle(1_204))
+        assertEquals("1 album", albumsSubtitle(1)) // Favourites alone
+    }
+
+    @Test fun browseListsThingsTheWayASentenceDoes() {
+        assertEquals("0 things", thingsLine(emptyList()))
+        assertEquals("1 thing, like food", thingsLine(listOf("Food")))
+        assertEquals("2 things, like food and pets", thingsLine(listOf("Food", "Pets")))
+        assertEquals("4 things, like food, pets and sunsets", thingsLine(listOf("Food", "Pets", "Sunsets", "Cars")))
     }
 
     private fun entry(id: Long, name: String, count: Int, recent: Long, camera: Boolean = false, key: String = "pictures/$name/") =
@@ -93,14 +106,13 @@ class CollectionsTest {
     @Test fun otherSortsMixBothKinds() {
         assertEquals(listOf("Bills", "Camera", "Goa", "WhatsApp Images"), names(albumEntries(all, AlbumSort.Name, emptySet())))
         assertEquals(listOf("WhatsApp Images", "Camera", "Goa", "Bills"), names(albumEntries(all, AlbumSort.Count, emptySet())))
-        assertEquals(listOf("Goa", "WhatsApp Images", "Bills", "Camera"), names(albumEntries(all, AlbumSort.Updated, emptySet())))
     }
 
     // Eight folders, "Album 8" the most recently changed
     private val eight = (1..8).map { entry(10L + it, "Album $it", count = it, recent = it.toLong()) }
 
     @Test fun sectionShowsTwoRowsOfThreeWithPinnedFirst() {
-        val shown = albumsInSection(albumEntries(eight, AlbumSort.Updated, setOf("pictures/Album 2/")))
+        val shown = albumsInSection(albumEntries(eight, AlbumSort.Default, setOf("pictures/Album 2/")))
         assertEquals(listOf("Album 2", "Album 8", "Album 7", "Album 6", "Album 5", "Album 4"), names(shown))
     }
 
@@ -110,14 +122,16 @@ class CollectionsTest {
 
     @Test fun sectionKeepsPinnedAlbumsEvenWhenTheyFillIt() {
         val pinned = (1..7).map { "pictures/Album $it/" }.toSet()
-        assertEquals(listOf("Album 7", "Album 6", "Album 5", "Album 4", "Album 3", "Album 2"), names(albumsInSection(albumEntries(eight, AlbumSort.Updated, pinned))))
+        assertEquals(listOf("Album 7", "Album 6", "Album 5", "Album 4", "Album 3", "Album 2"), names(albumsInSection(albumEntries(eight, AlbumSort.Default, pinned))))
     }
 
     @Test fun seeAllOnlyWhenSomeAreLeftOut() {
         // the screen offers See all when the section shows fewer than there are
         assertEquals(ALBUMS_IN_SECTION, albumsInSection(eight).size)
-        assertEquals(all, albumsInSection(all)) // four: every one shows, so Sort stays on the heading
+        assertEquals(all, albumsInSection(all)) // four: every one shows
         assertEquals(eight.take(6), albumsInSection(eight.take(6)))
         assertTrue(albumsInSection(emptyList<AlbumEntry>()).isEmpty())
+        assertEquals("See all 1,204", seeAllAlbums(1_204))
+        assertEquals("See all", seeAllAlbums(ALBUMS_IN_SECTION)) // nothing left out to count
     }
 }

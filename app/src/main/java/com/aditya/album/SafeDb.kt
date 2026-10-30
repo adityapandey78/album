@@ -1,5 +1,7 @@
 package com.aditya.album
 
+import androidx.room.AutoMigration
+import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Entity
@@ -10,8 +12,9 @@ import androidx.room.RoomDatabase
 import kotlinx.coroutines.flow.Flow
 
 /**
- * A photo or video in the private safe. Its content lives encrypted in filesDir/safe/<id>.bin (thumbnail: <id>.thumb);
- * this row keeps what's needed to show it and to put it back where it came from, as it was.
+ * A photo or video in the private safe or in ID cards ([bucket]). Its content lives encrypted in filesDir/safe/<id>.bin
+ * (thumbnail: <id>.thumb), or filesDir/safe/id/ for ID cards; this row keeps what's needed to show it and to put it back
+ * where it came from, as it was.
  */
 @Entity(tableName = "items")
 data class SafeItem(
@@ -33,18 +36,25 @@ data class SafeItem(
      */
     val original: String?,
     val added: Long, // epoch millis
-)
+    /** [SAFE] or [ID_CARDS]: which key encrypts it, and which page lists it. */
+    @ColumnInfo(defaultValue = "0") val bucket: Int = SAFE,
+) {
+    companion object {
+        const val SAFE = 0
+        const val ID_CARDS = 1
+    }
+}
 
 @Dao
 interface SafeDao {
-    @Query("SELECT * FROM items WHERE original IS NULL ORDER BY taken DESC")
-    fun items(): Flow<List<SafeItem>>
+    @Query("SELECT * FROM items WHERE original IS NULL AND bucket = :bucket ORDER BY taken DESC")
+    fun items(bucket: Int): Flow<List<SafeItem>>
 
     @Query("SELECT * FROM items WHERE original IS NOT NULL")
     suspend fun waiting(): List<SafeItem>
 
-    @Query("SELECT COUNT(*) FROM items WHERE original IS NULL")
-    suspend fun count(): Int
+    @Query("SELECT COUNT(*) FROM items WHERE original IS NULL AND bucket = :bucket")
+    suspend fun count(bucket: Int): Int
 
     @Insert
     suspend fun insert(item: SafeItem): Long
@@ -58,9 +68,9 @@ interface SafeDao {
     @Query("DELETE FROM items WHERE id = :id")
     suspend fun delete(id: Long)
 
-    /** Only for Safe.reset, after Android erased the key that every file needs. */
-    @Query("DELETE FROM items")
-    suspend fun clear()
+    /** Only for the resets, after Android erased the key that every file of [bucket] needs. */
+    @Query("DELETE FROM items WHERE bucket = :bucket")
+    suspend fun clear(bucket: Int)
 }
 
 /**
@@ -69,7 +79,7 @@ interface SafeDao {
  * To change the schema: bump the version, keep the exported app/schemas/com.aditya.album.SafeDb/N.json files in git, and
  * add `autoMigrations = [AutoMigration(from = N, to = N + 1)]` (or a hand-written Migration for renames and splits).
  */
-@Database(entities = [SafeItem::class], version = 1)
+@Database(entities = [SafeItem::class], version = 2, autoMigrations = [AutoMigration(from = 1, to = 2)]) // 2: ID cards' bucket
 abstract class SafeDb : RoomDatabase() {
     abstract fun dao(): SafeDao
 }

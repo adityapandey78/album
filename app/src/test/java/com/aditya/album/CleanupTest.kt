@@ -339,6 +339,7 @@ class CleanupTest {
         ).associateBy { it.id }
         val r = cleanupOf(shots, rows, listOf(CopyPair(7, 9, 5), CopyPair(8, 9, 5), CopyPair(7, 11, 8)), now)
         assertEquals(listOf(ShotGroup(7, listOf(7L, 9L, 11L, 8L))), r.copies) // the exact copy joins the copies of its original
+        assertEquals(setOf(8L), r.exact) // and is still known as one
         assertEquals(listOf(ShotGroup(15, listOf(15L, 16L))), r.similar)
         assertEquals(listOf(12L, 17L), r.dark)
         assertEquals(listOf(13L), r.bright)
@@ -394,6 +395,28 @@ class CleanupTest {
         assertEquals(listOf(1L, 2L, 5L, 6L, 7L), tilesOf(sections) { it }) // screen order, each photo once
         assertEquals(listOf(9L), tilesOf(cleanupSections(r, listOf(CleanupKind.WhatsApp), lookup)) { it })
         assertEquals(listOf(6L), r.candidates(CleanupKind.Similar)) // neither the best shot nor the original
+    }
+
+    @Test fun allPreviewsTheFirstSetOrTheFirstRow() {
+        val r = result(copies = listOf(ShotGroup(1, listOf(1L, 2L)), ShotGroup(3, listOf(3L, 4L))), blurry = (10L..16L).toList())
+        val (copies, blurry) = cleanupSections(r, CleanupKind.entries) { it }.map(::previewOf)
+        assertEquals(listOf(listOf(1L, 2L)), copies.runs) // a whole set, the one that stays first
+        assertEquals(listOf(listOf(10L, 11L, 12L, 13L)), blurry.runs) // one row of four
+    }
+
+    @Test fun keptItemsLeaveEveryCategoryButAnOriginalStillStands() {
+        val r = result(
+            copies = listOf(ShotGroup(1, listOf(1L, 2L))),
+            similar = listOf(ShotGroup(3, listOf(3L, 1L, 4L, 5L))), // 1 is an original and one of these shots
+            blurry = listOf(6L, 7L), whatsApp = listOf(8L),
+        )
+        val k = r.without(setOf(2L, 3L, 5L, 6L, 8L)) // 3, the best shot, stays whatever: keeping it changes nothing
+        assertEquals(emptyList<Long>(), k.candidates(CleanupKind.Copies))
+        assertEquals(listOf(ShotGroup(3, listOf(3L, 1L, 4L))), k.similar)
+        assertEquals(listOf(4L), k.candidates(CleanupKind.Similar)) // 1 has no copies left to suggest, but is still not suggested
+        assertEquals(listOf(7L), k.blurry)
+        assertEquals(emptyList<Long>(), k.whatsApp)
+        assertEquals(r, r.without(emptySet()))
     }
 
     @Test fun foldersBelongToTheirApps() {

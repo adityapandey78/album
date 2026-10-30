@@ -100,9 +100,9 @@ private fun zipSummary(context: Context, name: String, items: Int, bytes: Long) 
     "$name · ${itemCount(items)} · ${Formatter.formatShortFileSize(context, bytes)}"
 
 /** Formats whose location Album can take out of a copy itself, if Android left it in: their Exif is rewritten, pixels untouched. */
-private val STRIPPABLE = setOf("image/jpeg", "image/png", "image/webp")
+internal val STRIPPABLE = setOf("image/jpeg", "image/png", "image/webp")
 
-private val GPS_TAGS = listOf(
+internal val GPS_TAGS = listOf(
     ExifInterface.TAG_GPS_LATITUDE, ExifInterface.TAG_GPS_LATITUDE_REF, ExifInterface.TAG_GPS_LONGITUDE, ExifInterface.TAG_GPS_LONGITUDE_REF,
     ExifInterface.TAG_GPS_ALTITUDE, ExifInterface.TAG_GPS_ALTITUDE_REF, ExifInterface.TAG_GPS_TIMESTAMP, ExifInterface.TAG_GPS_DATESTAMP,
     ExifInterface.TAG_GPS_PROCESSING_METHOD, ExifInterface.TAG_GPS_AREA_INFORMATION, ExifInterface.TAG_GPS_SPEED, ExifInterface.TAG_GPS_SPEED_REF,

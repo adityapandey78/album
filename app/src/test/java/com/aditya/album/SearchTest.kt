@@ -299,4 +299,10 @@ class SearchTest {
         val ms = (System.nanoTime() - started) / 1_000_000
         assertTrue("took $ms ms", ms < 100)
     }
+
+    @Test fun wordsInPhotosAreTheOnesFoundMostFirst() {
+        val counts = mapOf("invoice" to 3, "receipt" to 0, "ticket" to 7, "menu" to 1)
+        assertEquals(listOf("ticket", "invoice"), wordsInPhotos(listOf("invoice", "receipt", "ticket", "menu"), max = 2) { counts.getValue(it) })
+        assertEquals(emptyList<String>(), wordsInPhotos(listOf("receipt"), max = 8) { 0 })
+    }
 }

@@ -49,7 +49,7 @@ class AlbumOpsTest {
     private class A(val name: String, val count: Int, val newest: Long, val pinned: Boolean = false)
 
     private fun order(albums: List<A>, sort: AlbumSort) =
-        orderAlbums(albums, sort, A::pinned, A::name, A::count, A::newest).map { it.name }
+        orderAlbums(albums, sort, A::pinned, A::name, A::count).map { it.name }
 
     private val camera = A("Camera", 50, 300)
     private val zoo = A("zoo", 80, 100)
@@ -66,10 +66,6 @@ class AlbumOpsTest {
 
     @Test fun mostItemsFirstWithTiesInDefaultOrder() {
         assertEquals(listOf("zoo", "Bali", "Camera"), order(listOf(camera, zoo, bali), AlbumSort.Count))
-    }
-
-    @Test fun recentlyUpdatedFirst() {
-        assertEquals(listOf("Camera", "Bali", "zoo"), order(listOf(zoo, bali, camera), AlbumSort.Updated))
     }
 
     @Test fun pinnedComeFirstInSortOrder() {

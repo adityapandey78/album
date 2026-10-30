@@ -49,6 +49,20 @@ fun hiddenWhat(people: List<String?>, albums: List<String>): String = when {
     else -> "${counted(people.size, "person", "people")} and ${counted(albums.size, "album", "albums")}"
 }
 
+/**
+ * What a hide or unhide says: "Hid 2 items" for Hidden items' own picks ([counted]), else naming the one thing hidden
+ * from its page or menu: "Hid Goa trip. It is in Hidden items."
+ */
+fun hiddenNote(people: List<String?>, albums: List<String>, hide: Boolean, counted: Boolean): String {
+    val what = if (counted) itemCount(people.size + albums.size) else hiddenWhat(people, albums)
+    return when {
+        !hide -> "Unhid $what"
+        counted -> "Hid $what"
+        people.size + albums.size == 1 -> "Hid $what. It is in Hidden items."
+        else -> "Hid $what. They are in Hidden items."
+    }
+}
+
 /** Hides and unhides people and albums, and says so with Undo; [state] is what every screen filters by. */
 object Hidden {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -62,13 +76,16 @@ object Hidden {
             .stateIn(scope, SharingStarted.Eagerly, null)
     }
 
-    /** Puts [people] and [albums] behind the PIN. Call with privacy unlocked (see [rememberPrivacyAsk]). */
-    fun hide(context: Context, people: List<PersonAlbum>, albums: List<Album>) = change(context, people, albums, hide = true)
+    /**
+     * Puts [people] and [albums] behind the PIN. Call with privacy unlocked (see [rememberPrivacyAsk]). [counted]: the
+     * message counts them (Hidden items' own picks) rather than naming one.
+     */
+    fun hide(context: Context, people: List<PersonAlbum>, albums: List<Album>, counted: Boolean = false) = change(context, people, albums, hide = true, counted)
 
-    /** Takes [people] and [albums] out of Hidden items. Call with privacy unlocked. */
-    fun unhide(context: Context, people: List<PersonAlbum>, albums: List<Album>) = change(context, people, albums, hide = false)
+    /** Takes [people] and [albums] out of Hidden items. Call with privacy unlocked. [counted] as in [hide]. */
+    fun unhide(context: Context, people: List<PersonAlbum>, albums: List<Album>, counted: Boolean = false) = change(context, people, albums, hide = false, counted)
 
-    private fun change(context: Context, people: List<PersonAlbum>, albums: List<Album>, hide: Boolean, undo: Boolean = true) {
+    private fun change(context: Context, people: List<PersonAlbum>, albums: List<Album>, hide: Boolean, counted: Boolean, undo: Boolean = true) {
         if (people.isEmpty() && albums.isEmpty()) return
         val app = context.applicationContext
         CrashLog.note("${if (hide) "hide" else "unhide"} ${people.size} people ${albums.size} albums")
@@ -86,14 +103,12 @@ object Hidden {
                 }
             }
             runCatching { MemoryWidget.refresh(app) } // the widget may show one of these photos
-            val what = hiddenWhat(changed.map { it.name }, albums.map { it.name })
             val text = when {
                 changed.size < people.size && hide -> "Couldn't move everyone to Hidden items. Try again."
                 changed.size < people.size -> "Couldn't move everyone out of Hidden items. Try again."
-                hide -> "Moved $what to Hidden items"
-                else -> "Moved $what out of Hidden items"
+                else -> hiddenNote(changed.map { it.name }, albums.map { it.name }, hide, counted)
             }
-            PrivacyLock.notices.trySend(PrivacyLock.Notice(text, if (undo) ({ change(app, changed, albums, !hide, undo = false) }) else null))
+            PrivacyLock.notices.trySend(PrivacyLock.Notice(text, if (undo) ({ change(app, changed, albums, !hide, counted, undo = false) }) else null))
         }
     }
 }

@@ -3,16 +3,16 @@ package com.aditya.album
 import android.icu.text.NumberFormat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBarsPadding
-import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.TextAutoSize
 import androidx.compose.material3.Text
@@ -29,6 +29,9 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -36,8 +39,8 @@ import java.math.BigDecimal
 import java.math.BigInteger
 import java.math.MathContext
 
-// The Calculator disguise: a calculator that really works, so it holds up when someone tries it. Typing the privacy PIN
-// and = opens Album; to anyone else, that's just a number.
+// The Calculator disguise: a calculator that really works and looks like the phone's own, so it holds up when someone
+// tries it. Typing the privacy PIN and = opens Album; to anyone else, that's just a number.
 
 /** A calculator's sum as typed: digits, '.', '%' and the operators, kept exactly as pressed (leading zeros too). */
 object Calc {
@@ -160,17 +163,30 @@ object Calc {
     }
 }
 
+/** The calculator's own colours, always dark as phone calculators are: a plain system look with no sign of Album's accent. */
+private object CalcColors {
+    val ground = Color(0xFF101113)
+    val key = Color(0xFF23252A)
+    val fn = Color(0xFF3A3D44)
+    val pressed = Color(0xFF4A4E57) // the design's brightness(1.3) on a pressed key
+    val ink = Color(0xFFF4F4F4)
+    val muted = Color(0xFF9A9CA1)
+    val op = Color(0xFFF2A65A)
+    val eq = Color(0xFFF2A65A)
+    val onEq = Color(0xFF1D1305)
+}
+
 /**
- * A working calculator on the design's tokens. "=" on a bare number of the PIN's length hands it to [onPin] as typed
- * (0042 stays 0042), and the calculator shows the number as any calculator would, right PIN or not. Holding "=" runs
- * [onHold]: the PIN pad, with the fingerprint and Forgot PIN.
+ * A working calculator that looks like the phone's own: Roboto, round keys, an orange "=". "=" on a bare number of the
+ * PIN's length hands it to [onPin] as typed (0042 stays 0042), and the calculator shows the number as any calculator
+ * would, right PIN or not. Holding "=" runs [onHold]: the PIN pad, with the fingerprint and Forgot PIN.
  */
 @Composable
 fun CalculatorScreen(pinLength: Int?, onPin: (String) -> Unit, onHold: () -> Unit) {
-    val c = AlbumTheme.colors
-    val type = AlbumTheme.type
+    val k = CalcColors
     var input by rememberSaveable { mutableStateOf("") }
     var answered by rememberSaveable { mutableStateOf(false) } // input is the last answer: a digit starts a new sum
+    var last by rememberSaveable { mutableStateOf("") } // the sum that answer came from, shown above it
     var cantDivide by rememberSaveable { mutableStateOf(false) }
     val grouping = remember { NumberFormat.getIntegerInstance() }
     fun shown(text: String) = Calc.display(text) { grouping.format(BigInteger(it)) }
@@ -190,64 +206,87 @@ fun CalculatorScreen(pinLength: Int?, onPin: (String) -> Unit, onHold: () -> Uni
         if (value == null) {
             cantDivide = true
         } else {
+            last = sum
             input = Calc.format(value)
             answered = true
         }
     }
 
-    val preview = if (answered || input.none(Calc::isOperator)) null else Calc.evaluate(input)?.let { shown(Calc.format(it)) }
-    // Keys grow with the screen, and shrink on short ones (landscape, large fonts) so all five rows fit
-    val keyHeight = (LocalConfiguration.current.screenHeightDp * 0.085f).dp.coerceIn(44.dp, 80.dp)
+    fun clear() {
+        input = ""
+        answered = false
+        cantDivide = false
+    }
 
-    Column(Modifier.fillMaxSize().background(c.canvas).systemBarsPadding().padding(Space.s4), horizontalAlignment = Alignment.CenterHorizontally) {
+    // Above the number: the sum an answer came from, or while typing a sum, what it comes to so far
+    val above = when {
+        answered -> shown(last)
+        input.none(Calc::isOperator) -> ""
+        else -> Calc.evaluate(input)?.let { shown(Calc.format(it)) }.orEmpty()
+    }
+    // Round keys a quarter of the screen across, made smaller when all five rows wouldn't fit (sideways, large fonts)
+    val config = LocalConfiguration.current
+    val keySize = minOf((config.screenHeightDp * 0.085f).dp, ((config.screenWidthDp - 76) / 4f).dp).coerceIn(44.dp, 88.dp)
+    val roboto = TextStyle(fontFamily = FontFamily.Default)
+
+    Column(
+        Modifier.fillMaxSize().background(k.ground).systemBarsPadding().padding(start = 20.dp, end = 20.dp, top = Space.s6, bottom = Space.s8),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(Space.s4),
+    ) {
         Column(
             Modifier.fillMaxWidth().weight(1f).padding(horizontal = Space.s2).semantics { liveRegion = LiveRegionMode.Polite },
-            verticalArrangement = Arrangement.spacedBy(Space.s2, Alignment.Bottom),
+            verticalArrangement = Arrangement.spacedBy(6.dp, Alignment.Bottom),
             horizontalAlignment = Alignment.End,
         ) {
+            Text(above, Modifier.heightIn(min = 24.dp), style = roboto.copy(fontSize = 20.sp), color = k.muted, maxLines = 1, textAlign = TextAlign.End)
             BasicText(
                 if (cantDivide) "Can't divide by 0" else shown(input).ifEmpty { "0" },
                 Modifier.fillMaxWidth(),
-                style = type.display.copy(color = if (cantDivide) c.inkMuted else c.ink, textAlign = TextAlign.End),
+                style = roboto.copy(color = if (cantDivide) k.muted else k.ink, fontWeight = FontWeight.Light, textAlign = TextAlign.End),
                 maxLines = 1,
-                autoSize = TextAutoSize.StepBased(minFontSize = 24.sp, maxFontSize = type.display.fontSize),
+                autoSize = TextAutoSize.StepBased(minFontSize = 24.sp, maxFontSize = 56.sp),
             )
-            Text(preview.orEmpty(), Modifier.heightIn(min = 28.dp), style = type.titleLg, color = c.inkMuted, maxLines = 1, textAlign = TextAlign.End)
         }
-        Column(Modifier.widthIn(max = 480.dp).fillMaxWidth().padding(top = Space.s4), verticalArrangement = Arrangement.spacedBy(Space.s2)) {
-            val operator = c.flashInk
+        Column(Modifier.width(keySize * 4 + Space.s3 * 3), verticalArrangement = Arrangement.spacedBy(Space.s3)) {
+            // Circles, pressing to 0.94 over 100 ms as the design's keys do
             @Composable
-            fun Key(text: String, description: String, modifier: Modifier = Modifier, ink: Color = c.ink, onClick: () -> Unit) =
-                PinKey(text, modifier.height(keyHeight), enabled = true, ink = ink, description = description, onClick = onClick)
+            fun RowScope.Key(description: String, fill: Color = k.key, onLongClick: (() -> Unit)? = null, onClick: () -> Unit, face: @Composable () -> Unit) =
+                PinKey(
+                    Modifier.weight(1f).aspectRatio(1f), description, fill = fill, pressed = k.pressed, pressScale = 0.94f, pressMs = 100,
+                    onLongClick = onLongClick, onClick = onClick, content = face,
+                )
 
-            Row(horizontalArrangement = Arrangement.spacedBy(Space.s2)) {
-                Key("AC", "Clear", Modifier.weight(1f), operator) {
-                    input = ""
+            @Composable
+            fun Label(text: String, ink: Color = k.ink) = Text(text, style = roboto.copy(fontSize = 28.sp), color = ink)
+
+            @Composable
+            fun Line(content: @Composable RowScope.() -> Unit) = Row(horizontalArrangement = Arrangement.spacedBy(Space.s3), content = content)
+
+            Line {
+                Key("Clear", k.fn, onClick = ::clear) { Label("C") }
+                Key("Percent", k.fn, onClick = { press('%') }) { Label("%") }
+                Key("Delete", k.fn, onClick = {
+                    input = if (answered) "" else input.dropLast(1)
                     answered = false
                     cantDivide = false
-                }
-                Key("DEL", "Delete", Modifier.weight(1f), operator) {
-                    if (answered) input = "" else input = input.dropLast(1)
-                    answered = false
-                    cantDivide = false
-                }
-                Key("%", "Percent", Modifier.weight(1f), operator) { press('%') }
-                Key("${Calc.DIVIDE}", "Divide", Modifier.weight(1f), operator) { press(Calc.DIVIDE) }
+                }) { BackspaceIcon(k.ink) }
+                Key("Divide", onClick = { press(Calc.DIVIDE) }) { Label("${Calc.DIVIDE}", k.op) }
             }
             listOf("789" to (Calc.TIMES to "Multiply"), "456" to (Calc.MINUS to "Minus"), "123" to (Calc.PLUS to "Plus")).forEach { (digits, op) ->
-                Row(horizontalArrangement = Arrangement.spacedBy(Space.s2)) {
-                    digits.forEach { d -> Key("$d", "$d", Modifier.weight(1f)) { press(d) } }
-                    Key("${op.first}", op.second, Modifier.weight(1f), operator) { press(op.first) }
+                Line {
+                    digits.forEach { d -> Key("$d", onClick = { press(d) }) { Label("$d") } }
+                    Key(op.second, onClick = { press(op.first) }) { Label("${op.first}", k.op) }
                 }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(Space.s2)) {
-                Key("0", "0", Modifier.weight(2f)) { press('0') }
-                Key(".", "Point", Modifier.weight(1f)) { press('.') }
-                // The design's one flash fill on this screen
-                PinKey(
-                    "=", Modifier.weight(1f).height(keyHeight), enabled = true, fill = c.flash, ink = c.onFlash, description = "Equals",
-                    onLongClick = onHold, onClick = ::equals,
-                )
+            Line {
+                Key("Double zero", onClick = {
+                    press('0')
+                    press('0')
+                }) { Label("00") }
+                Key("0", onClick = { press('0') }) { Label("0") }
+                Key("Point", onClick = { press('.') }) { Label(".") }
+                Key("Equals", k.eq, onLongClick = onHold, onClick = ::equals) { Label("=", k.onEq) }
             }
         }
     }

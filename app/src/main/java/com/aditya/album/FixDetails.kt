@@ -471,8 +471,8 @@ private enum class Picking { None, Date, Time }
 
 /**
  * Edit date and time for [items]: set the date and time of the first (the others keep their order and spacing after it),
- * or shift them all by days, hours and minutes, earlier or later. One item opens on Set, many on Shift. [onApply] gets
- * the shift in millis.
+ * or shift them all by days, hours and minutes, earlier or later. One item opens on Set, many on Shift. One item is the
+ * design's "Fix date" (from Details, or More), with what it's for. [onApply] gets the shift in millis.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -550,12 +550,17 @@ fun EditDateSheet(items: List<Media>, onDismiss: () -> Unit, onApply: (Long) -> 
         DateMode.Shift -> shiftOf(number(days), number(hours), number(minutes), later)
     }.takeIf { abs(it) >= 1000 } ?: 0L // the picker works to the second: what's left is the photo's own milliseconds
     val many = items.size > 1
-    Sheet(onDismiss, "Edit date and time") {
+    Sheet(onDismiss, if (many) "Edit date and time" else "Fix date") {
         Column(verticalArrangement = Arrangement.spacedBy(Space.s3)) {
-            Text(
-                if (many) "${itemCount(items.size)} · ${whenText(first)} to ${whenText(last)}" else "Now ${whenText(first)}",
-                style = AlbumTheme.type.caption, color = c.inkMuted,
-            )
+            if (many) {
+                Text("${itemCount(items.size)} · ${whenText(first)} to ${whenText(last)}", style = AlbumTheme.type.caption, color = c.inkMuted)
+            } else {
+                // Its date and time show in the rows below
+                Text(
+                    "For photos saved with the wrong date, like WhatsApp downloads. The file is updated on the phone.",
+                    style = AlbumTheme.type.body, color = c.inkMuted,
+                )
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(Space.s2)) {
                 Chip("Set date and time", { mode = DateMode.Set }, selected = mode == DateMode.Set)
                 Chip("Shift", { mode = DateMode.Shift }, selected = mode == DateMode.Shift)

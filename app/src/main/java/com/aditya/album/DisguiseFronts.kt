@@ -14,7 +14,9 @@ import android.text.format.Formatter
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -50,7 +52,9 @@ import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.rotate
@@ -61,7 +65,10 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -81,13 +88,22 @@ import kotlin.math.sin
 
 // The disguises' first screens besides the calculator (Calculator.kt). Each works on its own and offline: a real clock
 // and stopwatch, a compass from the phone's sensors, real storage figures, real time-based codes. Each has one quiet way
-// in, a long press on the thing that screen is about, which asks for the privacy PIN or fingerprint.
+// in, holding the thing that screen is about for 2 seconds, which asks for the privacy PIN. They're drawn under a plain
+// theme (see DisguiseFront): the phone's own font (Roboto), and no accent or anything else of Album's style.
 
-/** A long press runs [onHold], the disguise's way in. TalkBack offers it as this element's long-press action. */
-private fun Modifier.holdToOpen(onHold: () -> Unit) =
-    pointerInput(Unit) { detectTapGestures(onLongPress = { onHold() }) }.semantics { onLongClick { onHold(); true } }
+/** How long a front's title (or time, dial, code) is held to open the PIN: long enough that nobody does it by chance. */
+private const val HOLD_MS = 2_000L
 
-/** The front for [disguise] (not the calculator); a long press on its main element runs [onHold]. */
+/** Holding for [HOLD_MS] runs [onHold], the disguise's way in. TalkBack offers it as this element's long-press action. */
+private fun Modifier.holdToOpen(onHold: () -> Unit) = pointerInput(Unit) {
+    awaitEachGesture {
+        awaitFirstDown()
+        // Null only when the time runs out with the finger still down; lifting it, or a scroll taking it, ends the hold
+        if (withTimeoutOrNull(HOLD_MS) { waitForUpOrCancellation().let {} } == null) onHold()
+    }
+}.semantics { onLongClick { onHold(); true } }
+
+/** The front for [disguise] (not the calculator), as a plain system app; holding its main element runs [onHold]. */
 @Composable
 internal fun QuietFront(disguise: Disguise, onHold: () -> Unit) {
     Column(Modifier.fillMaxSize().background(AlbumTheme.colors.canvas).systemBarsPadding()) {
@@ -95,8 +111,18 @@ internal fun QuietFront(disguise: Disguise, onHold: () -> Unit) {
             Disguise.Clock -> ClockFront(onHold)
             Disguise.Compass -> CompassFront(onHold)
             Disguise.Notes -> {
-                LargeTopBar("Notes", Modifier.holdToOpen(onHold))
-                Centred { EmptyState(Sym.Description, "No notes yet", "Notes you write appear here.") }
+                FrontTitle("Notes", Modifier.holdToOpen(onHold))
+                // The search bar notes apps open on; with no notes there's nothing to search, so it's only drawn
+                Row(
+                    Modifier.padding(start = 20.dp, end = 20.dp, top = Space.s3).fillMaxWidth().height(48.dp)
+                        .clip(RoundedCornerShape(24.dp)).background(AlbumTheme.colors.surfaceHigh).padding(horizontal = Space.s4),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Sym.Search, null, tint = AlbumTheme.colors.inkMuted)
+                    Text("Search notes", style = roboto(16), color = AlbumTheme.colors.inkMuted)
+                }
+                Centred { FrontEmpty(Sym.StickyNote2, "No notes yet", "Notes you write appear here.") }
             }
             Disguise.Files -> FilesFront(onHold)
             Disguise.Scanner -> ScannerFront(onHold)
@@ -110,6 +136,25 @@ internal fun QuietFront(disguise: Disguise, onHold: () -> Unit) {
 @Composable
 private fun ColumnScope.Centred(content: @Composable () -> Unit) =
     Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) { content() }
+
+/** The phone's own font, which the fronts use in place of Album's. */
+private fun roboto(size: Int, weight: FontWeight = FontWeight.Normal) = TextStyle(fontFamily = FontFamily.Default, fontSize = size.sp, fontWeight = weight)
+
+/** A front's title as system apps set it: 32sp medium, on the front's 20dp margin. */
+@Composable
+private fun FrontTitle(text: String, modifier: Modifier = Modifier) =
+    Text(text, modifier.padding(start = 20.dp, end = 20.dp, top = Space.s6, bottom = Space.s1), style = roboto(32, FontWeight.Medium), color = AlbumTheme.colors.ink)
+
+/** A front's empty state as system apps draw it: a large muted icon (when there's one), a line in 18sp and one in 13sp. */
+@Composable
+private fun FrontEmpty(icon: Sym?, title: String, body: String) {
+    val c = AlbumTheme.colors
+    Column(Modifier.fillMaxWidth().padding(horizontal = Space.s6), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        icon?.let { Icon(it, null, size = 48.dp, tint = c.inkMuted) }
+        Text(title, style = roboto(18, FontWeight.Medium), color = c.ink, textAlign = TextAlign.Center)
+        Text(body, style = roboto(13), color = c.inkMuted, textAlign = TextAlign.Center)
+    }
+}
 
 // ---------- Clock ----------
 
@@ -158,7 +203,7 @@ private fun ColumnScope.ClockFront(onHold: () -> Unit) {
     }
     Column(Modifier.fillMaxWidth().padding(Space.s4).padding(bottom = Space.s8), horizontalAlignment = Alignment.CenterHorizontally) {
         Text("Stopwatch", style = type.titleMd, color = c.ink)
-        Text(stopwatchText(shown), Modifier.padding(vertical = Space.s4), style = type.titleXl.copy(fontFamily = GeistMono, fontFeatureSettings = "tnum"), color = c.ink)
+        Text(stopwatchText(shown), Modifier.padding(vertical = Space.s4), style = type.titleXl.copy(fontFeatureSettings = "tnum"), color = c.ink)
         Row(Modifier.widthIn(max = 400.dp).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Space.s2)) {
             AlbumButton("Reset", {
                 banked = 0
@@ -213,13 +258,13 @@ private fun ColumnScope.CompassFront(onHold: () -> Unit) {
         onPauseOrDispose { sensors?.unregisterListener(listener) }
     }
     if (sensor == null) {
-        LargeTopBar("Compass", Modifier.holdToOpen(onHold))
-        Centred { EmptyState(Sym.Public, "No compass on this phone", "This phone doesn't have the sensor a compass needs.") }
+        FrontTitle("Compass", Modifier.holdToOpen(onHold))
+        Centred { FrontEmpty(Sym.Public, "No compass on this phone", "This phone doesn't have the sensor a compass needs.") }
         return
     }
     val measurer = rememberTextMeasurer()
     val letter = type.titleMd
-    val north = c.flashInk
+    val north = c.danger // a compass's red north, not Album's accent
     Centred {
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(Space.s6)) {
             val h = if (heading.isNaN()) 0f else (heading % 360 + 360) % 360
@@ -281,28 +326,37 @@ private fun ColumnScope.FilesFront(onHold: () -> Unit) {
         }
     }
     fun size(bytes: Long) = Formatter.formatShortFileSize(context, bytes)
-    LargeTopBar("Files")
+    FrontTitle("Files", Modifier.holdToOpen(onHold))
     Column(
-        Modifier.padding(horizontal = Space.s4).fillMaxWidth().clip(RoundedCornerShape(Space.radiusMd)).background(c.surface)
-            .holdToOpen(onHold).padding(Space.s4),
-        verticalArrangement = Arrangement.spacedBy(Space.s3),
+        Modifier.padding(start = 20.dp, end = 20.dp, top = Space.s3).fillMaxWidth().clip(RoundedCornerShape(Space.radiusMd)).background(c.surfaceHigh)
+            .padding(Space.s4),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(Space.s4), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Sym.PhoneAndroid, null, tint = c.inkMuted)
-            Column(Modifier.weight(1f)) {
-                Text("Internal storage", style = type.body, color = c.ink)
-                space?.let { (total, free) -> Text("${size(total - free)} used of ${size(total)}", style = type.caption, color = c.inkMuted) }
-            }
-        }
+        Text("Internal storage", style = roboto(13), color = c.inkMuted)
         space?.let { (total, free) ->
-            Box(Modifier.fillMaxWidth().height(8.dp).clip(CircleShape).background(c.surfaceHigh)) {
-                Box(Modifier.fillMaxWidth(((total - free).toFloat() / total).coerceIn(0f, 1f)).fillMaxHeight().background(c.flash, CircleShape))
+            Text("${size(total - free)} used of ${size(total)}", style = roboto(18, FontWeight.Medium), color = c.ink)
+            Box(Modifier.fillMaxWidth().height(6.dp).clip(CircleShape).background(c.line)) {
+                Box(Modifier.fillMaxWidth(((total - free).toFloat() / total).coerceIn(0f, 1f)).fillMaxHeight().background(FILES_BLUE, CircleShape))
             }
-            Text("${size(free)} free", style = type.caption, color = c.inkMuted)
         }
     }
-    Centred { EmptyState(Sym.Folder, "No recent files", "Files you open appear here.") }
+    // A files app's categories. Only their names: Album can't measure what other apps keep, and won't make figures up.
+    listOf(Sym.Image to "Images", Sym.Movie to "Videos", Sym.MusicNote to "Audio", Sym.Description to "Documents", Sym.Download to "Downloads", Sym.Apps to "Apps")
+        .forEach { (icon, name) ->
+            Row(
+                Modifier.padding(start = 20.dp, end = 20.dp, top = Space.s3).fillMaxWidth().heightIn(min = 48.dp)
+                    .drawBehind { drawLine(c.line, Offset(0f, size.height - 0.5.dp.toPx()), Offset(size.width, size.height - 0.5.dp.toPx()), 1.dp.toPx()) },
+                horizontalArrangement = Arrangement.spacedBy(Space.s4),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(icon, null, tint = c.ink)
+                Text(name, style = roboto(16), color = c.ink)
+            }
+        }
 }
+
+/** The storage bar's blue, as a files app has it. */
+private val FILES_BLUE = Color(0xFF3D74D6)
 
 // ---------- Scanner ----------
 
@@ -312,8 +366,8 @@ private fun ColumnScope.ScannerFront(onHold: () -> Unit) {
     val c = AlbumTheme.colors
     val type = AlbumTheme.type
     var note by remember { mutableStateOf<String?>(null) }
-    LargeTopBar("Scanner")
-    Centred { EmptyState(Sym.Description, "Scan a document", "Place the page on a flat surface in good light, then tap Scan.") }
+    FrontTitle("Scanner")
+    Centred { FrontEmpty(Sym.Description, "Scan a document", "Place the page on a flat surface in good light, then tap Scan.") }
     Column(Modifier.fillMaxWidth().padding(bottom = Space.s8), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(Space.s2)) {
         Text(note.orEmpty(), Modifier.heightIn(min = 16.dp), style = type.caption, color = c.ink, textAlign = TextAlign.Center)
         Box(
@@ -357,9 +411,9 @@ private fun ColumnScope.AuthenticatorFront(onHold: () -> Unit) {
     }
     val code = signInCode(secret, seconds)
     val left = 30 - seconds % 30
-    LargeTopBar("Authenticator")
+    FrontTitle("Authenticator")
     Column(
-        Modifier.padding(horizontal = Space.s4).fillMaxWidth().clip(RoundedCornerShape(Space.radiusMd)).background(c.surface).padding(Space.s4),
+        Modifier.padding(horizontal = 20.dp).fillMaxWidth().clip(RoundedCornerShape(Space.radiusMd)).background(c.surfaceHigh).padding(Space.s4),
         verticalArrangement = Arrangement.spacedBy(Space.s1),
     ) {
         Text("Work account", style = type.label, color = c.ink)
@@ -367,13 +421,13 @@ private fun ColumnScope.AuthenticatorFront(onHold: () -> Unit) {
             Text(
                 "${code.take(3)} ${code.drop(3)}",
                 Modifier.weight(1f).holdToOpen(onHold),
-                style = type.titleXl.copy(fontFamily = GeistMono, fontFeatureSettings = "tnum"),
-                color = c.flashInk,
+                style = type.titleXl.copy(fontFeatureSettings = "tnum"),
+                color = c.ink,
             )
             // What's left of the 30 seconds, as a shrinking disc
             Canvas(Modifier.size(Space.s6).semantics { contentDescription = "Changes in $left seconds" }) {
-                drawCircle(c.surfaceHigh)
-                drawArc(c.flash, -90f, 360f * left / 30, useCenter = true)
+                drawCircle(c.line)
+                drawArc(c.inkMuted, -90f, 360f * left / 30, useCenter = true)
             }
         }
         Text("Sign-in code", style = type.caption, color = c.inkMuted)
@@ -391,11 +445,23 @@ private fun ColumnScope.AuthenticatorFront(onHold: () -> Unit) {
 @Composable
 private fun ColumnScope.WorkspaceFront(onHold: () -> Unit) {
     val c = AlbumTheme.colors
-    Centred {
-        Column(Modifier.padding(horizontal = Space.s6), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(Space.s2)) {
-            DisguiseIcon(Disguise.Workspace, 88.dp, Modifier.padding(bottom = Space.s4).holdToOpen(onHold).semantics { contentDescription = "Workspace" })
-            Text("Your workspace is ready", style = AlbumTheme.type.titleLg, color = c.ink, textAlign = TextAlign.Center)
-            Text("Apps and files your organisation shares with you appear here.", style = AlbumTheme.type.body, color = c.inkMuted, textAlign = TextAlign.Center)
+    FrontTitle("Workspace", Modifier.holdToOpen(onHold))
+    // A work hub's apps, two by two; there's nothing in them until someone signs in
+    Column(Modifier.padding(start = 20.dp, end = 20.dp, top = Space.s3), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        listOf(Sym.Description to "Docs", Sym.TableChart to "Sheets", Sym.CalendarMonth to "Calendar", Sym.Mail to "Mail").chunked(2).forEach { pair ->
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                pair.forEach { (icon, name) ->
+                    Row(
+                        Modifier.weight(1f).height(56.dp).clip(RoundedCornerShape(14.dp)).background(c.surfaceHigh).padding(horizontal = 14.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(icon, null, tint = c.ink)
+                        Text(name, style = roboto(16), color = c.ink)
+                    }
+                }
+            }
         }
     }
+    Centred { FrontEmpty(null, "No tasks for today", "Sign in to sync your work.") }
 }

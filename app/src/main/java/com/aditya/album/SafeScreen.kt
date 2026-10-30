@@ -10,6 +10,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
@@ -19,7 +22,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
@@ -29,7 +31,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.aspectRatio
@@ -43,17 +44,16 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalBottomSheetProperties
 import androidx.compose.material3.SheetValue
-import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -81,10 +81,12 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
@@ -171,8 +173,8 @@ fun rememberMoveToSafe(snackbar: SnackbarHostState, onStart: () -> Unit = {}): M
         val empty by produceState<Boolean?>(null) { value = withContext(Dispatchers.IO) { Safe.isEmpty() } }
         empty?.let {
             ConfirmBar(
-                title = "Move ${itemCount(items.size)} to Private safe?",
-                body = "They leave the Library and search." + if (it) " $SAFE_NOTE" else "",
+                title = "Move ${these(items.size, items.first().isVideo)} to Private safe?",
+                body = "${if (items.size == 1) "It leaves" else "They leave"} the Library and search, and open${if (items.size == 1) "s" else ""} only with your PIN or fingerprint." + if (it) " $SAFE_NOTE" else "",
                 confirmLabel = "Move to safe",
                 onConfirm = {
                     confirming = null
@@ -181,7 +183,7 @@ fun rememberMoveToSafe(snackbar: SnackbarHostState, onStart: () -> Unit = {}): M
                 onCancel = { confirming = null },
                 icon = Sym.Lock,
                 tone = ConfirmTone.Flash,
-                thumbs = items.take(3),
+                thumbs = items.take(2),
             )
         }
     }
@@ -203,9 +205,10 @@ fun rememberMoveToSafe(snackbar: SnackbarHostState, onStart: () -> Unit = {}): M
 }
 
 /**
- * Private safe, a pushed page. Locked: the privacy PIN pad (or the fingerprint). Open: decrypted thumbnails, long-press to
- * select, then Move out or Delete forever; tap to view. Screenshots and the recents preview are blocked while it's on
- * screen (FLAG_SECURE), and privacy locks when you leave the page, when Album leaves the screen, and on Lock now.
+ * Private safe, a pushed page. Locked: the privacy PIN pad (or the fingerprint key). Open: decrypted thumbnails under
+ * their days, as many across as the Library has, long-press to select, then Move out or Delete forever; tap to view.
+ * Screenshots and the recents preview are blocked while it's on screen (FLAG_SECURE), and privacy locks when you leave
+ * the page, when Album leaves the screen, and on Lock now.
  */
 @Composable
 fun SafeScreen(onBack: () -> Unit) {
@@ -232,44 +235,33 @@ private fun LockedSafe(onBack: () -> Unit) {
     val pin by PrivacyLock.setUp.collectAsState()
     LaunchedEffect(Unit) { Safe.checkKey() }
     if (!wrapLost || pin) {
-        PrivacyGate("Private safe", Sym.Lock, "Encrypted on this phone and hidden from the Library, search and other apps.", onBack)
+        PrivacyGate("Private safe", Sym.Lock, "The Private safe is locked.", onBack)
         return
     }
-    val c = AlbumTheme.colors
     var resetting by remember { mutableStateOf(false) }
-    Column(Modifier.fillMaxSize()) {
-        Box(Modifier.statusBarsPadding()) { CollapsedTopBar("Private safe", onBack = onBack) }
-        Column(
-            Modifier.fillMaxWidth().weight(1f).navigationBarsPadding().padding(start = Space.s8, end = Space.s8, bottom = Space.s12),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(Space.s3, Alignment.CenterVertically),
-        ) {
-            Box(Modifier.size(88.dp).background(c.flashSoft, CircleShape), contentAlignment = Alignment.Center) {
-                Icon(Sym.Lock, null, size = 44.dp, tint = c.flashInk)
-            }
-            Text("Private safe", style = AlbumTheme.type.titleLg, color = c.ink)
-            Text(LOST_NOTE, style = AlbumTheme.type.body, color = c.inkMuted, textAlign = TextAlign.Center)
-            Spacer(Modifier.height(Space.s2))
-            AlbumButton("Reset safe", { resetting = true }, variant = ButtonVariant.Danger, icon = Sym.DeleteForever)
-        }
+    LockedState("Private safe", onBack, Sym.Error, "Private safe can't be opened", LOST_NOTE) {
+        AlbumButton("Reset safe", { resetting = true }, Modifier.fillMaxWidth(), ButtonVariant.Danger, icon = Sym.DeleteForever)
     }
     if (resetting) {
         val count = Safe.items.collectAsState(null).value?.size
         ConfirmBar(
             title = "Reset Private safe?",
-            body = (count?.let { "Its ${itemCount(it)} can't be opened any more, by Album or anyone else. " } ?: "") +
-                "Resetting erases them from this phone and starts an empty safe. This cannot be undone.",
+            body = (count?.takeIf { it > 0 }?.let { "Its ${itemCount(it)} ${if (it == 1) "is" else "are"} erased from this phone and can't be opened again. " } ?: "") +
+                "Hidden people and albums stay hidden.",
             confirmLabel = "Hold to reset",
             onConfirm = {
                 resetting = false
                 Safe.reset()
             },
             onCancel = { resetting = false },
-            icon = Sym.DeleteForever,
+            icon = Sym.LockReset,
             hold = true,
         )
     }
 }
+
+/** The Library's column count's key (MainActivity), which the safe's grid follows. */
+private const val LIBRARY_COLUMNS = "columns_photos"
 
 // A few thumbnails decrypt at a time, like the grid's (see Media.kt), so a fling doesn't starve the UI threads
 private val safeLoads = Dispatchers.IO.limitedParallelism(4)
@@ -279,7 +271,6 @@ private fun OpenSafe(key: ByteArray, onBack: () -> Unit) {
     val context = LocalContext.current
     val spec = AlbumTheme.spec
     val c = spec.colors
-    val haptics = rememberHaptics()
     val items by Safe.items.collectAsState(null)
     val list = items.orEmpty()
     var selected by remember { mutableStateOf(emptySet<Long>()) }
@@ -308,40 +299,14 @@ private fun OpenSafe(key: ByteArray, onBack: () -> Unit) {
                     Sym.Lock, "Nothing in the safe",
                     "Photos you move here leave the Library and search, and open only with your privacy PIN or fingerprint.",
                 )
-                else -> LazyVerticalGrid(
-                    GridCells.Fixed(DEFAULT_COLUMNS),
-                    Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(top = Space.s3, bottom = bottom + if (selecting) SelectionClearance else Space.s8),
-                    horizontalArrangement = Arrangement.spacedBy(spec.gutter),
-                    verticalArrangement = Arrangement.spacedBy(spec.gutter),
-                ) {
-                    items(list, key = { it.id }) { item ->
-                        val isSelected = item.id in selected
-                        SafeTile(
-                            item, key, selecting, isSelected,
-                            Modifier.aspectRatio(1f).combinedClickable(
-                                onLongClickLabel = "Select",
-                                onLongClick = {
-                                    haptics.longPress()
-                                    selected = selected + item.id
-                                },
-                                hapticFeedbackEnabled = false, // Haptics follows Album's own haptics switch
-                            ) {
-                                when {
-                                    selecting -> selected = if (isSelected) selected - item.id else selected + item.id
-                                    else -> viewing = item.id
-                                }
-                            },
-                        )
-                    }
-                }
+                else -> SafeGrid(list, key, chosen.mapTo(HashSet()) { it.id }, { selected = it }, { viewing = it }, bottom + if (selecting) SelectionClearance else Space.s8)
             }
         }
         AnimatedVisibility(
             selecting,
             Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = Space.s4),
-            enter = if (spec.still) fadeIn(tween(0)) else slideInVertically { it } + fadeIn(),
-            exit = if (spec.still) fadeOut(tween(0)) else slideOutVertically { it } + fadeOut(),
+            enter = dockRise(),
+            exit = ExitTransition.None,
         ) {
             SelectionBar(
                 chosen.size,
@@ -357,11 +322,11 @@ private fun OpenSafe(key: ByteArray, onBack: () -> Unit) {
                 onSelectAll = if (chosen.size < list.size) ({ selected = list.mapTo(HashSet()) { it.id } }) else null,
             )
         }
-        SnackbarHost(
+        AlbumSnackbarHost(
             snackbar,
             Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
                 .padding(bottom = Space.s4 + if (selecting) SelectionBarHeight + Space.s2 else 0.dp),
-        ) { AlbumSnackbar(it) }
+        )
 
         viewing?.let { id ->
             val start = list.indexOfFirst { it.id == id }
@@ -372,7 +337,7 @@ private fun OpenSafe(key: ByteArray, onBack: () -> Unit) {
     toDelete?.let { doomed ->
         ConfirmBar(
             title = "Delete ${itemCount(doomed.size)} forever?",
-            body = "${if (doomed.size == 1) "It" else "They"} will be erased from this phone. This cannot be undone.",
+            body = "${if (doomed.size == 1) "It'll" else "They'll"} be erased from this phone. This can't be undone.",
             confirmLabel = "Hold to delete",
             onConfirm = {
                 CrashLog.note("safe delete forever ${doomed.size}")
@@ -383,7 +348,74 @@ private fun OpenSafe(key: ByteArray, onBack: () -> Unit) {
             onCancel = { toDelete = null },
             icon = Sym.DeleteForever,
             hold = true,
+            fromBar = true,
         )
+    }
+}
+
+/**
+ * The design's dock rising in for a page's selection bar or Unhide button: 28dp up and in over 300 ms with a slight
+ * overshoot. It goes at once, so its exit is [ExitTransition.None]. Nothing moves with Remove animations on.
+ */
+@Composable
+internal fun dockRise(): EnterTransition {
+    if (AlbumTheme.spec.still) return EnterTransition.None
+    val rise = with(LocalDensity.current) { 28.dp.roundToPx() }
+    val ease = CubicBezierEasing(0.2f, 0.9f, 0.3f, 1.1f)
+    return slideInVertically(tween(300, easing = ease)) { rise } + fadeIn(tween(300, easing = ease))
+}
+
+/**
+ * The safe's grid (and ID cards'): [list], newest first, under day headers as the Library's ("Today", "Sat, 24 Oct"),
+ * or months at its month zoom, with as many tiles across as the Library shows. Tap views an item ([onView]), or picks it
+ * while [selected] isn't empty; long-press picks. [bottom]: room under the last row.
+ */
+@Composable
+internal fun SafeGrid(list: List<SafeItem>, key: ByteArray, selected: Set<Long>, onSelect: (Set<Long>) -> Unit, onView: (Long) -> Unit, bottom: Dp) {
+    val spec = AlbumTheme.spec
+    val haptics = rememberHaptics()
+    val columns = rememberColumns(LIBRARY_COLUMNS).intValue
+    val byMonth = columns >= MONTH_COLUMNS
+    val zone = remember { ZoneId.systemDefault() }
+    val sections = remember(list, byMonth) { sections(list, byMonth) { Instant.ofEpochMilli(it.taken).atZone(zone).toLocalDate().toEpochDay() } }
+    val selecting = selected.isNotEmpty()
+    LazyVerticalGrid(
+        GridCells.Fixed(columns),
+        Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(bottom = bottom),
+        horizontalArrangement = Arrangement.spacedBy(spec.gutter),
+        verticalArrangement = Arrangement.spacedBy(spec.gutter),
+    ) {
+        sections.forEachIndexed { i, section ->
+            item(key = "day ${section.key}", span = { GridItemSpan(maxLineSpan) }) {
+                // The Library's date header: 8dp from the top for the first, 32dp between days
+                Text(
+                    section.label,
+                    Modifier.fillMaxWidth().padding(start = Space.s4, end = Space.s4, top = if (i == 0) Space.s2 else Space.s8, bottom = Space.s3)
+                        .semantics { heading() },
+                    style = AlbumTheme.type.titleMd, color = spec.colors.ink,
+                )
+            }
+            items(section.items, key = { it.id }) { item ->
+                val isSelected = item.id in selected
+                SafeTile(
+                    item, key, selecting, isSelected,
+                    Modifier.aspectRatio(1f).combinedClickable(
+                        onLongClickLabel = "Select",
+                        onLongClick = {
+                            haptics.longPress()
+                            onSelect(selected + item.id)
+                        },
+                        hapticFeedbackEnabled = false, // Haptics follows Album's own haptics switch
+                    ) {
+                        when {
+                            selecting -> onSelect(if (isSelected) selected - item.id else selected + item.id)
+                            else -> onView(item.id)
+                        }
+                    },
+                )
+            }
+        }
     }
 }
 
@@ -395,7 +427,7 @@ private fun SafeItem.asMedia() = Media(
 
 /** A safe item in the grid, drawn like [MediaTile] but from its thumbnail decrypted into memory, never Coil's caches. */
 @Composable
-private fun SafeTile(item: SafeItem, key: ByteArray, selecting: Boolean, selected: Boolean, modifier: Modifier) {
+internal fun SafeTile(item: SafeItem, key: ByteArray, selecting: Boolean, selected: Boolean, modifier: Modifier) {
     val spec = AlbumTheme.spec
     val c = spec.colors
     val thumb by produceState<ImageBitmap?>(null, item.id) { value = withContext(safeLoads) { Safe.thumbnail(item, key) } }
@@ -433,7 +465,7 @@ private fun SafeTile(item: SafeItem, key: ByteArray, selecting: Boolean, selecte
 
 /** Full screen over the grid: swipe between items, pinch to zoom photos, tap for the back button (and video controls). */
 @Composable
-private fun SafeViewer(items: List<SafeItem>, start: Int, key: ByteArray, onClose: () -> Unit) {
+internal fun SafeViewer(items: List<SafeItem>, start: Int, key: ByteArray, onClose: () -> Unit) {
     val c = AlbumTheme.colors
     val pager = rememberPagerState(start) { items.size }
     var chrome by remember { mutableStateOf(true) }
@@ -598,7 +630,7 @@ private class SafeDataSource(private val openReader: () -> SafeReader) : BaseDat
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SafeProgress(p: Safe.Progress) {
+internal fun SafeProgress(p: Safe.Progress) {
     var visible by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         delay(400)

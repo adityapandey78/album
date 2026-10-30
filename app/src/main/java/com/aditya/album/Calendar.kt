@@ -1,9 +1,6 @@
 package com.aditya.album
 
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.snap
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -14,6 +11,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
@@ -47,8 +45,14 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onPlaced
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInParent
@@ -59,6 +63,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import java.text.NumberFormat
@@ -145,6 +150,9 @@ private val monthTitle = DateTimeFormatter.ofPattern("MMMM yyyy")
 private val stripDay = DateTimeFormatter.ofPattern("EEE d")
 private val stripOldDay = DateTimeFormatter.ofPattern("EEE d yyyy")
 
+/** Room for the chosen day's ring, which sits 2dp outside the day and is 2dp wide. */
+private val ringRoom = Space.s1
+
 // The design's strip photos: 56dp, the chosen day's 72dp
 private val stripPhoto = Space.s12 + Space.s2
 private val stripPhotoChosen = Space.s12 + Space.s6
@@ -179,12 +187,11 @@ fun CalendarSheet(media: List<Media>, onDismiss: () -> Unit, onDay: (Long) -> Un
     var picked by rememberSaveable { mutableLongStateOf(today) }
     var heat by rememberSaveable { mutableStateOf(false) }
     val pager = rememberPagerState(initialPage = pageOf(picked)) { monthCount }
-    // Swiping (or a chevron) to another month picks its newest day with photos, or the 1st when it has none
+    // Swiping (or a chevron) to another month picks its 1st, as in the design: the strip then shows the photos around it
     LaunchedEffect(pager, firstMonth) {
         snapshotFlow { pager.settledPage }.drop(1).collect { page ->
             if (page != pageOf(picked)) {
-                val month = firstMonth.plusMonths(page.toLong())
-                picked = newestIn(sorted, month.atDay(1).toEpochDay(), month.atEndOfMonth().toEpochDay()) ?: month.atDay(1).toEpochDay()
+                picked = firstMonth.plusMonths(page.toLong()).atDay(1).toEpochDay()
                 haptics.tick()
             }
         }
@@ -275,7 +282,10 @@ fun CalendarSheet(media: List<Media>, onDismiss: () -> Unit, onDay: (Long) -> Un
     }
 }
 
-/** The months side by side: swipe between them. Each is always six weeks, so the sheet keeps its height. */
+/**
+ * The months side by side: swipe between them. Each has only the weeks it needs, as in the design. The pager reaches
+ * [ringRoom] past the days on both sides, so the chosen day's ring isn't cut off at the edges.
+ */
 @Composable
 private fun MonthPager(
     pager: PagerState,
@@ -287,9 +297,19 @@ private fun MonthPager(
     heat: Boolean,
     onPick: (Long) -> Unit,
 ) {
-    HorizontalPager(pager, Modifier.fillMaxWidth(), pageSpacing = Space.s4, key = { it }) { page ->
+    HorizontalPager(
+        pager,
+        Modifier.fillMaxWidth().layout { measurable, constraints ->
+            val room = ringRoom.roundToPx()
+            val wider = measurable.measure(constraints.copy(minWidth = constraints.maxWidth + 2 * room, maxWidth = constraints.maxWidth + 2 * room))
+            layout(constraints.maxWidth, wider.height) { wider.place(-room, 0) }
+        },
+        contentPadding = PaddingValues(horizontal = ringRoom),
+        pageSpacing = Space.s4,
+        key = { it },
+    ) { page ->
         val month = firstMonth.plusMonths(page.toLong())
-        val weeks = remember(month, weekStart) { weeksOf(month, weekStart).let { it + List(6 - it.size) { List(7) { null } } } }
+        val weeks = remember(month, weekStart) { weeksOf(month, weekStart) }
         Column(verticalArrangement = Arrangement.spacedBy(Space.s1)) {
             weeks.forEach { week ->
                 Row(horizontalArrangement = Arrangement.spacedBy(Space.s1)) {
@@ -306,8 +326,8 @@ private fun MonthPager(
 
 /**
  * A day: its newest photo with the date on a pill, or in [heat] view a flash-soft (1 to 4 photos) or flash (5 or more)
- * fill. The chosen day gets a flash-ink ring and steps in from it; today a line-strong ring. Days without photos can be
- * chosen too: the strip then shows the nearest ones.
+ * fill. The chosen day gets a flash-ink ring 2dp outside it; today, unless it shows a photo, a line-strong ring inside.
+ * Days without photos can be chosen too: the strip then shows the nearest ones.
  */
 @Composable
 private fun DayCell(day: Long, photos: PhotoDay<Media>?, heat: Boolean, selected: Boolean, isToday: Boolean, onPick: () -> Unit) {
@@ -319,9 +339,6 @@ private fun DayCell(day: Long, photos: PhotoDay<Media>?, heat: Boolean, selected
     val source = remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
     val scale by animateFloatAsState(if (pressed && !still) 0.92f else 1f, label = "dayPress")
-    // The design draws the chosen day's ring 2dp outside it; stepping the day in by that much keeps the ring inside the
-    // cell, where the pager can't clip it and it can't touch the next day
-    val inset by animateDpAsState(if (selected) Space.s1 else 0.dp, if (still) snap() else spring(), label = "dayInset")
     val (fill, ink) = when {
         heat && count >= 5 -> c.flash to c.onFlash
         heat && count > 0 -> c.flashSoft to c.ink
@@ -331,17 +348,20 @@ private fun DayCell(day: Long, photos: PhotoDay<Media>?, heat: Boolean, selected
         Modifier.fillMaxSize()
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .then(
-                when {
-                    selected -> Modifier.border(2.dp, c.flashInk, shape)
-                    isToday && thumb == null -> Modifier.border(1.dp, c.lineStrong, shape)
-                    else -> Modifier
+                if (!selected) Modifier
+                else Modifier.drawBehind {
+                    val out = ringRoom.toPx() - 1.dp.toPx() // the 2dp ring's middle, 3dp out
+                    drawRoundRect(
+                        c.flashInk, Offset(-out, -out), Size(size.width + 2 * out, size.height + 2 * out),
+                        CornerRadius(Space.radiusMd.toPx() + out), style = Stroke(2.dp.toPx()),
+                    )
                 },
             )
             .selectable(selected, interactionSource = source, indication = null, onClick = onPick)
             .semantics { contentDescription = (if (isToday) "Today, " else "") + dayDescription(day, count) }
-            .padding(inset)
             .clip(shape)
-            .background(fill),
+            .background(fill)
+            .then(if (isToday && thumb == null) Modifier.border(1.dp, c.lineStrong, shape) else Modifier),
         contentAlignment = Alignment.Center,
     ) {
         val number = LocalDate.ofEpochDay(day).dayOfMonth.toString()
@@ -349,12 +369,17 @@ private fun DayCell(day: Long, photos: PhotoDay<Media>?, heat: Boolean, selected
             Thumbnail(thumb, Modifier.fillMaxSize())
             Text(
                 number,
-                Modifier.align(Alignment.TopStart).padding(Space.s1).background(c.scrimPhoto, CircleShape).padding(horizontal = Space.s1).clearAndSetSemantics {},
-                style = AlbumTheme.type.meta,
+                Modifier.align(Alignment.TopStart).padding(3.dp).background(c.scrimPhoto, CircleShape).padding(horizontal = 5.dp).clearAndSetSemantics {},
+                style = AlbumTheme.type.caption.copy(fontSize = 11.sp, lineHeight = 16.sp, fontWeight = FontWeight.SemiBold),
                 color = c.onPhoto,
             )
         } else {
-            Text(number, Modifier.clearAndSetSemantics {}, style = AlbumTheme.type.label, color = ink)
+            Text(
+                number,
+                Modifier.clearAndSetSemantics {},
+                style = AlbumTheme.type.label.copy(fontSize = 13.sp, fontWeight = if (count > 0) FontWeight.SemiBold else FontWeight.Medium),
+                color = ink,
+            )
         }
     }
 }
@@ -364,10 +389,11 @@ private fun DayCell(day: Long, photos: PhotoDay<Media>?, heat: Boolean, selected
 private fun Legend(modifier: Modifier = Modifier) {
     val c = AlbumTheme.colors
     val keyShape = RoundedCornerShape(Space.s1)
-    FlowRow(modifier.clearAndSetSemantics {}, horizontalArrangement = Arrangement.spacedBy(Space.s3), verticalArrangement = Arrangement.spacedBy(Space.s1)) {
-        listOf(null to "No photos", c.flashSoft to "1 to 4", c.flash to "5 or more").forEach { (fill, label) ->
+    FlowRow(modifier.clearAndSetSemantics {}, horizontalArrangement = Arrangement.spacedBy(Space.s2), verticalArrangement = Arrangement.spacedBy(Space.s1)) {
+        listOf(Color.Transparent to "No photos", c.flashSoft to "1 to 4", c.flash to "5 or more").forEach { (fill, label) ->
             Row(horizontalArrangement = Arrangement.spacedBy(Space.s2), verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(Space.s3).then(if (fill == null) Modifier.border(1.dp, c.line, keyShape) else Modifier.background(fill, keyShape)))
+                // a line ring on all but the flash key, as in the design
+                Box(Modifier.size(Space.s3).background(fill, keyShape).then(if (fill == c.flash) Modifier else Modifier.border(1.dp, c.line, keyShape)))
                 Text(label, style = AlbumTheme.type.caption, color = c.inkMuted)
             }
         }

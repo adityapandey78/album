@@ -231,39 +231,3 @@ private fun EditWithSheet(editors: List<Editor>, onDismiss: () -> Unit, onPick: 
         }
     }
 }
-
-/** For Settings: the remembered editing app, or "Ask every time". Tapping it forgets the app, so Edit asks again. */
-@Composable
-fun EditingAppRow(modifier: Modifier = Modifier) {
-    val context = LocalContext.current
-    EditorPrefs.load(context)
-    val chosen by EditorPrefs.chosen.collectAsState()
-    // Null while loading, and for an app that has since been uninstalled (Edit asks again then anyway)
-    val name by produceState<String?>(null, chosen) {
-        value = chosen?.let { pkg ->
-            withContext(Dispatchers.IO) {
-                runCatching { context.packageManager.getApplicationInfo(pkg, 0).loadLabel(context.packageManager).toString() }.getOrNull()
-            }
-        }
-    }
-    val app = name
-    if (app != null) {
-        MenuRow(Sym.Edit, "Editing app", {
-            CrashLog.note("editor forgotten")
-            EditorPrefs.set(null)
-        }, modifier, sub = "$app. Tap to ask every time", trailing = null)
-    } else {
-        // Nothing to reset, so not a button
-        Row(
-            modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = Space.s1),
-            horizontalArrangement = Arrangement.spacedBy(Space.s4),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(Sym.Edit, null, tint = AlbumTheme.colors.inkMuted)
-            Column(Modifier.weight(1f)) {
-                Text("Editing app", style = AlbumTheme.type.body, color = AlbumTheme.colors.ink)
-                Text("Ask every time", style = AlbumTheme.type.caption, color = AlbumTheme.colors.inkMuted)
-            }
-        }
-    }
-}

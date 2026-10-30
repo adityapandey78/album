@@ -238,9 +238,10 @@ class MemoryNotificationWorker(context: Context, params: WorkerParameters) : Cor
 }
 
 /**
- * Settings' On this day row: Off, or the hour it comes at. It opens a sheet with the switch and, while on, the hours.
- * Turning it on asks for Android's notification permission first; once Android stops asking, it opens Album's
- * notification settings instead and turns on when you come back with them allowed. [modifier] goes on the row, a MenuRow.
+ * Settings' On this day row, in Search and smart features: Off, or the hour it comes at. It opens a sheet with the switch
+ * and, while on, the hours. Turning it on asks for Android's notification permission first; once Android stops asking, it
+ * opens Album's notification settings instead and turns on when you come back with them allowed. [modifier] goes on the
+ * row, a GroupRow.
  */
 @Composable
 fun MemoryNotificationRow(modifier: Modifier = Modifier) {
@@ -284,7 +285,10 @@ fun MemoryNotificationRow(modifier: Modifier = Modifier) {
 
     val shown = on && allowed
     val clock24 = DateFormat.is24HourFormat(context)
-    MenuRow(Sym.Today, "On this day", { open = true }, modifier, sub = if (shown) "At ${hourLabel(hour, clock24)}, on days with a memory" else "Off")
+    GroupRow(
+        "On this day", { open = true }, modifier, icon = Sym.Today,
+        sub = "A notification with a photo from this date in earlier years", value = if (shown) hourLabel(hour, clock24) else "Off",
+    )
     if (!open) return
     val c = AlbumTheme.colors
     Sheet({ open = false }, "On this day") {

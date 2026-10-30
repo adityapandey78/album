@@ -158,6 +158,20 @@ class TimelineTest {
         assertEquals(listOf(110, 40, 0, 505, 505, 60, 0, 505), heights.toList())
     }
 
+    @Test fun aPlaceLineAddsToItsDaysHeaderOnly() {
+        // As above, with a place under yesterday's date (16 px)
+        val layout = gridLayout(twoDays, 2, GalleryStyle.Grid, top = true, square)
+        val heights = estimateHeights(layout, 1000, 10, top = 100, header = 50, firstHeader = 30, shapeAt = { 1f }) { if (it == 1) 16 else 0 }
+        assertEquals(listOf(110, 40, 0, 505, 505, 76, 0, 505), heights.toList())
+    }
+
+    @Test fun placeLineIsTownAndState() {
+        assertEquals("Bengaluru, Karnataka", placeLine(Place("Bengaluru", "Karnataka", "IN", "India")))
+        assertEquals("Monaco", placeLine(Place("Monaco", "", "MC", "Monaco"))) // no state: the town alone
+        assertEquals("Delhi", placeLine(Place("Delhi", "Delhi", "IN", "India"))) // not "Delhi, Delhi"
+        assertEquals(null, placeLine(Place("", "", "", ""))) // too far from anywhere: no line
+    }
+
     @Test fun everyItemKnowsItsMonth() {
         val days = listOf(today, today - 30) // 25 Oct, 25 Sep 2026
         val s = sections(days, byMonth = false, today = today) { it }
