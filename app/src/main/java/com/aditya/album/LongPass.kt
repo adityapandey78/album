@@ -25,9 +25,14 @@ private const val NOTIFICATION_ID = 1001 // one notification shared by every job
  * turns, so a big library was organised a slice per visit and the card showed up on every open. Android allows this
  * only while Album is on screen; when it refuses, the pass carries on as ordinary background work, as before.
  */
-internal suspend fun CoroutineWorker.runInForeground(): Boolean = try {
-    setForeground(organising(applicationContext))
-    true
+internal suspend fun CoroutineWorker.runInForeground(info: ForegroundInfo = organising(applicationContext)): Boolean = try {
+    // Android names the app in every notification, so a disguised Album organises without one, as ordinary background work
+    if (DisguisePrefs.isChosen(applicationContext)) {
+        false
+    } else {
+        setForeground(info)
+        true
+    }
 } catch (e: CancellationException) {
     throw e // the pass is being stopped: let it stop
 } catch (e: Exception) {
@@ -36,9 +41,10 @@ internal suspend fun CoroutineWorker.runInForeground(): Boolean = try {
 
 /**
  * Per worker: tries [runInForeground] whenever a pass has a lot left, at most once a minute, until it works. So a pass
- * that began in the background moves to the foreground soon after Album is opened.
+ * that began in the background moves to the foreground soon after Album is opened. [info] is its notification: organising
+ * unless the job says what it does otherwise (Backup does).
  */
-internal class LongPassGate(private val worker: CoroutineWorker) {
+internal class LongPassGate(private val worker: CoroutineWorker, private val info: (Context) -> ForegroundInfo = ::organising) {
     private var promoted = false
     private var nextTry = 0L
 
@@ -46,7 +52,7 @@ internal class LongPassGate(private val worker: CoroutineWorker) {
         val now = SystemClock.elapsedRealtime()
         if (promoted || now < nextTry) return
         nextTry = now + 60_000
-        promoted = worker.runInForeground()
+        promoted = worker.runInForeground(info(worker.applicationContext))
     }
 }
 

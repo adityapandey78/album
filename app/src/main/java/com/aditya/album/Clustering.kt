@@ -35,6 +35,15 @@ const val SUGGEST = 0.3f
 /** Groups with fewer faces are not shown, unless the user named them: one-off faces are mostly strangers. */
 const val MIN_FACES = 3
 
+/**
+ * The bars [cluster] groups by, defaulting to the ones above for faces ([FACES]): [same] for [SAME_PERSON], [attach] and
+ * [attachWeak] for [ATTACH] and [ATTACH_WEAK], [margin] for [MARGIN], [suggest] for [SUGGEST], [min] for [MIN_FACES].
+ * Pets group whole photos by describe-it vectors, a different space, with bars of their own (PETS in Pets.kt).
+ */
+class Bars(val same: Float, val attach: Float, val attachWeak: Float, val margin: Float, val suggest: Float, val min: Int)
+
+val FACES = Bars(SAME_PERSON, ATTACH, ATTACH_WEAK, MARGIN, SUGGEST, MIN_FACES)
+
 /** Cluster ids below this are people from people.db; from here up they are automatic groups from the face index. */
 const val AUTO_CLUSTERS = 1L shl 32
 
@@ -114,8 +123,15 @@ class Clustering(val changed: Map<Long, Placed>, val nextAuto: Long, val suggest
  *    merges and new people), so they count as changed too.
  * Never: two faces of one photo in one group, a face in a person its photo is "Not", groups merged by themselves
  * (likely ones become [Clustering.suggestions]). Faces are visited by id, so the same input gives the same result.
+ * The bars named are the faces'; [bars] swaps them all, for pets.
  */
-fun cluster(faces: List<FaceVector>, corrections: Corrections, nextAuto: Long = AUTO_CLUSTERS, touched: Set<Long> = emptySet()): Clustering {
+fun cluster(
+    faces: List<FaceVector>,
+    corrections: Corrections,
+    nextAuto: Long = AUTO_CLUSTERS,
+    touched: Set<Long> = emptySet(),
+    bars: Bars = FACES,
+): Clustering {
     val sorted = faces.sortedBy { it.id }
     val confirmed = corrections.confirmed.filter { it.personId in corrections.people }.groupBy { it.mediaId }
     fun rejects(group: Long, mediaId: Long) = group < AUTO_CLUSTERS && corrections.rejected[mediaId]?.contains(group) == true
@@ -151,13 +167,14 @@ fun cluster(faces: List<FaceVector>, corrections: Corrections, nextAuto: Long = 
     val fresh = sorted.filter { assigned.getValue(it.id) == 0L }
     var exemplars = groups.mapValues { it.value.exemplars() }
     val firstTry = fresh.associateWith { f -> scores(f, exemplars.keys, exemplars, groups, ::rejects) }
-    for ((f, s) in settle(firstTry, ::attaches)) join(f, s.group, s.best)
+    fun joins(f: FaceVector, s: Scores) = attaches(f, s, bars)
+    for ((f, s) in settle(firstTry, ::joins)) join(f, s.group, s.best)
 
     // 3. New groups from strong free faces that hold together
     var next = max(nextAuto, (groups.keys.lastOrNull() ?: 0L) + 1).coerceAtLeast(AUTO_CLUSTERS)
     val unsure = sorted.filter { assigned.getValue(it.id) == UNSURE }
     val free = fresh.filter { assigned.getValue(it.id) == 0L }
-    for (core in cores(free.filter { !it.weak }, unsure.filter { !it.weak })) {
+    for (core in cores(free.filter { !it.weak }, unsure.filter { !it.weak }, bars)) {
         val id = next++
         val sum = FloatArray(core[0].embedding.size).also { s -> core.forEach { f -> for (i in s.indices) s[i] += f.embedding[i] } }
         for (f in core) join(f, id, (dot(sum, f.embedding) - 1) / (core.size - 1)) // its average similarity to the rest
@@ -175,10 +192,10 @@ fun cluster(faces: List<FaceVector>, corrections: Corrections, nextAuto: Long = 
     // reaches the bar is scored against every group (computed once, and only if some face needs it)
     val everyone by lazy { groups.mapValues { it.value.exemplars() } }
     for (f in unsure) if (assigned.getValue(f.id) == UNSURE && f.id !in placed) {
-        if (scores(f, exemplars.keys, exemplars, groups, ::rejects).best < (if (f.weak) ATTACH_WEAK else ATTACH)) continue
+        if (scores(f, exemplars.keys, exemplars, groups, ::rejects).best < (if (f.weak) bars.attachWeak else bars.attach)) continue
         retry[f] = scores(f, everyone.keys, everyone, groups, ::rejects)
     }
-    for ((f, s) in settle(retry, ::attaches)) join(f, s.group, s.best)
+    for ((f, s) in settle(retry, ::joins)) join(f, s.group, s.best)
     // New and freed faces still out become unsure (the ones unsure already stay as they are)
     for ((f, s) in retry) if (f.id !in placed && f.cluster != UNSURE) placed[f.id] = Placed(UNSURE, max(s.best, s.floor))
 
@@ -189,7 +206,7 @@ fun cluster(faces: List<FaceVector>, corrections: Corrections, nextAuto: Long = 
 
     val before = sorted.associateBy { it.id }
     val result = placed.filter { (id, p) -> before.getValue(id).let { it.cluster != p.cluster || it.fit != p.fit } }
-    return Clustering(result, next, suggestions(groups, corrections))
+    return Clustering(result, next, suggestions(groups, corrections, bars))
 }
 
 /** A face's scores against groups: the best one, its [group], and the runner-up (at least [floor], see withFloor). */
@@ -205,7 +222,8 @@ private class Scores(val all: Map<Long, Float>, val floor: Float = -1f) {
 private fun scores(f: FaceVector, candidates: Set<Long>, exemplars: Map<Long, List<FaceVector>>, groups: Map<Long, FaceGroup>, rejects: (Long, Long) -> Boolean) =
     Scores(candidates.filter { g -> f.mediaId !in groups.getValue(g).photos && !rejects(g, f.mediaId) }.associateWith { score(f, exemplars.getValue(it)) })
 
-private fun attaches(f: FaceVector, s: Scores) = s.group != 0L && s.best >= (if (f.weak) ATTACH_WEAK else ATTACH) && s.best - s.runnerUp >= MARGIN
+private fun attaches(f: FaceVector, s: Scores, bars: Bars) =
+    s.group != 0L && s.best >= (if (f.weak) bars.attachWeak else bars.attach) && s.best - s.runnerUp >= bars.margin
 
 /** The faces that join a group: of several faces from one photo choosing one group, only the best match does. */
 private fun settle(tries: Map<FaceVector, Scores>, attaches: (FaceVector, Scores) -> Boolean): List<Pair<FaceVector, Scores>> =
@@ -226,7 +244,7 @@ fun score(f: FaceVector, exemplars: List<FaceVector>): Float {
  * linkage, starting from pairs at least [SAME_PERSON] alike and joining groups while all their faces average that much.
  * Groups sharing a photo never join. Pairs of two [old] faces aren't compared (see [cluster]).
  */
-fun cores(fresh: List<FaceVector>, old: List<FaceVector>): List<List<FaceVector>> {
+fun cores(fresh: List<FaceVector>, old: List<FaceVector>, bars: Bars = FACES): List<List<FaceVector>> {
     val all = (fresh + old).sortedBy { it.id }
     val isFresh = fresh.mapTo(HashSet()) { it.id }
     val n = all.size
@@ -241,7 +259,7 @@ fun cores(fresh: List<FaceVector>, old: List<FaceVector>): List<List<FaceVector>
     for (i in 0 until n) for (j in i + 1 until n) {
         if ((all[i].id !in isFresh && all[j].id !in isFresh) || all[i].mediaId == all[j].mediaId) continue
         val s = dot(all[i].embedding, all[j].embedding)
-        if (s < SAME_PERSON) continue
+        if (s < bars.same) continue
         neighbours[i] += j
         neighbours[j] += i
         queue += Pair(s, i, j, 0, 0)
@@ -265,19 +283,19 @@ fun cores(fresh: List<FaceVector>, old: List<FaceVector>): List<List<FaceVector>
             neighbours[c] -= b
             neighbours[c] += a
             val average = dot(sums[a], sums[c]) / (sizes[a] * sizes[c])
-            if (average >= SAME_PERSON) queue += Pair(average, min(a, c), max(a, c), version[min(a, c)], version[max(a, c)])
+            if (average >= bars.same) queue += Pair(average, min(a, c), max(a, c), version[min(a, c)], version[max(a, c)])
         }
     }
-    return (0 until n).filter { sizes[it] >= MIN_FACES && members[it].any { f -> f.id in isFresh } }.map { members[it].sortedBy { f -> f.id } }
+    return (0 until n).filter { sizes[it] >= bars.min && members[it].any { f -> f.id in isFresh } }.map { members[it].sortedBy { f -> f.id } }
 }
 
 /**
  * Pairs of shown groups whose strong faces average [SUGGEST] or more, most alike first, leaving out pairs that share a
  * photo (two people for sure), that the user said are different, or where a photo of one is marked "Not" the other.
  */
-private fun suggestions(groups: Map<Long, FaceGroup>, corrections: Corrections): List<Suggestion> {
+private fun suggestions(groups: Map<Long, FaceGroup>, corrections: Corrections, bars: Bars): List<Suggestion> {
     fun notOf(person: Long, g: FaceGroup) = person < AUTO_CLUSTERS && g.photos.any { corrections.rejected[it]?.contains(person) == true }
-    val shown = groups.filter { (id, g) -> (id < AUTO_CLUSTERS || g.faces.size >= MIN_FACES) && g.strong > 0 }.toSortedMap()
+    val shown = groups.filter { (id, g) -> (id < AUTO_CLUSTERS || g.faces.size >= bars.min) && g.strong > 0 }.toSortedMap()
     val ids = shown.keys.toList()
     val out = ArrayList<Suggestion>()
     for (i in ids.indices) for (j in i + 1 until ids.size) {
@@ -286,7 +304,7 @@ private fun suggestions(groups: Map<Long, FaceGroup>, corrections: Corrections):
         if ((ids[i] to ids[j]) in corrections.different || (ids[j] to ids[i]) in corrections.different) continue
         if (a.photos.any { it in b.photos } || notOf(ids[i], b) || notOf(ids[j], a)) continue
         val average = dot(a.sum, b.sum) / (a.strong * b.strong)
-        if (average >= SUGGEST) out += Suggestion(ids[i], ids[j], average)
+        if (average >= bars.suggest) out += Suggestion(ids[i], ids[j], average)
     }
     return out.sortedByDescending { it.score }
 }

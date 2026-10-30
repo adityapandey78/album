@@ -30,10 +30,13 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -49,6 +52,8 @@ private const val NEXT_AUTO = "next_auto"
 private const val DECODING = "decoding"
 private const val NOT_SURE = "not_sure_faces" // "Same person?" answered Not sure, as the two faces shown (see NotSure)
 private const val SUGGESTIONS = "suggestions" // the last clustering run's, so "Same person?" is there right after a restart
+private const val NEXT_PET = "next_pet" // like NEXT_AUTO, for automatic pet groups
+private const val PET_SUGGESTIONS = "pet_suggestions" // like SUGGESTIONS, for "Same pet?"
 private const val JOB = "People" // on the Organising card
 
 /**
@@ -66,7 +71,8 @@ fun clusterOfAlbum(albumId: Long): Long? = if (albumId > PEOPLE_IDS && albumId <
 
 /**
  * A person or automatic group, with its photos still on the phone (newest first) and its cover face ([coverPinned] if the
- * user chose it). [locked]: hidden behind the privacy PIN, shown only in Hidden items.
+ * user chose it). [locked]: hidden behind the privacy PIN, shown only in Hidden items. With a [species] it's a pet, and
+ * its faces and cover are whole photos (see Pets.kt).
  */
 data class PersonAlbum(
     val cluster: Long,
@@ -77,8 +83,12 @@ data class PersonAlbum(
     val faces: Int,
     val coverPinned: Boolean = false,
     val locked: Boolean = false,
+    val species: Species? = null,
 ) {
     val albumId get() = personAlbumId(cluster)
+
+    /** Whether it appears in People: see [isShown]. */
+    val shown get() = isShown(name, faces, petDays = species?.let { items.mapTo(HashSet()) { it.day }.size })
 }
 
 /** "Same person?": two people or groups that may be one, [a] the one with more faces. */
@@ -113,8 +123,12 @@ fun coverOf(faces: List<FaceTile>, pinned: FaceSpot?, isCamera: (mediaId: Long) 
     pinned?.let { p -> faces.filter { it.mediaId == p.mediaId && iou(it.box, p.box) >= SAME_BOX }.maxByOrNull { iou(it.box, p.box) } }
         ?: faces.maxWith(compareBy<FaceTile> { coverScore(it, isCamera(it.mediaId)) }.thenByDescending { it.id })
 
-/** Whether a group appears in People: named people always, other groups once they have [MIN_FACES] faces. */
-fun isShown(name: String?, faces: Int) = name != null || faces >= MIN_FACES
+/**
+ * Whether a group appears in People: named ones always, other groups once they have [MIN_FACES] faces. A pet's group
+ * (with [petDays], the days its photos were taken on) needs [PETS]' count, on [PET_DAYS] days or more.
+ */
+fun isShown(name: String?, faces: Int, petDays: Int? = null) =
+    name != null || if (petDays == null) faces >= MIN_FACES else faces >= PETS.min && petDays >= PET_DAYS
 
 /** For search: each named person who isn't hidden or locked, to the photos they're in. */
 fun namedMedia(names: List<PersonName>, tiles: List<FaceTile>): Map<String, Set<Long>> {
@@ -187,7 +201,7 @@ fun reviewPairs(suggestions: List<Suggestion>, albums: List<PersonAlbum>, skippe
         val b = byCluster[s.b] ?: return@mapNotNull null
         when {
             s.a to s.b in skipped -> null
-            a.hidden || b.hidden || a.locked || b.locked || !isShown(a.name, a.faces) || !isShown(b.name, b.faces) -> null
+            a.hidden || b.hidden || a.locked || b.locked || !a.shown || !b.shown -> null
             a.name != null && b.name != null -> null
             a.faces >= b.faces -> PeoplePair(a, b)
             else -> PeoplePair(b, a)
@@ -198,8 +212,9 @@ fun reviewPairs(suggestions: List<Suggestion>, albums: List<PersonAlbum>, skippe
 /**
  * People in photos, found on the phone: YuNet finds faces, EdgeFace-S turns each into an embedding, and similar faces are
  * grouped (see cluster()). The face index (faces.db) is a cache that can be rebuilt any time; names, hidden people, cover
- * choices and every correction live in people.db and always win over the automatic grouping. Read side: [albums],
- * [mediaIdsByName], [review], [progress].
+ * choices and every correction live in people.db and always win over the automatic grouping. Pets are grouped the same
+ * way from whole photos (see Pets.kt), cached in pets.db, and kept in people.db like people once the user touches them.
+ * Read side: [albums], [mediaIdsByName], [review], [progress], [petPhotos].
  */
 object People {
     private lateinit var app: Context
@@ -212,6 +227,12 @@ object People {
             .dao()
     }
     private val people by lazy { Room.databaseBuilder(app, PeopleDb::class.java, "people.db").build().dao() }
+    private val pets by lazy {
+        Room.databaseBuilder(app, PetDb::class.java, "pets.db")
+            .fallbackToDestructiveMigration(true) // regrouped from the labels and describe-it vectors, so dropping it is safe
+            .build()
+            .dao()
+    }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     /** Forgets the faces found in [ids] at once, for photos moved into the Private safe (names and corrections stay). */
@@ -220,6 +241,7 @@ object People {
         ids.chunked(500).forEach { chunk -> // under SQLite's 999-variable limit
             faces.deleteFaces(chunk)
             faces.delete(chunk)
+            pets.delete(chunk)
         }
     }
     private val clustering = Mutex() // the indexer and the user's corrections both re-cluster: one at a time
@@ -227,6 +249,7 @@ object People {
     // Groups an edit gave faces (merges, new people, Undo) since the last clustering run: their faces moved without
     // cluster() seeing it, so it's told, and faces left out are tried against them. Only used holding [clustering].
     private val touched = HashSet<Long>()
+    private val petTouched = HashSet<Long>() // the same for pets, told to groupPets
 
     // One background-priority thread for decoding and the models, so the UI thread always wins the CPU.
     private val thread = Executors.newSingleThreadExecutor { r ->
@@ -258,12 +281,20 @@ object People {
         return to
     }
 
+    /** Every face in a group, and every pet photo in one as a whole-photo "face" (see PetRow.tile). */
+    private val tiles: Flow<List<FaceTile>> by lazy {
+        combine(faces.tiles(), pets.tiles()) { f, p -> if (p.isEmpty()) f else f + p.map(PetRow::tile) }
+    }
+
     /**
-     * Every person and automatic group with a photo still on the phone, hidden and locked ones included (see [isShown]).
-     * Grouped off the main thread, and only while someone is watching: the Photos tab never pays for it.
+     * Every person, pet and automatic group with a photo still on the phone, hidden and locked ones included (see
+     * [PersonAlbum.shown]). Grouped off the main thread, and only while someone is watching: the Photos tab never pays for it.
      */
     val albums: StateFlow<List<PersonAlbum>> by lazy {
-        combine(faces.tiles(), people.names(), Gallery.media.filterNotNull(), AlbumPrefs.hidden, Hidden.state.filterNotNull()) { tiles, names, media, hidden, h ->
+        val hiding = combine(AlbumPrefs.hidden, Hidden.state.filterNotNull(), ::Pair)
+        combine(faces.tiles(), pets.tiles(), people.names(), Gallery.media.filterNotNull(), hiding) { faceTiles, petRows, names, media, (hidden, h) ->
+            val tiles = if (petRows.isEmpty()) faceTiles else faceTiles + petRows.map(PetRow::tile)
+            val species = petRows.associate { it.cluster to it.species } // automatic pet groups; people.db has the user's pets
             val byId = names.associateBy { it.id }
             val pinned = names.mapNotNull { p -> p.coverMediaId?.let { id -> p.cover?.let { p.id to FaceSpot(id, it) } } }.toMap()
             // Folders hidden from Photos stay out of People too, as they do from Explore and search
@@ -277,6 +308,7 @@ object People {
                 PersonAlbum(
                     cluster, person?.name, person?.hidden == true, FaceCrop(m.cover.id, m.cover.mediaId, m.cover.box), m.items, m.faces, chosen,
                     locked = cluster in h.people,
+                    species = person?.species ?: species[cluster],
                 )
             }
         }
@@ -292,7 +324,7 @@ object People {
     val locked: Flow<LockedPeople> by lazy {
         people.lockedIds().distinctUntilChanged().flatMapLatest { ids ->
             if (ids.isEmpty()) flowOf(LockedPeople(emptySet(), emptySet()))
-            else combine(faces.tiles(), people.lockedPhotos()) { tiles, confirmed -> lockedPeople(ids, tiles, confirmed) }
+            else combine(tiles, people.lockedPhotos()) { tiles, confirmed -> lockedPeople(ids, tiles, confirmed) }
         }
             .catch { // Hidden items would otherwise never load, and the Library waits for them
                 CrashLog.note("locked people failed: $it")
@@ -303,21 +335,27 @@ object People {
 
     private fun isCamera(m: Media) = m.path.startsWith("DCIM/", ignoreCase = true)
 
-    /** For search: each named person who isn't hidden, to the MediaStore ids of photos they're in. Live. */
-    fun mediaIdsByName(): Flow<Map<String, Set<Long>>> = combine(people.names(), faces.tiles(), ::namedMedia).flowOn(Dispatchers.Default)
+    /** For search: each named person or pet who isn't hidden, to the MediaStore ids of photos they're in. Live. */
+    fun mediaIdsByName(): Flow<Map<String, Set<Long>>> = combine(people.names(), tiles, ::namedMedia).flowOn(Dispatchers.Default)
 
-    // Pairs that may be one person, from the last clustering run
+    // Pairs that may be one person, or one pet, from the last clustering runs
     private val suggestions = MutableStateFlow<List<Suggestion>>(emptyList())
+    private val petSuggestions = MutableStateFlow<List<Suggestion>>(emptyList())
     private val notSure = MutableStateFlow<Set<NotSure>>(emptySet())
 
-    /** "Same person?" pairs to ask about, most alike first. Live. */
+    /** "Same person?" and "Same pet?" pairs to ask about, people first, most alike first. Live. */
     val review: Flow<List<PeoplePair>> by lazy {
-        combine(suggestions, albums, notSure, faces.tiles()) { s, a, n, t -> reviewPairs(s, a, answeredPairs(n, t)) }.flowOn(Dispatchers.Default)
+        combine(suggestions, petSuggestions, albums, notSure, tiles) { s, p, a, n, t -> reviewPairs(s + p, a, answeredPairs(n, t)) }.flowOn(Dispatchers.Default)
     }
 
-    /** [cluster]'s faces in photos still on the phone, best covers first: the cover picker's grid. Live. */
+    private val _petPhotos = MutableStateFlow(0)
+
+    /** Photos from this phone's camera that ML Kit is sure show a dog or a cat, grouped or not: for People's note. */
+    val petPhotos: StateFlow<Int> = _petPhotos.asStateFlow()
+
+    /** [cluster]'s faces (a pet's photos) still on the phone, best covers first: the cover picker's grid. Live. */
     fun facesOf(cluster: Long): Flow<List<FaceTile>> =
-        combine(faces.tiles(), Gallery.media.filterNotNull(), AlbumPrefs.hidden, Hidden.state.filterNotNull()) { tiles, media, hidden, h ->
+        combine(tiles, Gallery.media.filterNotNull(), AlbumPrefs.hidden, Hidden.state.filterNotNull()) { tiles, media, hidden, h ->
             // A photo hidden behind the PIN never becomes someone else's cover
             val photos = media.inPhotos(hidden).let { if (cluster in h.people) it else it.withoutHidden(h) }
             val shown = photos.associateBy { it.id }
@@ -334,6 +372,18 @@ object People {
         scope.launch {
             notSure.update { it + prefs.getStringSet(NOT_SURE, emptySet()).orEmpty().mapNotNull(::decodeNotSure) }
             suggestions.compareAndSet(emptyList(), decodeSuggestions(prefs.getString(SUGGESTIONS, null)))
+            petSuggestions.compareAndSet(emptyList(), decodeSuggestions(prefs.getString(PET_SUGGESTIONS, null)))
+        }
+        scope.launch {
+            Gallery.media.filterNotNull().first()
+            // Pet photos come from the labels and describe-it passes, so pets are grouped again whenever organising settles
+            IndexStatus.running.map { it.isEmpty() }.distinctUntilChanged().filter { it }.collect {
+                try {
+                    clustering.withLock { regroupPets() }
+                } catch (e: Exception) {
+                    CrashLog.note("pets failed: $e")
+                }
+            }
         }
         scope.launch {
             Gallery.media.filterNotNull().collect {
@@ -350,21 +400,25 @@ object People {
     /**
      * Names [cluster], making it a person if it was an automatic group. A name another person already has (ignoring case)
      * merges the two instead, but only on the same side of Hidden items: naming someone after a hidden person never moves
-     * them in there, or brings the hidden one out. Returns the person's cluster id, which is new for an automatic group:
-     * open that page.
+     * them in there, or brings the hidden one out. Pets merge only with pets of their species, people with people: a dog
+     * and an aunt may both be Mili. Returns the person's cluster id, which is new for an automatic group: open that page.
      */
-    suspend fun name(cluster: Long, name: String): Long = edit {
+    suspend fun name(cluster: Long, name: String): Long = edit(cluster) {
         val trimmed = name.trim()
-        val locked = people.person(live(cluster))?.locked == true
-        val same = people.people().find { it.id != cluster && it.locked == locked && it.name.equals(trimmed, ignoreCase = true) }
+        val current = live(cluster)
+        val locked = people.person(current)?.locked == true
+        val species = speciesOf(current)
+        val same = people.people().find {
+            it.id != cluster && it.locked == locked && it.species == species && it.name.equals(trimmed, ignoreCase = true)
+        }
         if (same != null) moveInto(cluster, same.id) else personOf(cluster).also { people.rename(it, trimmed) }
     }
 
     /** Merges [from] into [into]. The result keeps [into]'s name and cover, or [from]'s if [into] had none. Returns its cluster id. */
-    suspend fun merge(from: Long, into: Long): Long = edit { moveInto(from, into) }
+    suspend fun merge(from: Long, into: Long): Long = edit(from) { moveInto(from, into) }
 
     /** Hides or shows [cluster] in People. Returns its cluster id (new if it was an automatic group). */
-    suspend fun setHidden(cluster: Long, hidden: Boolean): Long = edit {
+    suspend fun setHidden(cluster: Long, hidden: Boolean): Long = edit(cluster) {
         personOf(cluster).also { people.setHidden(it, hidden) }
     }
 
@@ -378,7 +432,7 @@ object People {
             val id = personOf(cluster)
             if (locked) {
                 val confirmed = people.facesOfPerson(id)
-                val fresh = faces.spots(id).filter { s -> confirmed.none { it.mediaId == s.mediaId && iou(it.box, s.box) >= SAME_BOX } }
+                val fresh = spotsOf(id, speciesOf(id) != null).filter { s -> confirmed.none { it.mediaId == s.mediaId && iou(it.box, s.box) >= SAME_BOX } }
                 people.lock(id, fresh.map { PersonFace(personId = id, mediaId = it.mediaId, box = it.box) })
             } else {
                 people.setLocked(id, false)
@@ -388,12 +442,12 @@ object People {
     }.await()
 
     /** Pins [face] as [cluster]'s cover photo, or with null lets Album pick again. Returns its cluster id (new if it was an automatic group). */
-    suspend fun setCover(cluster: Long, face: FaceTile?): Long = edit {
+    suspend fun setCover(cluster: Long, face: FaceTile?): Long = edit(cluster) {
         personOf(cluster).also { people.setCover(it, face?.mediaId, face?.box?.left, face?.box?.top, face?.box?.right, face?.box?.bottom) }
     }
 
     /** "Same person?" answered Different: both become people (so the answer survives a rebuild) and are never offered again. */
-    suspend fun different(a: Long, b: Long) = edit {
+    suspend fun different(a: Long, b: Long) = edit(a) {
         val x = personOf(a)
         val y = personOf(b)
         if (x != y) people.insertDifferent(DifferentPeople(minOf(x, y), maxOf(x, y)))
@@ -407,53 +461,92 @@ object People {
     }
 
     /** "Not <name>": takes [mediaIds] out of [cluster] for good. Keep the result for [undo]. */
-    suspend fun notPerson(cluster: Long, mediaIds: List<Long>): NotPersonChange = edit {
+    suspend fun notPerson(cluster: Long, mediaIds: List<Long>): NotPersonChange = edit(cluster) {
         val id = personOf(cluster)
-        val faceIds = mediaIds.chunked(500).flatMap { faces.facesIn(id, it) }
-        people.notPerson(id, mediaIds).let { NotPersonChange(it.personId, it.removed, it.added, faceIds) }
+        val pet = speciesOf(id) != null
+        // What it had gained automatically: faces by face id, a pet's photos by photo id
+        val gained = mediaIds.chunked(500).flatMap { if (pet) pets.photosIn(id, it) else faces.facesIn(id, it) }
+        people.notPerson(id, mediaIds).let { NotPersonChange(it.personId, it.removed, it.added, gained, pet) }
     }
 
     /** Puts back what [notPerson] changed, faces it had gained automatically included. */
-    suspend fun undo(change: NotPersonChange) = edit {
+    suspend fun undo(change: NotPersonChange) = edit(change.personId) {
         people.undo(change)
-        faces.setClusters(change.faceIds.associateWith { change.personId })
-        touched += change.personId
+        if (change.pet) {
+            pets.setClusters(change.faceIds.associateWith { change.personId })
+            petTouched += change.personId
+        } else {
+            faces.setClusters(change.faceIds.associateWith { change.personId })
+            touched += change.personId
+        }
     }
 
-    private suspend fun <T> edit(block: suspend () -> T): T = scope.async {
-        clustering.withLock { block().also { recluster() } }
+    /** Runs [block], then groups again: pets if [cluster] is a pet, people otherwise. */
+    private suspend fun <T> edit(cluster: Long, block: suspend () -> T): T = scope.async {
+        clustering.withLock {
+            val pet = isPet(cluster)
+            block().also { if (pet) regroupPets() else recluster() }
+        }
     }.await()
 
     /**
-     * [cluster] as a person: an automatic group becomes an unnamed person holding all its faces. A group that was folded
-     * into another while this edit waited is followed there; one that's simply gone throws, so the edit reports failure
-     * instead of landing on an empty person.
+     * [cluster] as a person: an automatic group becomes an unnamed person (or pet) holding all its faces. A group that was
+     * folded into another while this edit waited is followed there; one that's simply gone throws, so the edit reports
+     * failure instead of landing on an empty person.
      */
     private suspend fun personOf(cluster: Long): Long {
         val current = live(cluster)
         if (current < AUTO_CLUSTERS) return current
-        val id = people.create(Person(name = null, hidden = false, created = System.currentTimeMillis()), faces.spots(current))
+        val species = speciesOf(current)
+        val person = Person(name = null, hidden = false, created = System.currentTimeMillis(), species = species)
+        val id = people.create(person, spotsOf(current, species != null))
         moved[current] = id
-        faces.moveCluster(current, id)
-        touched += id
+        moveGroup(current, id, species != null)
         return id
     }
 
     /** [cluster], or where it went if it no longer has faces. */
     private suspend fun live(cluster: Long): Long = when {
         cluster < AUTO_CLUSTERS -> people.person(cluster)?.id ?: movedTo(cluster) ?: error("person $cluster is gone")
-        faces.has(cluster) -> cluster
+        if (cluster >= PET_GROUPS) pets.has(cluster) else faces.has(cluster) -> cluster
         else -> movedTo(cluster)?.let { live(it) } ?: error("group $cluster is gone")
+    }
+
+    /** Whether [cluster], or what it became, is a pet. */
+    private suspend fun isPet(cluster: Long) = (movedTo(cluster) ?: cluster).let { it >= PET_GROUPS || (it < AUTO_CLUSTERS && people.person(it)?.species != null) }
+
+    /** The species of live [cluster], or null for a person or face group. */
+    private suspend fun speciesOf(cluster: Long): Species? = when {
+        cluster >= PET_GROUPS -> pets.speciesOf(cluster)
+        cluster < AUTO_CLUSTERS -> people.person(cluster)?.species
+        else -> null
+    }
+
+    /** Where [cluster]'s faces are as grouped now: its faces in the face index, or a pet's photos, whole. */
+    private suspend fun spotsOf(cluster: Long, pet: Boolean) = if (pet) pets.photos(cluster).map { FaceSpot(it, WHOLE) } else faces.spots(cluster)
+
+    /** Moves the automatic faces (or pet photos) of [from] to [to], and tells the next run [to] grew. */
+    private suspend fun moveGroup(from: Long, to: Long, pet: Boolean) {
+        if (pet) {
+            pets.moveCluster(from, to)
+            petTouched += to
+        } else {
+            faces.moveCluster(from, to)
+            touched += to
+        }
     }
 
     private suspend fun moveInto(source: Long, into: Long): Long {
         val from = live(source)
         val target = personOf(into)
         if (from == target) return target
+        val species = speciesOf(target)
+        // A person and a pet, or a dog and a cat, are never one: People never offers it, and this refuses it
+        check(speciesOf(from) == species) { "not the same kind: $from, $target" }
         val person = people.person(from)
         if (person == null) {
             // An automatic group: its faces become the person's
-            people.insertFaces(faces.spots(from).map { PersonFace(personId = target, mediaId = it.mediaId, box = it.box) })
+            people.insertFaces(spotsOf(from, species != null).map { PersonFace(personId = target, mediaId = it.mediaId, box = it.box) })
         } else {
             val t = people.person(target)
             if (t?.name == null && person.name != null) people.rename(target, person.name)
@@ -466,19 +559,21 @@ object People {
             people.merge(person.id, target)
         }
         moved[from] = target
-        faces.moveCluster(from, target) // its automatic faces too, not just the confirmed ones
-        touched += target
+        moveGroup(from, target, species != null) // its automatic faces too, not just the confirmed ones
         return target
     }
 
+    /** The user's word from people.db, about [ids] (the people, or the pets, being grouped). */
+    private suspend fun corrections(ids: Set<Long>) = Corrections(
+        ids,
+        people.faces().filter { it.personId in ids }.map { Confirmed(it.personId, it.mediaId, it.box, it.id) },
+        people.notPerson().groupBy({ it.mediaId }, { it.personId }).mapValues { it.value.toSet() },
+        people.different().mapTo(HashSet()) { it.a to it.b },
+    )
+
     /** Runs [cluster] over every face with the user's corrections, then saves the changes. Call holding [clustering]. */
     private suspend fun recluster() {
-        val corrections = Corrections(
-            people.people().mapTo(HashSet()) { it.id },
-            people.faces().map { Confirmed(it.personId, it.mediaId, it.box, it.id) },
-            people.notPerson().groupBy({ it.mediaId }, { it.personId }).mapValues { it.value.toSet() },
-            people.different().mapTo(HashSet()) { it.a to it.b },
-        )
+        val corrections = corrections(people.people().filter { it.species == null }.mapTo(HashSet()) { it.id }) // pets: regroupPets
         // A row from another model (an index that wasn't dropped) would be compared across spaces: left out
         val vectors = faces.rows().filter { it.embedding.size == EMBEDDING * 4 }
             .map { FaceVector(it.id, it.mediaId, it.box, it.embedding.toFloats(), it.cluster, it.weak, it.fit) }
@@ -490,6 +585,42 @@ object People {
         faces.place(result.changed)
         if (result.suggestions != suggestions.value) prefs.edit().putString(SUGGESTIONS, encodeSuggestions(result.suggestions)).apply()
         suggestions.value = result.suggestions
+    }
+
+    /**
+     * Groups pet photos again (see groupPets): the photos the labels say show a dog or a cat, their describe-it vectors,
+     * and the user's corrections. Saves only what changed; a photo no longer labelled one leaves pets.db. Photos the
+     * gallery doesn't list (Select photos access) are left as they are. Call holding [clustering].
+     */
+    private suspend fun regroupPets() {
+        val media = Gallery.media.value ?: return
+        val started = SystemClock.elapsedRealtime()
+        val byId = media.associateBy { it.id }
+        val scores = withContext(Dispatchers.IO) { Species.entries.flatMap { it.labels }.associateWith { SmartIndex.scoredWith(it) } }
+        val photos = petPhotos(scores) { id -> byId[id]?.takeIf { !it.isVideo && !isScreenshot(it.path, it.name) }?.let(::isCamera) }
+        _petPhotos.value = photos.count { !it.weak }
+        val old = pets.rows().associateBy { it.mediaId }
+        val labelled = scores.values.flatMapTo(HashSet()) { m -> m.filterValues { it >= PET_LABEL }.keys }
+        val owned = people.people().mapNotNull { p -> p.species?.let { p.id to it } }.toMap()
+        val vectors = Embeddings.vectorsOf(photos.map { it.mediaId })
+        val nextAuto = prefs.getLong(NEXT_PET, PET_GROUPS)
+        val result = groupPets(photos, vectors, old, owned, corrections(owned.keys), nextAuto, petTouched)
+        petTouched.clear()
+        if (result.nextAuto != nextAuto) prefs.edit().putLong(NEXT_PET, result.nextAuto).commit()
+        val changed = result.rows.filter { it != old[it.mediaId] }
+        val gone = old.keys.filter { it !in labelled }
+        pets.save(changed, gone)
+        if (result.suggestions != petSuggestions.value) prefs.edit().putString(PET_SUGGESTIONS, encodeSuggestions(result.suggestions)).apply()
+        petSuggestions.value = result.suggestions
+        if (changed.isNotEmpty() || gone.isNotEmpty()) {
+            // For tuning PETS: how many photos group, and into how many pets
+            val grouped = result.rows.filter { it.cluster > 0 }
+            CrashLog.note(
+                "pets: ${photos.size} photos (${_petPhotos.value} strong), ${vectors.size} with vectors, ${grouped.size} in " +
+                    "${grouped.map { it.cluster }.distinct().size} groups, ${result.rows.count { it.cluster == UNSURE }} unsure, " +
+                    "${SystemClock.elapsedRealtime() - started} ms",
+            )
+        }
     }
 
     /**

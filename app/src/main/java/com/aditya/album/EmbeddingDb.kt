@@ -39,6 +39,9 @@ interface VectorDao {
     @Query("SELECT id, vector, scale FROM vectors WHERE vector IS NOT NULL")
     suspend fun vectors(): List<StoredVector>
 
+    @Query("SELECT id, vector, scale FROM vectors WHERE vector IS NOT NULL AND id IN (:ids)")
+    suspend fun vectorsIn(ids: List<Long>): List<StoredVector>
+
     /** Blocking (call off the main thread), so a removal runs start to finish before a download queued after it. */
     @Query("DELETE FROM vectors")
     fun clear()

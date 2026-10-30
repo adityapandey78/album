@@ -85,6 +85,70 @@ class PeopleDbTest {
         assertEquals(3, dao.facesOfPerson(asha).size) // confirmed faces stay theirs after Unhide
     }
 
+    @Test fun petsKeepTheirSpeciesThroughMerges() = runBlocking {
+        val bruno = dao.create(Person(name = "Bruno", hidden = false, created = 0, species = Species.Dog), listOf(FaceSpot(1, WHOLE), FaceSpot(2, WHOLE)))
+        val pup = dao.create(Person(name = null, hidden = false, created = 0, species = Species.Dog), listOf(FaceSpot(3, WHOLE)))
+        val asha = person("Asha", 4)
+        dao.merge(pup, bruno)
+        val names = dao.names().first().associateBy { it.id }
+        assertEquals(Species.Dog, names.getValue(bruno).species)
+        assertNull(names.getValue(asha).species)
+        assertEquals(setOf(1L, 2L, 3L), dao.facesOfPerson(bruno).map { it.mediaId }.toSet())
+        dao.rotate(1, clockwise = true)
+        assertEquals(WHOLE, dao.facesOf(1).single().box) // a pet's box is the whole photo, whichever way up
+    }
+
+    /**
+     * A people.db as v1.1 left it (version 3, built with the SQL Room exported in app/schemas/.../PeopleDb/3.json), opened
+     * by v1.1.1: every name, face, cover, lock, "Not" row and "Different" pair survives, and nobody becomes a pet.
+     */
+    @Test fun version3UpgradesWithEveryoneKeptAndNoPets() = runBlocking {
+        val name = "people-upgrade-3-test.db"
+        context.deleteDatabase(name)
+        SQLiteDatabase.openOrCreateDatabase(context.getDatabasePath(name), null).use { v3 ->
+            listOf(
+                "CREATE TABLE IF NOT EXISTS `people` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT, `hidden` INTEGER NOT NULL, `created` INTEGER NOT NULL, `centroid` BLOB, `centroidFaces` INTEGER NOT NULL, `centroidModel` INTEGER NOT NULL, `coverMediaId` INTEGER, `locked` INTEGER NOT NULL DEFAULT 0, `cover_left` REAL, `cover_top` REAL, `cover_right` REAL, `cover_bottom` REAL)",
+                "CREATE TABLE IF NOT EXISTS `person_faces` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `personId` INTEGER NOT NULL, `mediaId` INTEGER NOT NULL, `left` REAL NOT NULL, `top` REAL NOT NULL, `right` REAL NOT NULL, `bottom` REAL NOT NULL, FOREIGN KEY(`personId`) REFERENCES `people`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+                "CREATE INDEX IF NOT EXISTS `index_person_faces_personId` ON `person_faces` (`personId`)",
+                "CREATE INDEX IF NOT EXISTS `index_person_faces_mediaId` ON `person_faces` (`mediaId`)",
+                "CREATE TABLE IF NOT EXISTS `not_person` (`personId` INTEGER NOT NULL, `mediaId` INTEGER NOT NULL, PRIMARY KEY(`personId`, `mediaId`), FOREIGN KEY(`personId`) REFERENCES `people`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+                "CREATE INDEX IF NOT EXISTS `index_not_person_mediaId` ON `not_person` (`mediaId`)",
+                "CREATE TABLE IF NOT EXISTS `different_people` (`a` INTEGER NOT NULL, `b` INTEGER NOT NULL, PRIMARY KEY(`a`, `b`), FOREIGN KEY(`a`) REFERENCES `people`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE , FOREIGN KEY(`b`) REFERENCES `people`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+                "CREATE INDEX IF NOT EXISTS `index_different_people_b` ON `different_people` (`b`)",
+                "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+                "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '24c9e15954aeca3d60b114d6b83ec4aa')",
+                "INSERT INTO people VALUES (1, 'Asha', 0, 100, NULL, 0, 0, 10, 1, 0.1, 0.1, 0.3, 0.3)",
+                "INSERT INTO people VALUES (2, NULL, 1, 200, NULL, 0, 0, NULL, 0, NULL, NULL, NULL, NULL)",
+                "INSERT INTO person_faces VALUES (1, 1, 10, 0.1, 0.1, 0.3, 0.3)",
+                "INSERT INTO person_faces VALUES (2, 2, 11, 0.5, 0.5, 0.7, 0.7)",
+                "INSERT INTO not_person VALUES (1, 12)",
+                "INSERT INTO different_people VALUES (1, 2)",
+            ).forEach(v3::execSQL)
+            v3.version = 3
+        }
+        val upgraded = Room.databaseBuilder(context, PeopleDb::class.java, name).build()
+        try {
+            val dao = upgraded.dao()
+            val people = dao.people().associateBy { it.id }
+            assertEquals("Asha", people.getValue(1).name)
+            assertEquals(true, people.getValue(2).hidden)
+            assertEquals(10L, people.getValue(1).coverMediaId)
+            assertEquals(FaceBox(0.1f, 0.1f, 0.3f, 0.3f), people.getValue(1).cover)
+            assertEquals(listOf(true, false), listOf(people.getValue(1).locked, people.getValue(2).locked))
+            assertEquals(listOf(null, null), people.values.map { it.species })
+            assertEquals(2, dao.faces().size)
+            assertEquals(listOf(NotPerson(1, 12)), dao.notPerson())
+            assertEquals(listOf(DifferentPeople(1, 2)), dao.different())
+            assertEquals(listOf(10L), dao.lockedPhotos().first())
+            // The new column works on the upgraded file
+            val bruno = dao.create(Person(name = "Bruno", hidden = false, created = 300, species = Species.Dog), listOf(FaceSpot(13, WHOLE)))
+            assertEquals(Species.Dog, dao.person(bruno)!!.species)
+        } finally {
+            upgraded.close()
+            context.deleteDatabase(name)
+        }
+    }
+
     /**
      * A people.db as v1.0 left it (version 2, built with the SQL Room exported in app/schemas/.../PeopleDb/2.json), opened
      * by v1.1: every name, face, cover, "Not" row and "Different" pair survives, and nobody starts locked.

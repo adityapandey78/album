@@ -14,17 +14,14 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -192,8 +189,10 @@ fun dayRange(first: Long, last: Long): String {
     }
 }
 
-/** The parts of the storage bar, in its order. WhatsApp and screenshots are carved out of photos and videos. */
-enum class StorageKind(val label: String) { Photos("Photos"), Videos("Videos"), WhatsApp("WhatsApp"), Screenshots("Screenshots") }
+/** The parts of the storage bar, in its order. WhatsApp and screenshots are carved out of photos and videos. [app] lends its icon. */
+enum class StorageKind(val label: String, val app: MediaApp? = null) {
+    Photos("Photos"), Videos("Videos"), WhatsApp("WhatsApp", MediaApp.WhatsApp), Screenshots("Screenshots"),
+}
 
 /** Which part of the storage bar a file counts towards. [path] is its folder relative to the storage root. */
 fun storageKind(isVideo: Boolean, path: String, bucket: String, name: String) = when {
@@ -251,17 +250,14 @@ private const val SECTION_KEY = "for_you_section"
 private val BigMemoryHeight = 300.dp
 private val MemoryHeight = 190.dp
 private val RowHeight = 56.dp // as tall as a menu row
-private val StorageBarHeight = 10.dp
-private val StorageBarGap = 2.dp
-private val LegendDot = 8.dp
 private val Hairline = 1.dp
 
 /**
  * The For you tab: its title, a chip per section, and the section picked, which For you opens on next time too. Memories
- * is a hero memory, a few more under it and, quietly, photos that look like ID cards; Clean up is where the storage goes,
- * swipe to clean and a row per clean-up category. [contentPadding] already clears the status bar and the floating bottom
- * bar. [onPlay] opens a memory as a story with its title, eyebrow and up to [STORY_LENGTH] photos. [cleanupCount] is how
- * many photos swipe to clean has to review; [onCleanupCategory] opens Clean up on one category (a [CleanupKind] name);
+ * is a hero memory, a few more under it and, quietly, photos that look like ID cards; Clean up is where the storage goes
+ * and a row per clean-up category. [contentPadding] already clears the status bar and the floating bottom bar. [onPlay]
+ * opens a memory as a story with its title, eyebrow and up to [STORY_LENGTH] photos. [cleanupCount] is how many photos
+ * Clean up suggests; [onCleanup] opens it on all of them and [onCleanupCategory] on one category (a [CleanupKind] name);
  * [onProtect] gets the photos that look like ID cards, for the Private safe.
  */
 @Composable
@@ -359,7 +355,7 @@ private fun MemoriesSection(
         }
         if (idCards.isNotEmpty()) {
             LinkRow(
-                Sym.IdCard,
+                { Icon(Sym.IdCard, null, tint = AlbumTheme.colors.inkMuted) },
                 counted(idCards.size, "photo looks like an ID card", "photos look like ID cards"),
                 caption = "Keep Aadhaar, PAN and bank cards in the Private safe",
                 count = null,
@@ -372,9 +368,10 @@ private fun MemoriesSection(
 }
 
 /**
- * Where the storage goes, then swipe to clean and a row per clean-up category with something in it, each opening Clean up
- * on that category. While a longer clean-up pass runs its counts would keep moving, so the rows leave them out and a line
- * under the heading says how many photos are left to check instead. [storage] is null while it's worked out.
+ * Where the storage goes, then a row per clean-up category with something in it, each opening Clean up on that category;
+ * "See all" opens it on every suggestion. While a longer clean-up pass runs its counts would keep moving, so the rows leave
+ * them out and a line under the heading says how many photos are left to check instead. [storage] is null while it's
+ * worked out.
  */
 @Composable
 private fun CleanupSection(
@@ -399,18 +396,15 @@ private fun CleanupSection(
     }
     Column {
         if (storage.isNotEmpty()) StorageCard(storage, onStorage, Modifier.padding(horizontal = Space.s4))
-        if (caption != null || kinds.isNotEmpty()) SectionHead("Free up space")
-        caption?.let { Note(it) }
-        if (toReview > 0) {
-            AlbumButton(
-                "Start swipe to clean", onCleanup, Modifier.padding(start = Space.s4, end = Space.s4, bottom = Space.s2).fillMaxWidth(),
-                ButtonVariant.Primary, Sym.Swipe,
-            )
+        if (caption != null || kinds.isNotEmpty()) {
+            SectionHead("Free up space", action = "See all".takeIf { toReview > 0 }, onAction = onCleanup)
         }
+        caption?.let { Note(it) }
         kinds.forEach { (kind, n) ->
             LinkRow(
-                kind.sym, kind.label,
-                caption = if (left == null) "Frees ${size(n.bytes)}" else null,
+                { KindIcon(kind) }, kind.label,
+                // Browse categories aren't suggestions: what they take, not what they'd free
+                caption = if (left != null) null else if (kind.suggested) "Frees ${size(n.bytes)}" else "Uses ${size(n.bytes)}",
                 count = n.count.takeIf { left == null },
                 onClickLabel = "Review",
                 onClick = { onCategory(kind.name) },
@@ -443,11 +437,11 @@ private fun MemoryCard(memory: Memory<Media>, big: Boolean, onClick: () -> Unit,
 
 /**
  * A row that opens something: [icon], [label] over an optional [caption], an optional [count] in meta, and a chevron.
- * [onClickLabel] is what TalkBack says a double tap does.
+ * [onClickLabel] is what TalkBack says a double tap does. Storage's clean-up rows are these too.
  */
 @Composable
-private fun LinkRow(
-    icon: Sym,
+fun LinkRow(
+    icon: @Composable () -> Unit,
     label: String,
     caption: String?,
     count: Int?,
@@ -464,7 +458,7 @@ private fun LinkRow(
         horizontalArrangement = Arrangement.spacedBy(Space.s4),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(icon, null, tint = c.inkMuted)
+        icon()
         Column(Modifier.weight(1f)) {
             Text(label, style = type.body, color = c.ink)
             caption?.let { Text(it, style = type.caption, color = c.inkMuted) }
@@ -482,12 +476,6 @@ private fun StorageCard(parts: List<Pair<StorageKind, Long>>, onStorage: () -> U
     val type = AlbumTheme.type
     val context = LocalContext.current
     val shape = RoundedCornerShape(Space.radiusLg)
-    fun colorOf(kind: StorageKind) = when (kind) {
-        StorageKind.Photos -> c.ink
-        StorageKind.Videos -> c.flashInk
-        StorageKind.WhatsApp -> c.lineStrong
-        StorageKind.Screenshots -> c.line
-    }
     fun size(bytes: Long) = Formatter.formatShortFileSize(context, bytes) // KB, MB or GB as fits, in the phone's locale
     Column(
         modifier.fillMaxWidth().clip(shape).background(c.surface).border(Hairline, c.line, shape).padding(Space.s4),
@@ -501,17 +489,6 @@ private fun StorageCard(parts: List<Pair<StorageKind, Long>>, onStorage: () -> U
             // Its touch area reaches into the card's padding, so its words line up with the bar's end
             AlbumButton("See storage", onStorage, Modifier.offset(x = Space.s3), ButtonVariant.Quiet)
         }
-        // The legend below says the same in words, so the bar itself needs nothing for TalkBack
-        Row(Modifier.fillMaxWidth().height(StorageBarHeight).clip(CircleShape), horizontalArrangement = Arrangement.spacedBy(StorageBarGap)) {
-            parts.forEach { (kind, bytes) -> Box(Modifier.weight(bytes.toFloat()).fillMaxHeight().background(colorOf(kind))) }
-        }
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.s4), verticalArrangement = Arrangement.spacedBy(Space.s1)) {
-            parts.forEach { (kind, bytes) ->
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Space.s2)) {
-                    Box(Modifier.size(LegendDot).background(colorOf(kind), CircleShape))
-                    Text("${kind.label} ${size(bytes)}", style = type.caption, color = c.inkMuted)
-                }
-            }
-        }
+        StorageSplit(parts, ::size)
     }
 }

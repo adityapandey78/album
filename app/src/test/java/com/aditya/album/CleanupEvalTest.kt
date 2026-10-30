@@ -211,6 +211,55 @@ class CleanupEvalTest {
         return img.toImg()
     }
 
+    /**
+     * A page of notes or a book, photographed on a desk: full lines of text with paragraph breaks, the same margins on every
+     * page, other words by [seed]. [shift] moves the page a few pixels, as a second shot of the same page would.
+     */
+    private fun page(seed: Long, shift: Int = 0): Img {
+        val rnd = Random(seed)
+        val img = BufferedImage(1200, 1600, BufferedImage.TYPE_INT_RGB)
+        val g = img.createGraphics()
+        g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON)
+        g.color = Color(92, 70, 52) // the desk
+        g.fillRect(0, 0, 1200, 1600)
+        g.color = Color(240, 238, 230)
+        g.fillRect(80 + shift, 60 + shift, 1040, 1480)
+        g.color = Color(40, 40, 40)
+        g.font = Font(Font.SERIF, Font.PLAIN, 26)
+        val words = listOf("the", "river", "basin", "monsoon", "rainfall", "of", "and", "soil", "crops", "in", "plateau", "water", "is", "north", "delta", "forms")
+        var y = 140 + shift
+        while (y < 1480 + shift) {
+            if (rnd.nextInt(8) == 0) y += 30 // a new paragraph
+            val line = StringBuilder()
+            while (g.fontMetrics.stringWidth(line.toString()) < 860) line.append(words[rnd.nextInt(words.size)]).append(' ')
+            g.drawString(line.toString().trim(), 140 + shift, y)
+            y += 36
+        }
+        g.dispose()
+        return img.toImg()
+    }
+
+    /** A greeting forwarded on WhatsApp: the same background and flower every time, its own message. */
+    private fun greeting(message: String): Img {
+        val img = BufferedImage(1080, 1080, BufferedImage.TYPE_INT_RGB)
+        val g = img.createGraphics()
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+        g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON)
+        for (y in 0 until 1080) {
+            g.color = Color(250 - y / 108, 200 - y / 12, 120 - y / 36)
+            g.fillRect(0, y, 1080, 1)
+        }
+        g.color = Color(220, 40, 90)
+        for (k in 0 until 6) g.fillOval(540 + (110 * kotlin.math.cos(k * Math.PI / 3)).toInt() - 70, 400 + (110 * kotlin.math.sin(k * Math.PI / 3)).toInt() - 70, 140, 140)
+        g.color = Color(255, 220, 60)
+        g.fillOval(480, 340, 120, 120)
+        g.color = Color.WHITE
+        g.font = Font(Font.SANS_SERIF, Font.BOLD, 84)
+        message.split("\n").forEachIndexed { i, text -> g.drawString(text, (1080 - g.fontMetrics.stringWidth(text)) / 2, 760 + i * 100) }
+        g.dispose()
+        return img.toImg()
+    }
+
     /** A pocket shot: nearly black, with sensor noise. */
     private fun dark(seed: Long): Img {
         val rnd = Random(seed)
@@ -340,6 +389,14 @@ class CleanupEvalTest {
         for (k in 1..3L) dark(k).let { add(it, it.jpegBytes(90), "dark $k", "dark", t0 + 50 * day + k * 20_000, camera = "2025:11:02 22:00:${10 * k}.00", night = true) }
         for (k in 1..2L) washedOut(k).let { add(it, it.jpegBytes(90), "bright $k", "bright", t0 + 60 * day + k * 20_000, camera = "2025:11:03 12:00:${10 * k}.00") }
         for (k in 1..3L) sky(k).let { add(it, it.jpegBytes(90), "sky $k", "sky", t0 + 70 * day + k * 20_000, camera = "2025:11:04 12:00:${10 * k}.00") }
+        // Notes photographed page after page, 20 s apart, and page 1 shot twice (a true pair of similar shots)
+        for (k in 1..5L) page(k).let { add(it, it.jpegBytes(90), "page $k", "page", t0 + 80 * day + k * 20_000, camera = "2025:11:05 09:00:${20 * k}.00") }
+        page(1, shift = 12).let { add(it, it.jpegBytes(90), "page 1", "page again", t0 + 80 * day + 25_000, camera = "2025:11:05 09:00:25.00") }
+        // Greetings forwarded on WhatsApp the same minute: one template, five messages, no camera details
+        val whatsApp = "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/"
+        listOf("Good\nmorning", "Have a\nblessed day", "Happy\nMonday", "Good\nnight", "Stay\nblessed").forEachIndexed { k, message ->
+            greeting(message).let { add(it, it.jpegBytes(80), "greeting $k", "forward", t0 + 90 * day + k * 5_000L, whatsApp, "IMG-20251106-WA00$k.jpg") }
+        }
         return out
     }
 
@@ -386,28 +443,23 @@ class CleanupEvalTest {
         say("Clean up evaluation: ${measured.size} items from ${originals.size} photos, ${"%.1f".format((System.nanoTime() - started) / 1e9)} s; " +
             "measuring ${"%.0f".format(lookNanos / 1e6 / measured.size)} ms a photo after decoding (this machine)")
 
-        // Exact copies and copies: pairs are (kept, pre-selected). A pre-selected item is right when it shows the same moment
-        // as the one kept; it's a lost moment when it isn't a copy of anything (an original, a burst frame, a receipt)
-        fun groupPairs(groups: List<ShotGroup>) = groups.flatMap { g -> g.ids.drop(1).map { g.keep to it } }
-        val exactPairs = groupPairs(result.exact)
-        val copyPairs = groupPairs(result.copies)
-        val moments = setOf("original", "burst", "document", "dark", "bright", "sky")
+        // Copies (exact ones too): pairs are (kept, suggested). A suggested item is right when it shows the same moment as
+        // the one kept; it's a lost moment when it isn't a copy of anything (an original, a burst frame, a receipt)
+        val copyPairs = result.copies.flatMap { g -> g.ids.drop(1).map { g.keep to it } }
+        val moments = setOf("original", "burst", "document", "dark", "bright", "sky", "page", "page again", "forward")
         fun item(id: Long) = byId.getValue(id).item
-        val wrongExact = exactPairs.count { (a, b) -> item(a).origin != item(b).origin || item(b).edit !in setOf("original", "same file", "EXIF edit") }
         val crossOrigin = copyPairs.count { (a, b) -> item(a).origin != item(b).origin }
-        val lost = (exactPairs + copyPairs).count { (_, b) -> item(b).edit in moments && item(b).edit != "original" } +
-            copyPairs.count { (_, b) -> item(b).edit == "original" }
-        say("")
-        say("Exact copies: ${exactPairs.size} pre-selected, wrong ${pct(wrongExact, exactPairs.size)}")
-        for (edit in listOf("same file", "EXIF edit")) {
-            val found = originals.count { o -> exactPairs.any { (a, b) -> item(a).origin == o.file && item(b).edit == edit } }
-            say("  $edit: recall ${pct(found, originals.size)}")
+        val lost = copyPairs.count { (_, b) -> item(b).edit in moments }
+        val exactRecall = listOf("same file", "EXIF edit").associateWith { edit ->
+            originals.count { o -> copyPairs.any { (a, b) -> item(a).origin == o.file && item(b).origin == o.file && item(b).edit == edit } }
         }
-        say("Copies: ${copyPairs.size} pre-selected, kept with another photo's copies ${pct(crossOrigin, copyPairs.size)}, " +
-            "originals or other moments pre-selected $lost")
+        say("")
+        say("Copies: ${copyPairs.size} suggested, kept with another photo's copies ${pct(crossOrigin, copyPairs.size)}, " +
+            "originals or other moments suggested $lost")
+        for ((edit, found) in exactRecall) say("  %-18s suggested %s (exact copy)".format(edit, pct(found, originals.size)))
         val clear = originals.filter { o -> measured.first { it.item.origin == o.file && it.item.edit == "original" }.row.quality!! >= MIN_QUALITY }
         say("  (originals clear enough to match, PDQ quality >= $MIN_QUALITY: ${clear.size} of ${originals.size}; the rest only match exactly)")
-        val selected = (exactPairs + copyPairs).associate { (keep, copy) -> copy to keep }
+        val selected = copyPairs.associate { (keep, copy) -> copy to keep }
         val recall = LinkedHashMap<String, Int>()
         for (e in edits) {
             val found = clear.count { o ->
@@ -495,14 +547,40 @@ class CleanupEvalTest {
         say("Too bright: flagged ${brightFound.count { it == "bright" }} of 2 washed-out shots, ${brightFound.count { it != "bright" }} others; darkest 1%: " +
             exposure.joinToString(" ") { "${it.item.edit.take(4)}=${it.row.low}" })
 
+        // Categories: where each item shows up. One photo should show under the one category that explains it best
+        fun shownIn(kind: CleanupKind) = result.groups(kind).flatMap { it.ids }.ifEmpty { result.candidates(kind) }
+        val kindsOf = HashMap<Long, MutableList<CleanupKind>>()
+        for (kind in CleanupKind.entries) for (id in shownIn(kind)) kindsOf.getOrPut(id) { ArrayList() } += kind
+        val twice = kindsOf.filterValues { it.size > 1 }
+        val suggested = CleanupKind.entries.flatMap { result.candidates(it) }
+        val suggestedTwice = suggested.size - suggested.toSet().size
+        fun pairwise(items: List<Measured>) = items.flatMap { a -> items.filter { it.item.id > a.item.id }.map { pdqDistance(a.turns, it.turns) } }
+        val pages = measured.filter { it.item.edit == "page" }
+        val pageAgain = measured.first { it.item.edit == "page again" }
+        val wrongPages = similarPairs.count { (a, b) -> item(a).edit.startsWith("page") && item(b).edit.startsWith("page") && item(a).origin != item(b).origin }
+        val greetings = measured.filter { it.item.edit == "forward" }.map { it.item.id }.toSet()
+        val greetingCopies = copyPairs.count { (a, b) -> a in greetings && b in greetings }
+        val greetingSimilar = similarPairs.count { (a, b) -> a in greetings && b in greetings }
+        val shared = measured.filter { it.item.edit == "WhatsApp" }.map { it.item.id }
+        say("")
+        say("Categories: ${CleanupKind.entries.joinToString(", ") { "${it.label} ${shownIn(it).size}" }}")
+        say("  items under more than one category: ${twice.size} ${twice.values.groupingBy { it.joinToString("+") { k -> k.name } }.eachCount()}; " +
+            "suggested under more than one: $suggestedTwice")
+        say("  pages of notes 20 s apart: PDQ distances ${pairwise(pages)}, pairs of different pages grouped as similar $wrongPages; " +
+            "page 1 and its second shot ${pdqDistance(pages[0].turns, pageAgain.turns)}, grouped ${similarPairs.any { (a, b) -> setOf(a, b) == setOf(pages[0].item.id, pageAgain.item.id) }}")
+        say("  WhatsApp greetings, one template: PDQ distances ${pairwise(measured.filter { it.item.id in greetings })}; " +
+            "filed as copies $greetingCopies, as similar shots $greetingSimilar")
+        say("  WhatsApp copies of camera photos: under Copies ${shared.count { id -> result.copies.any { id in it.ids.drop(1) } }} of ${shared.size}, " +
+            "also under WhatsApp ${shared.count { it in result.whatsApp }}")
+
         File("build/reports").mkdirs()
         File("build/reports/cleanup-eval.txt").writeText(report.toString())
 
-        // Floors: never a wrong pre-selection on this set, and the copies Meta's threshold is meant to catch
-        assertEquals(0, wrongExact)
+        // Floors: never a wrong suggestion of a copy on this set, and the copies Meta's threshold is meant to catch
         assertEquals(0, crossOrigin)
         assertEquals(0, lost)
-        assertEquals(originals.size, originals.count { o -> exactPairs.any { (a, b) -> item(a).origin == o.file && item(b).edit == "EXIF edit" } })
+        assertEquals(originals.size, exactRecall["same file"])
+        assertEquals(originals.size, exactRecall["EXIF edit"])
         for (e in listOf("jpeg q90", "jpeg q70", "jpeg q50", "WhatsApp", "resize 1080", "resize 512", "enlarged 2x", "turned 90", "mirrored", "brighter", "screenshot")) {
             assertEquals("copies after $e", clear.size, recall[e])
         }
@@ -513,6 +591,15 @@ class CleanupEvalTest {
         assertEquals(similarPairs.size, trueSimilar)
         assertEquals(sceneTruth, sceneFound)
         assertTrue(flagged.all { it.second })
+        // Each suggestion under one category; nothing from one template or one notebook taken for copies or similar shots;
+        // a shared copy of a camera photo under Copies alone
+        assertEquals(0, suggestedTwice)
+        assertTrue(twice.values.all { it == listOf(CleanupKind.Copies, CleanupKind.Similar) }) // only originals, which stay in both
+        assertEquals(0, wrongPages)
+        assertEquals(0, greetingCopies)
+        assertEquals(0, greetingSimilar)
+        assertTrue(greetings.none { it in result.blurry })
+        assertEquals(0, shared.count { it in result.whatsApp })
     }
 
     /** PDQ distances between the fixtures as they are: a change in decoding or hashing shows up here first. */

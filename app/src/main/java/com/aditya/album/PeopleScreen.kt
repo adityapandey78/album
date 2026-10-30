@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -62,6 +63,7 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import coil3.compose.LocalPlatformContext
 import coil3.request.ImageRequest
@@ -78,15 +80,40 @@ private val biggestFirst = compareByDescending<PersonAlbum> { it.items.size }.th
  * so each can be shown again. People in Hidden items are in neither.
  */
 fun shownPeople(all: List<PersonAlbum>, hidden: Boolean = false) =
-    all.filter { !it.locked && it.hidden == hidden && (hidden || isShown(it.name, it.faces)) }.sortedWith(biggestFirst)
+    all.filter { !it.locked && it.hidden == hidden && (hidden || it.shown) }.sortedWith(biggestFirst)
 
 /** People in Hidden items, biggest first. */
 fun peopleInHiddenItems(all: List<PersonAlbum>) = all.filter { it.locked }.sortedWith(biggestFirst)
 
 /** Everyone who can go to Hidden items: shown in People or hidden from it, biggest first. */
-fun hideablePeople(all: List<PersonAlbum>) = all.filter { !it.locked && (it.hidden || isShown(it.name, it.faces)) }.sortedWith(biggestFirst)
+fun hideablePeople(all: List<PersonAlbum>) = all.filter { !it.locked && (it.hidden || it.shown) }.sortedWith(biggestFirst)
 
-private fun titleOf(p: PersonAlbum) = p.name ?: "this person"
+private fun titleOf(p: PersonAlbum) = p.name ?: if (p.species != null) "this pet" else "this person"
+
+/** Who TalkBack says it is: "Asha", "Bruno, dog", "Unnamed person", "Unnamed cat". */
+fun spokenName(p: PersonAlbum): String {
+    val kind = p.species?.name?.lowercase()
+    return when {
+        p.name == null -> "Unnamed ${kind ?: "person"}"
+        kind != null -> "${p.name}, $kind"
+        else -> p.name
+    }
+}
+
+/** People's subtitle: "12 people", "12 people · 2 pets", "1 pet · 3 hidden". [shown] and [hidden] as People lists them. */
+fun peopleSubtitle(shown: List<PersonAlbum>, hidden: Int): String {
+    val pets = shown.count { it.species != null }
+    val people = shown.size - pets
+    val counts = when {
+        pets == 0 -> counted(people, "person", "people")
+        people == 0 -> counted(pets, "pet", "pets")
+        else -> "${counted(people, "person", "people")} · ${counted(pets, "pet", "pets")}"
+    }
+    return counts + if (hidden == 0) "" else " · ${"%,d".format(hidden)} hidden"
+}
+
+/** The review's title: "Same pet?" when only pets are asked about, else "Same person?". */
+fun reviewTitle(pairs: List<PeoplePair>) = if (pairs.isNotEmpty() && pairs.all { it.a.species != null }) "Same pet?" else "Same person?"
 
 /** A person page's title: their name, or the prompt to give one. For the shell's collapsed bar; [PersonHeader] shows the same. */
 fun personTitle(person: PersonAlbum) = person.name ?: NO_NAME
@@ -123,12 +150,18 @@ fun PeopleScreen(state: LazyGridState, onBack: () -> Unit, onOpenPerson: (albumI
     val hidden = remember(all) { shownPeople(all, hidden = true) }
     val progress by People.progress.collectAsState()
     val reviews by remember { People.review }.collectAsState(emptyList())
-    val subtitle = counted(people.size, "person", "people") + if (hidden.isEmpty()) "" else " · ${"%,d".format(hidden.size)} hidden"
-    PushedGridPage("People", subtitle, state, onBack) {
+    val petPhotos by People.petPhotos.collectAsState()
+    val describe by Embeddings.state.collectAsState()
+    PushedGridPage("People", peopleSubtitle(people, hidden.size), state, onBack) {
         if (progress.total > 0) fullRow("scan") { Note(scanningText(progress)) }
+        // Pets need describe-it search (see Pets.kt): said only to someone who photographs a dog or cat
+        if (describe == DescribeState.NotInstalled && petPhotos >= PETS.min && all.none { it.species != null }) fullRow("pets") {
+            Note("To see your dog or cat here, turn on describe-it search in Settings.")
+        }
         if (reviews.isNotEmpty()) fullRow("review") {
+            val title = reviewTitle(reviews)
             UtilityTile(
-                Sym.Compare, "Same person?", "%,d".format(reviews.size), "Same person?, ${reviewCount(reviews.size)}",
+                Sym.Compare, title, "%,d".format(reviews.size), "$title, ${reviewCount(reviews.size)}",
                 Modifier.padding(start = Space.s4, end = Space.s4, bottom = Space.s4),
             ) {
                 CrashLog.note("people review")
@@ -147,18 +180,36 @@ fun PeopleScreen(state: LazyGridState, onBack: () -> Unit, onOpenPerson: (albumI
     }
 }
 
-/** A person as a round AlbumCard: their cover face, name (or "Add a name", muted) and photo count, centred. */
+/**
+ * A person as a round AlbumCard: their cover face, name (or "Add a name", muted) and photo count, centred. A pet's cover
+ * carries a paw, so it reads as a pet in a row of faces.
+ */
 @Composable
 fun PersonCard(p: PersonAlbum, modifier: Modifier = Modifier, count: Boolean = true, onClick: () -> Unit) {
     AlbumCard(
         name = p.name ?: NO_NAME,
         meta = if (count) listOf("%,d".format(p.items.size)) else emptyList(),
-        description = "${p.name ?: "Unnamed person"}, ${photoCount(p)}",
+        description = "${spokenName(p)}, ${photoCount(p)}",
         onClick = onClick,
         modifier = modifier,
         round = true,
         nameColor = if (p.name == null) AlbumTheme.colors.inkMuted else AlbumTheme.colors.ink,
-    ) { FaceImage(p.cover, Modifier.matchParentSize()) }
+    ) {
+        FaceImage(p.cover, Modifier.matchParentSize())
+        if (p.species != null) PetMark(Modifier.align(Alignment.BottomCenter).padding(bottom = Space.s1))
+    }
+}
+
+/**
+ * The paw on a pet's cover: Badge's photo tone and size with the icon alone, so it reads on any photo and fits inside a
+ * small circle (at the bottom, where the circle is narrow). TalkBack says "dog" or "cat" from the card instead.
+ */
+@Composable
+private fun PetMark(modifier: Modifier) {
+    val c = AlbumTheme.colors
+    Box(modifier.size(20.dp).background(c.scrimPhoto, CircleShape), contentAlignment = Alignment.Center) {
+        Icon(Sym.Pets, null, filled = true, size = 14.dp, tint = c.onPhoto)
+    }
 }
 
 /**
@@ -228,8 +279,8 @@ fun FaceImage(crop: FaceCrop, modifier: Modifier) {
  * The top of a person page, styled like LargeTopBar: back, rename and more on a row, then the name in title-xl (or
  * "Add a name"; tap it to name them) and the photo count. More offers a new cover photo, merging with another person,
  * hiding from People, and Hide person (into Hidden items, after the privacy PIN); for someone in Hidden items, a new
- * cover and Unhide. [onOpenPerson] gets the page to show next, as an album id: naming or merging an automatic group makes
- * it a person with a new id.
+ * cover and Unhide. A pet's page offers the same, in a pet's words. [onOpenPerson] gets the page to show next, as an album
+ * id: naming or merging an automatic group makes it a person with a new id.
  */
 @Composable
 fun PersonHeader(person: PersonAlbum, onBack: () -> Unit, onOpenPerson: (albumId: Long) -> Unit) {
@@ -248,6 +299,7 @@ fun PersonHeader(person: PersonAlbum, onBack: () -> Unit, onOpenPerson: (albumId
         scope.launch { safely(edit)?.let(done) ?: Toast.makeText(context, COULDNT_SAVE, Toast.LENGTH_SHORT).show() }
     }
     val rename = if (person.name == null) NO_NAME else "Rename"
+    val pet = person.species != null
     Column(Modifier.fillMaxWidth().padding(start = Space.s4, end = Space.s4, top = Space.s2, bottom = Space.s3)) {
         Row(Modifier.fillMaxWidth().heightIn(min = Space.target), verticalAlignment = Alignment.CenterVertically) {
             AlbumIconButton(Sym.ArrowBack, "Back", onBack, Modifier.offset(x = -Space.s3))
@@ -271,17 +323,17 @@ fun PersonHeader(person: PersonAlbum, onBack: () -> Unit, onOpenPerson: (albumId
             MenuRow(Sym.Face, "Change cover photo", {
                 more = false
                 covering = true
-            }, sub = "The face shown for them in People", trailing = null)
+            }, sub = if (pet) "The photo shown for them in People" else "The face shown for them in People", trailing = null)
             if (person.locked) {
                 MenuRow(Sym.Visibility, "Unhide", {
                     more = false
                     privacy.run("Unhide ${titleOf(person)}") { Hidden.unhide(context, listOf(person), emptyList()) }
                 }, sub = "They and their photos show in the Library again", trailing = null)
             } else {
-                MenuRow(Sym.Merge, "Merge with another person", {
+                MenuRow(Sym.Merge, if (pet) "Merge with another pet" else "Merge with another person", {
                     more = false
                     merging = true
-                }, sub = "When the same person shows up twice", trailing = null)
+                }, sub = if (pet) "When the same pet shows up twice" else "When the same person shows up twice", trailing = null)
                 MenuRow(
                     if (person.hidden) Sym.Visibility else Sym.VisibilityOff,
                     if (person.hidden) "Show in People" else "Hide from People",
@@ -294,7 +346,7 @@ fun PersonHeader(person: PersonAlbum, onBack: () -> Unit, onOpenPerson: (albumId
                     sub = "Their photos stay in the Library".takeIf { !person.hidden },
                     trailing = null,
                 )
-                MenuRow(Sym.Lock, "Hide person", {
+                MenuRow(Sym.Lock, if (pet) "Hide pet" else "Hide person", {
                     more = false
                     // They and their photos leave everything but Hidden items, this page too
                     privacy.run("Hide ${titleOf(person)}") {
@@ -318,7 +370,9 @@ fun PersonHeader(person: PersonAlbum, onBack: () -> Unit, onOpenPerson: (albumId
         }
     }
     if (merging) {
-        MergeSheet(person, shownPeople(all).filter { it.cluster != person.cluster }, onDismiss = { merging = false }) { target ->
+        // People merge with people, and pets with pets of their species: never a dog with a cat, or with anyone
+        val others = shownPeople(all).filter { it.cluster != person.cluster && it.species == person.species }
+        MergeSheet(person, others, onDismiss = { merging = false }) { target ->
             merging = false
             change("merge people", { People.merge(person.cluster, target.cluster) })
         }
@@ -367,8 +421,9 @@ private fun PersonNameSheet(person: PersonAlbum, all: List<PersonAlbum>, onDismi
     // Starts with the old name selected, so typing replaces it
     var text by rememberSaveable(stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue(initial, TextRange(0, initial.length))) }
     val name = text.text.trim()
-    // Names merge only on the same side of Hidden items (see People.name), and hidden people are never suggested outside it
-    val named = all.filter { it.name != null && it.cluster != person.cluster && it.locked == person.locked }
+    // Names merge only on the same side of Hidden items and with the same kind (see People.name), and hidden people are
+    // never suggested outside it
+    val named = all.filter { it.name != null && it.cluster != person.cluster && it.locked == person.locked && it.species == person.species }
     val same = named.find { it.name.equals(name, ignoreCase = true) }
     val suggestions = if (name.isEmpty() || same != null) emptyList() else named.filter { it.name!!.startsWith(name, ignoreCase = true) }.take(4)
     val enabled = name.isNotEmpty() && name != person.name
@@ -380,7 +435,7 @@ private fun PersonNameSheet(person: PersonAlbum, all: List<PersonAlbum>, onDismi
         enabled = enabled,
         onDismiss = onDismiss,
         onConfirm = { if (enabled) onDone(name) },
-        note = same?.let { "You already have ${it.name}. Saving merges them into one person." },
+        note = same?.let { "You already have ${it.name}. Saving merges them into one ${if (person.species != null) "pet" else "person"}." },
         capitalization = KeyboardCapitalization.Words,
     ) {
         suggestions.forEach { s ->
@@ -395,11 +450,12 @@ private fun PersonNameSheet(person: PersonAlbum, all: List<PersonAlbum>, onDismi
 @Composable
 private fun MergeSheet(person: PersonAlbum, others: List<PersonAlbum>, onDismiss: () -> Unit, onMerge: (PersonAlbum) -> Unit) {
     var target by remember { mutableStateOf<PersonAlbum?>(null) }
+    val pet = person.species != null
     target?.let { t ->
         val name = t.name ?: person.name
         ConfirmBar(
-            title = if (name != null) "Merge into $name?" else "Merge these people?",
-            body = "Their photos will show as one person. Remove any that don't belong with Not ${name ?: "this person"}.",
+            title = if (name != null) "Merge into $name?" else if (pet) "Merge these pets?" else "Merge these people?",
+            body = "Their photos will show as one ${if (pet) "pet" else "person"}. Remove any that don't belong with Not ${name ?: titleOf(person)}.",
             confirmLabel = "Merge",
             onConfirm = { onMerge(t) },
             onCancel = { target = null },
@@ -408,8 +464,8 @@ private fun MergeSheet(person: PersonAlbum, others: List<PersonAlbum>, onDismiss
         )
         return
     }
-    Sheet(onDismiss, "Same person as") {
-        if (others.isEmpty()) Text("No one else yet", style = AlbumTheme.type.body, color = AlbumTheme.colors.inkMuted)
+    Sheet(onDismiss, if (pet) "Same pet as" else "Same person as") {
+        if (others.isEmpty()) Text(if (pet) "No other pets yet" else "No one else yet", style = AlbumTheme.type.body, color = AlbumTheme.colors.inkMuted)
         LazyColumn {
             items(others, key = { it.cluster }) { p ->
                 CoverRow(p.name ?: NO_NAME, photoCount(p), { target = p }, round = true) { FaceImage(p.cover, Modifier.matchParentSize()) }
@@ -447,7 +503,7 @@ fun PeopleReviewScreen(onBack: () -> Unit) {
     }
     BackHandler(onBack = onBack)
     Column(Modifier.fillMaxSize().background(c.canvas).pointerInput(Unit) {}.systemBarsPadding()) {
-        LargeTopBar("Same person?", subtitle = pairs?.let { reviewCount(open.size) }, onBack = onBack)
+        LargeTopBar(reviewTitle(listOfNotNull(pair)), subtitle = pairs?.let { reviewCount(open.size) }, onBack = onBack)
         // Keyed by the two groups, so a pair whose photos change doesn't fade in again
         AnimatedContent(
             pair,
@@ -465,7 +521,7 @@ fun PeopleReviewScreen(onBack: () -> Unit) {
                     ReviewSide(p.a, Modifier.weight(1f))
                     ReviewSide(p.b, Modifier.weight(1f))
                 }
-                pairs != null -> EmptyState(Sym.Groups, "Nothing to review", "When two groups of faces may be one person, Album asks you here.")
+                pairs != null -> EmptyState(Sym.Groups, "Nothing to review", "When two groups may be one person or pet, Album asks you here.")
                 else -> Box(Modifier.fillMaxSize()) // loading: a moment on first open only
             }
         }
@@ -485,7 +541,7 @@ fun PeopleReviewScreen(onBack: () -> Unit) {
 private fun ReviewSide(p: PersonAlbum, modifier: Modifier) {
     val c = AlbumTheme.colors
     Column(
-        modifier.semantics(mergeDescendants = true) { contentDescription = "${p.name ?: "Unnamed person"}, ${photoCount(p)}" },
+        modifier.semantics(mergeDescendants = true) { contentDescription = "${spokenName(p)}, ${photoCount(p)}" },
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(Space.s2),
     ) {

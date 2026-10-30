@@ -1,0 +1,62 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 1,
+    "identityHash": "5a0d7b8d6391d64182c1ba85d6568f46",
+    "entities": [
+      {
+        "tableName": "copies",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`dest` TEXT NOT NULL, `mediaId` INTEGER NOT NULL, `size` INTEGER NOT NULL, `modified` INTEGER NOT NULL, `sha256` TEXT NOT NULL, `path` TEXT NOT NULL, PRIMARY KEY(`dest`, `mediaId`))",
+        "fields": [
+          {
+            "fieldPath": "dest",
+            "columnName": "dest",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mediaId",
+            "columnName": "mediaId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "size",
+            "columnName": "size",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "modified",
+            "columnName": "modified",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sha256",
+            "columnName": "sha256",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "path",
+            "columnName": "path",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "dest",
+            "mediaId"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '5a0d7b8d6391d64182c1ba85d6568f46')"
+    ]
+  }
+}

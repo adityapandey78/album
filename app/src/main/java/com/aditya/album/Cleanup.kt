@@ -103,19 +103,18 @@ const val OLD_SCREENSHOT_MS = 30 * 24 * 60 * 60 * 1000L
 const val BIG_VIDEO_BYTES = 100_000_000L // 100 MB the way Android shows sizes (1,000-based)
 
 /**
- * Cleanup's categories, in chip order. [reason] is the Badge on a swipe card. [suggested] ones make up "N photos to
- * review"; the others are there to browse. Exact copies and copies keep an original per group and can go in one tap;
- * similar shots are only ever picked by hand.
+ * Clean up's categories, in chip order, which is also the order they claim items in: each item shows under the first one
+ * that explains it (see [cleanupOf]). [suggested] ones make up "N photos to review" and can be selected in one tap; the
+ * others are there to browse and pick from. [app], when set, lends its launcher icon in place of [sym].
  */
-enum class CleanupKind(val label: String, val reason: String, val sym: Sym, val suggested: Boolean) {
-    Exact("Exact copies", "Exact copy", Sym.ContentCopy, true),
-    Copies("Copies", "Copy", Sym.Compare, true),
-    Similar("Similar shots", "Similar", Sym.BurstMode, true),
-    Blurry("Blurry", "Blurry", Sym.Contrast, true),
-    Exposure("Too dark or bright", "Too dark or bright", Sym.LightMode, true), // each card says which: see CleanupResult.reason
-    Screenshots("Old screenshots", "Old screenshot", Sym.ScreenshotMonitor, true),
-    WhatsApp("WhatsApp", "WhatsApp", Sym.Share, false),
-    BigVideos("Big videos", "Big video", Sym.Videocam, false),
+enum class CleanupKind(val label: String, val sym: Sym, val suggested: Boolean, val app: MediaApp? = null) {
+    Copies("Copies", Sym.ContentCopy, true),
+    Similar("Similar shots", Sym.BurstMode, true),
+    Exposure("Too dark or bright", Sym.LightMode, true), // each tile says which
+    Blurry("Blurry", Sym.Contrast, true),
+    Screenshots("Old screenshots", Sym.ScreenshotMonitor, true),
+    BigVideos("Big videos", Sym.Videocam, false),
+    WhatsApp("WhatsApp", Sym.Folder, false, MediaApp.WhatsApp),
 }
 
 /** What cleanup reads of one item: a [Media] without its URI, so the rules run in plain unit tests. [modified] (seconds) is only known to the measuring pass. */
@@ -137,60 +136,49 @@ fun Media.toShot() = Shot(id, isVideo, taken, width, height, size, bucketName, p
 /** Copies of one photo, or shots of one moment. [ids] start with [keep]: the original, or the best shot. */
 data class ShotGroup(val keep: Long, val ids: List<Long>)
 
-/** What each category suggests. Groups for copies and similar shots; plain lists, newest first, for the rest. */
+/**
+ * What each category holds, every item in one category at most. Groups for copies (exact ones and re-saved ones, around
+ * the original) and similar shots; plain lists, newest first, for the rest.
+ */
 data class CleanupResult(
-    val exact: List<ShotGroup>,
     val copies: List<ShotGroup>,
     val similar: List<ShotGroup>,
-    val blurry: List<Long>,
     val dark: List<Long>,
     val bright: List<Long>,
+    val blurry: List<Long>,
     val screenshots: List<Long>,
-    val whatsApp: List<Long>,
     val bigVideos: List<Long>, // biggest first
+    val whatsApp: List<Long>,
 ) {
-    /** What [kind] suggests moving to Trash: every item, except the one to keep in each group. */
+    /** Originals of copies. A similar shot that has copies is one you shared or saved, so it stays like a best shot. */
+    val originals: Set<Long> by lazy { copies.mapTo(HashSet()) { it.keep } }
+
+    /** What [kind] suggests moving to Trash: every item, except what stays in each group. Browse categories: everything. */
     fun candidates(kind: CleanupKind): List<Long> = when (kind) {
-        CleanupKind.Exact, CleanupKind.Copies, CleanupKind.Similar -> groups(kind).flatMap { it.ids.drop(1) }
-        CleanupKind.Blurry -> blurry
+        CleanupKind.Copies -> copies.flatMap { it.ids.drop(1) }
+        CleanupKind.Similar -> similar.flatMap { g -> g.ids.drop(1).filter { it !in originals } }
         CleanupKind.Exposure -> dark + bright
+        CleanupKind.Blurry -> blurry
         CleanupKind.Screenshots -> screenshots
-        CleanupKind.WhatsApp -> whatsApp
         CleanupKind.BigVideos -> bigVideos
+        CleanupKind.WhatsApp -> whatsApp
     }
 
     fun groups(kind: CleanupKind): List<ShotGroup> = when (kind) {
-        CleanupKind.Exact -> exact
         CleanupKind.Copies -> copies
         CleanupKind.Similar -> similar
         else -> emptyList()
     }
 
-    /** The Badge for item [id] under [kind]: Too dark or Too bright say which. */
-    fun reason(kind: CleanupKind, id: Long): String = when {
-        kind != CleanupKind.Exposure -> kind.reason
-        id in dark -> "Too dark"
-        else -> "Too bright"
-    }
-
     /**
-     * The exact copies and copies among [trashed], each as (original, copy) with the original that stays: its group's,
-     * or when that one goes too, the one it's a copy of in turn. Their favourites and collections move there first, however
-     * they reach Trash. In [trashed]'s order.
+     * The copies among [trashed], each as (original, copy), when their original stays: their favourites and collections
+     * move there first, however they reach Trash. In [trashed]'s order.
      */
     fun originalsOf(trashed: Collection<Long>): List<Pair<Long, Long>> {
         val keepOf = HashMap<Long, Long>()
-        for (g in exact + copies) for (id in g.ids.drop(1)) keepOf[id] = g.keep
+        for (g in copies) for (id in g.ids.drop(1)) keepOf[id] = g.keep
         val going = trashed.toHashSet()
-        return trashed.mapNotNull { copy ->
-            var original = keepOf[copy] ?: return@mapNotNull null
-            val seen = hashSetOf(copy)
-            while (original in going) { // up the chain; groups never loop, but a bad one mustn't hang
-                if (!seen.add(original)) return@mapNotNull null
-                original = keepOf[original] ?: return@mapNotNull null
-            }
-            original to copy
-        }
+        return trashed.mapNotNull { copy -> keepOf[copy]?.takeIf { it !in going }?.let { it to copy } }
     }
 }
 
@@ -202,32 +190,60 @@ data class CleanupSummary(val kinds: Map<CleanupKind, CleanupCount>, val toRevie
 // ---------- Rules: pure, so they're unit tested ----------
 
 /**
- * Sorts the Library into cleanup categories. [rows] are what [Cleanup] measured, by id, for the files as they are now;
- * items not measured yet are only left out of the categories that need a measurement. [pairs] are the copies it found.
- * [now] is epoch millis.
+ * Sorts the Library into cleanup categories, each item under the first that explains it, in [CleanupKind] order: a copy
+ * is a copy before it's an old screenshot or a WhatsApp photo, a similar shot before it's blurry. The photo that stays in
+ * a group (an original, a best shot) is never suggested anywhere. Similar, blurry and too dark or bright only judge your
+ * own shots (camera details, which apps strip when they share or save a picture): forwards, downloads and designs read as
+ * alike or soft for other reasons, such as one template or flat colour. [rows] are what [Cleanup] measured, by id, for the
+ * files as they are now; items not measured yet are only left out of the categories that need a measurement. [pairs] are
+ * the copies it found. [now] is epoch millis.
  */
 fun cleanupOf(shots: List<Shot>, rows: Map<Long, CleanupRow>, pairs: List<CopyPair>, now: Long): CleanupResult {
+    val sizes = shots.associate { it.id to it.size }
     val exact = exactGroups(shots, rows)
     val exactCopies = exact.flatMapTo(HashSet()) { it.ids.drop(1) }
     val photos = shots.filter { !it.isVideo }
-    val copies = copyGroups(photos.filter { it.id !in exactCopies }, rows, pairs)
-    val spare = exactCopies + copies.flatMap { it.ids.drop(1) }
-    // Screenshots of one app look alike and are always "sharp", so they only count as exact copies, copies of a photo, or old
-    val camera = photos.filter { !isScreenshot(it.path, it.name) }
+    val copies = mergeCopies(exact, copyGroups(photos.filter { it.id !in exactCopies }, rows, pairs)) { sizes[it] ?: 0L }
+    val inCopies = copies.flatMapTo(HashSet()) { it.ids }
+    val originals = copies.mapTo(HashSet()) { it.keep }
+    val own = photos.filter { s ->
+        rows[s.id]?.capture != null && !isScreenshot(s.path, s.name) && (s.id !in inCopies || s.id in originals)
+    }
     val hashes = HashMap<Long, LongArray>()
-    for (s in camera) rows[s.id]?.takeIf { (it.quality ?: 0) >= MIN_QUALITY }?.pdq?.let { hashes[s.id] = pdqOf(it) }
-    val measured = camera.mapNotNull { s -> rows[s.id]?.let { s to it } }
+    for (s in own) rows[s.id]?.takeIf { (it.quality ?: 0) >= MIN_QUALITY }?.pdq?.let { hashes[s.id] = pdqOf(it) }
+    val similar = similarGroups(own, { hashes[it.id] }) { group -> bestShot(group, { it.id in originals }) { s -> rows[s.id] } }
+    val grouped = inCopies + similar.flatMap { it.ids }
+    val loose = own.filter { it.id !in grouped }.map { it.id to rows.getValue(it.id) }
+    val dark = loose.filter { isDark(it.second) }.map { it.first }
+    val bright = loose.filter { isBright(it.second) }.map { it.first }
+    val blurry = loose.filter { (id, row) -> id !in dark && id !in bright && isBlurry(row) }.map { it.first }
+    val screenshots = photos.filter { isScreenshot(it.path, it.name) && now - it.taken > OLD_SCREENSHOT_MS && it.id !in inCopies }.map { it.id }
+    val bigVideos = shots.filter { it.isVideo && it.size > BIG_VIDEO_BYTES && it.id !in inCopies }.sortedByDescending { it.size }.map { it.id }
+    val claimed = grouped + dark + bright + blurry + screenshots + bigVideos
     return CleanupResult(
-        exact = exact,
         copies = copies,
-        similar = similarGroups(camera.filter { it.id !in spare }, { hashes[it.id] }) { bestShot(it) { s -> rows[s.id] } },
-        blurry = measured.filter { isBlurry(it.second) }.map { it.first.id },
-        dark = measured.filter { isDark(it.second) }.map { it.first.id },
-        bright = measured.filter { isBright(it.second) }.map { it.first.id },
-        screenshots = photos.filter { isScreenshot(it.path, it.name) && now - it.taken > OLD_SCREENSHOT_MS }.map { it.id },
-        whatsApp = shots.filter { storageKind(it.isVideo, it.path, it.bucket, it.name) == StorageKind.WhatsApp }.map { it.id },
-        bigVideos = shots.filter { it.isVideo && it.size > BIG_VIDEO_BYTES }.sortedByDescending { it.size }.map { it.id },
+        similar = similar,
+        dark = dark,
+        bright = bright,
+        blurry = blurry,
+        screenshots = screenshots,
+        bigVideos = bigVideos,
+        whatsApp = shots.filter { it.id !in claimed && storageKind(it.isVideo, it.path, it.bucket, it.name) == StorageKind.WhatsApp }.map { it.id },
     )
+}
+
+/**
+ * Exact copies and copies as one list of groups, each around the original that stays: an exact group joins the copies
+ * group its kept item is in (a WhatsApp photo saved twice is still a copy of the camera photo it came from), so every copy
+ * shows once, next to its original. Groups that free the most ([size] per id) first.
+ */
+fun mergeCopies(exact: List<ShotGroup>, near: List<ShotGroup>, size: (Long) -> Long): List<ShotGroup> {
+    val home = HashMap<Long, Int>()
+    near.forEachIndexed { i, g -> g.ids.forEach { home[it] = i } }
+    val joined = near.map { it.ids.toMutableList() }
+    val alone = ArrayList<ShotGroup>()
+    for (g in exact) home[g.keep]?.let { joined[it] += g.ids.drop(1) } ?: alone.add(g)
+    return (near.mapIndexed { i, g -> ShotGroup(g.keep, joined[i]) } + alone).sortedByDescending { g -> g.ids.drop(1).sumOf(size) }
 }
 
 /** Counts and bytes per category, and the suggested items counted once (a blurry similar shot is one photo to review). */
@@ -366,16 +382,17 @@ fun similarGroups(photos: List<Shot>, hash: (Shot) -> LongArray?, best: (List<Sh
 private fun landscape(s: Shot) = s.width > s.height
 
 /**
- * The shot to keep from similar ones. When faces were found: everyone's eyes open, then smiles, then the sharpest face.
- * Then (or without faces) sharpness, as a share of the sharpest shot's, less the share of blown or crushed pixels; then the
- * most pixels; then the newest. Probabilities count in thirds and sharpness in steps, since both are rough: a slightly
- * higher number shouldn't decide.
+ * The shot to keep from similar ones. First one that's [picked] already (shared or saved, so it has copies). When faces
+ * were found: everyone's eyes open, then smiles, then the sharpest face. Then (or without faces) sharpness, as a share of
+ * the sharpest shot's, less the share of blown or crushed pixels; then the most pixels; then the newest. Probabilities
+ * count in thirds and sharpness in steps, since both are rough: a slightly higher number shouldn't decide.
  */
-fun bestShot(shots: List<Shot>, row: (Shot) -> CleanupRow?): Shot {
+fun bestShot(shots: List<Shot>, picked: (Shot) -> Boolean = { false }, row: (Shot) -> CleanupRow?): Shot {
     val faces = shots.any { row(it)?.eyes != null }
     val sharpest = shots.maxOf { row(it)?.blur ?: 0f }.takeIf { it > 0f } ?: 1f
     return shots.maxWith(
         compareBy<Shot>(
+            { picked(it) },
             { if (faces) third(row(it)?.eyes) else 0 },
             { if (faces) third(row(it)?.smile) else 0 },
             { if (faces) sharpStep(row(it)?.faceSharpness ?: 0f) else 0 },
@@ -438,7 +455,8 @@ fun planCleanup(found: List<Shot>, rows: List<CleanupRow>, pairs: List<CopyPair>
     fun look(s: Shot, row: CleanupRow) = row.pdq?.let { "$it ${s.width}x${s.height}" }
     val looks = found.mapNotNull { s -> valid[s.id]?.let { look(s, it) } }.groupingBy { it }.eachCount().filterValues { it > 1 }.keys
     val closer = cleanupOf(found, valid, pairs, now).similar.flatMapTo(HashSet()) { it.ids }
-    found.filter { !it.isVideo && !isScreenshot(it.path, it.name) && valid[it.id]?.let(::mayBeBlurry) == true }.mapTo(closer) { it.id }
+    // Only your own shots are judged for blur (see cleanupOf), so only theirs need the closer look
+    found.filter { !it.isVideo && !isScreenshot(it.path, it.name) && valid[it.id]?.let { r -> r.capture != null && mayBeBlurry(r) } == true }.mapTo(closer) { it.id }
     val work = ArrayList<CleanupJob>()
     val remove = ArrayList<Long>()
     for (item in found) {
@@ -783,9 +801,10 @@ object Cleanup {
                 WorkManager.getInstance(app).enqueueUniqueWork(JOB, ExistingWorkPolicy.KEEP, request)
             }
         }
-        // Categories come from the Library as it is now plus what's measured so far, so trashed photos leave at once
+        // Categories come from the Library as it is now plus what's measured so far, so trashed photos leave at once.
+        // Hidden items stay out of them (and out of For you's counts); they're still measured, so unhiding needs no pass.
         scope.launch {
-            combine(Gallery.media.filterNotNull(), passes) { media, _ -> media }.collectLatest { media ->
+            combine(Gallery.media.filterNotNull(), Hidden.state.filterNotNull(), passes) { media, hidden, _ -> media.withoutHidden(hidden) }.collectLatest { media ->
                 val shots = media.map { it.toShot() }
                 val sizes = shots.associate { it.id to it.size }
                 // Rows of an older version or an edited file are as good as unmeasured until the pass redoes them

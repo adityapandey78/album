@@ -1,0 +1,28 @@
+Map: Natural Earth (https://www.naturalearthdata.com)
+
+app/src/main/assets/map/lod0.bin, lod1.bin and lod2.bin are built by tools/natural_earth.py from these Natural Earth
+1:10m files, release v5.1.2 (13 May 2022), from Natural Earth's repository
+(https://github.com/nvkelso/natural-earth-vector/tree/v5.1.2):
+    ne_10m_land
+    ne_10m_admin_0_boundary_lines_land
+    ne_10m_admin_0_boundary_lines_disputed_areas
+    ne_10m_admin_1_states_provinces_lines
+
+Natural Earth is in the public domain: anyone may use, change and share it, for any purpose, without asking and without
+having to credit its makers. See https://www.naturalearthdata.com/about/terms-of-use/
+
+SHA-256 of the inputs:
+    ne_10m_land.shp                                    4cad3a49bc75c1a4c2f3d7efae04f2f8e63151c96764b2658effabf524331fa6
+    ne_10m_admin_0_boundary_lines_land.shp             b6811b9e2f6ed40b31622e6d261210c5e6afded9b7ad71977d3658293f56373f
+    ne_10m_admin_0_boundary_lines_land.dbf             103d9b00b684b0380d8ded830d24a1406ed28cbb6c1f4dc3df21c50cac615403
+    ne_10m_admin_0_boundary_lines_disputed_areas.shp   b3294d9e15bc093091c3d1524ec120eeafcfc16a188177bc4cbe3d1489f25626
+    ne_10m_admin_0_boundary_lines_disputed_areas.dbf   6d1e7dcfc13474dba5f304427a97190630cd04af9ea2911d2d5711735a761e34
+    ne_10m_admin_1_states_provinces_lines.shp          c89b8545fdb03a764df9de2efeadf0d6735169d94b48a315b5e233780e073ab5
+    ne_10m_admin_1_states_provinces_lines.dbf          b524fd1baf59386cd4bca0d6df642ddb02be9cdc4d69f1f1d109885acf21d9ed
+
+Changes made by tools/natural_earth.py: projected to Web Mercator; simplified at three levels of detail; land cut into
+squares; tiny islands dropped at the coarser levels; small state divisions (French departments, British counties) left
+out; and borders drawn from India's point of view as Natural Earth records it (FCLASS_IN), so India's claims in Kashmir
+and Aksai Chin are its borders.
+
+The data is provided "as is", without warranty of any kind.

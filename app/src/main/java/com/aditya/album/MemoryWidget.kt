@@ -4,6 +4,7 @@ import android.Manifest.permission.READ_MEDIA_IMAGES
 import android.Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
 import android.appwidget.AppWidgetManager
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.util.Size
@@ -18,6 +19,7 @@ import androidx.glance.ImageProvider
 import androidx.glance.action.actionStartActivity
 import androidx.glance.action.clickable
 import androidx.glance.appwidget.GlanceAppWidget
+import androidx.glance.appwidget.action.actionStartActivity
 import androidx.glance.appwidget.GlanceAppWidgetReceiver
 import androidx.glance.appwidget.cornerRadius
 import androidx.glance.appwidget.provideContent
@@ -54,11 +56,84 @@ import java.util.concurrent.TimeUnit
 import androidx.glance.color.ColorProvider as DayNight
 
 // The Memories home-screen widget: one photo from On this day (else a recent trip or a favourite) under its eyebrow and
-// title. It updates once a day, just after midnight, and opens Album when tapped.
+// title. It updates once a day, just after midnight, and plays that memory when tapped. Also what every widget and the On
+// this day notification share: the Library as they may show it, and the links into MainActivity.
 
-private const val WIDGET_THUMB_PX = 512 // bigger than a 2 x 2 widget on any phone; the full photo is never decoded
+internal const val WIDGET_THUMB_PX = 512 // bigger than a 2 x 2 widget on any phone; the full photo is never decoded
 private const val LOAD_MS = 20_000L // the Library and the index's towns; a widget left showing nothing beats a hung update
 private const val UPDATE_WORK = "memory-widget"
+
+// A memory opened from outside plays as many photos as one from For you (its STORY_LENGTH, private there)
+private const val STORY_PHOTOS = 20
+
+/** Whether Album may read photos: all of them, or those picked in Android 14's "Select photos". */
+internal fun canReadPhotos(context: Context) = listOf(READ_MEDIA_IMAGES, READ_MEDIA_VISUAL_USER_SELECTED).any {
+    context.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED
+}
+
+/**
+ * Every photo and video minus Hidden items, newest first, for work done while Album may not be open: the widgets and the
+ * On this day notification. Null without photo access, or when the Library doesn't load in time. Nothing in Hidden items
+ * ever reaches the home screen: no list until it's known which items are hidden. The Private safe's photos aren't in
+ * MediaStore at all.
+ */
+internal suspend fun visibleMedia(context: Context): List<Media>? {
+    if (!canReadPhotos(context)) return null
+    // The app may not be open: start the photo list and read the folders hidden from the Library, as the app does
+    AlbumPrefs.load(context)
+    withContext(Dispatchers.Main) { Gallery.start(context) }
+    val media = withTimeoutOrNull(LOAD_MS) { Gallery.media.filterNotNull().first() } ?: return null
+    val hidden = withTimeoutOrNull(LOAD_MS) { Hidden.state.filterNotNull().first() } ?: return null
+    return media.withoutHidden(hidden)
+}
+
+/** Each photo's town, by MediaStore id; empty when the smart index doesn't answer in time. */
+internal suspend fun placesNow(): Map<Long, Place> = placesById(withTimeoutOrNull(LOAD_MS) { Explore.places.filterNotNull().first() }.orEmpty())
+
+// ---------- Links into MainActivity ----------
+
+private const val OPEN_ALBUM = "com.aditya.album.OPEN_ALBUM"
+private const val PLAY_MEMORY = "com.aditya.album.PLAY_MEMORY"
+private const val EXTRA_ALBUM = "album"
+private const val EXTRA_IDS = "ids"
+private const val EXTRA_TITLE = "title"
+private const val EXTRA_EYEBROW = "eyebrow"
+
+// A tap while Album is open lands in it (onNewIntent) instead of stacking a second copy on top
+private const val LINK_FLAGS = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+
+/** What a widget or the On this day notification opens in MainActivity. */
+sealed interface AlbumLink {
+    /** An album page by album id: a folder, Favourites, a collection or a person. */
+    data class OpenAlbum(val albumId: Long) : AlbumLink
+
+    /** A memory playing as a story: its photos by MediaStore id, in playing order, under its title and eyebrow. */
+    data class PlayMemory(val ids: List<Long>, val title: String, val eyebrow: String) : AlbumLink
+}
+
+/**
+ * The link [intent] carries, or null for an ordinary launch. MainActivity is exported, so any app can send one: the ids
+ * are only looked up among what Album shows anyway, which leaves out Hidden items.
+ */
+fun linkOf(intent: Intent?): AlbumLink? = when (intent?.action) {
+    OPEN_ALBUM -> if (intent.hasExtra(EXTRA_ALBUM)) AlbumLink.OpenAlbum(intent.getLongExtra(EXTRA_ALBUM, 0)) else null
+    PLAY_MEMORY -> intent.getLongArrayExtra(EXTRA_IDS)?.takeIf { it.isNotEmpty() }?.let {
+        AlbumLink.PlayMemory(it.toList(), intent.getStringExtra(EXTRA_TITLE).orEmpty(), intent.getStringExtra(EXTRA_EYEBROW).orEmpty())
+    }
+    else -> null
+}
+
+/** Opens album [albumId] (see [AlbumLink.OpenAlbum]). */
+fun openAlbumIntent(context: Context, albumId: Long): Intent =
+    Intent(context, MainActivity::class.java).setAction(OPEN_ALBUM).putExtra(EXTRA_ALBUM, albumId).addFlags(LINK_FLAGS)
+
+/** Plays [memory] as For you does: up to [STORY_PHOTOS] of its photos, spread across it. */
+fun playMemoryIntent(context: Context, memory: Memory<Media>): Intent = Intent(context, MainActivity::class.java)
+    .setAction(PLAY_MEMORY)
+    .putExtra(EXTRA_IDS, spread(memory.items, STORY_PHOTOS).map { it.id }.toLongArray())
+    .putExtra(EXTRA_TITLE, memory.title)
+    .putExtra(EXTRA_EYEBROW, memory.eyebrow)
+    .addFlags(LINK_FLAGS)
 
 /**
  * The widget's photo and its memory: On this day, else the newest trip of the past year, else a favourite, a different
@@ -75,59 +150,52 @@ fun <T> widgetPick(photos: List<T>, today: LocalDate, dayOf: (T) -> Long, isFavo
     return Memory("Favourite · ${LocalDate.ofEpochDay(day).year}", dayRange(day, day), listOf(photo)) to photo
 }
 
-private class Shown(val eyebrow: String, val title: String, val photo: Bitmap)
+private class Shown(val eyebrow: String, val title: String, val photo: Bitmap, val open: Intent)
 
-private class WidgetColors(val surface: ColorProvider, val ink: ColorProvider, val inkMuted: ColorProvider)
+internal class WidgetColors(val surface: ColorProvider, val ink: ColorProvider, val inkMuted: ColorProvider)
+
+/** Album's own theme setting: System follows the phone's dark theme, the others stay as chosen. */
+internal fun widgetColors(context: Context): WidgetColors {
+    AppearancePrefs.load(context)
+    val theme = AppearancePrefs.appearance.value.theme
+    fun role(of: (AlbumColors) -> Color) = when (theme) {
+        ThemeMode.System -> DayNight(day = of(albumColors(ThemeMode.Light, Accent.Lime)), night = of(albumColors(ThemeMode.Dark, Accent.Lime)))
+        else -> ColorProvider(of(albumColors(theme, Accent.Lime)))
+    }
+    return WidgetColors(role { it.surface }, role { it.ink }, role { it.inkMuted })
+}
 
 class MemoryWidget : GlanceAppWidget() {
     companion object {
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
         /**
-         * Redraws the widget now, for when the photo it shows may have left the Library (moved to the safe, trashed).
-         * Cheap when no widget is placed: Glance has nothing to update.
+         * Redraws every Album widget now, this one and the photo widgets, for when a photo they show may have gone (moved to
+         * the safe, hidden, trashed). Cheap when none is placed: Glance has nothing to update.
          */
         fun refresh(context: Context) {
             val app = context.applicationContext
-            scope.launch { runCatching { MemoryWidget().updateAll(app) }.onFailure { CrashLog.note("memory widget refresh: $it") } }
+            scope.launch {
+                runCatching { MemoryWidget().updateAll(app) }.onFailure { CrashLog.note("memory widget refresh: $it") }
+                PhotoWidget.updateAll(app)
+            }
         }
     }
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
         val (shown, colors) = withContext(Dispatchers.IO) {
-            runCatching { load(context) }.onFailure { CrashLog.note("memory widget: $it") }.getOrNull() to colorsOf(context)
+            runCatching { load(context) }.onFailure { CrashLog.note("memory widget: $it") }.getOrNull() to widgetColors(context)
         }
         provideContent { Content(shown, colors) }
     }
 
     /** The memory to show, or null without photo access or anything to show. */
     private suspend fun load(context: Context): Shown? {
-        val granted = listOf(READ_MEDIA_IMAGES, READ_MEDIA_VISUAL_USER_SELECTED).any {
-            context.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED
-        }
-        if (!granted) return null
-        // The app may not be open: start the photo list and read the folders hidden from the Library, as the app does
-        AlbumPrefs.load(context)
-        withContext(Dispatchers.Main) { Gallery.start(context) }
-        val media = withTimeoutOrNull(LOAD_MS) { Gallery.media.filterNotNull().first() } ?: return null
-        // Nothing in Hidden items ever reaches the home screen: no photo until it's known which are hidden
-        val hidden = withTimeoutOrNull(LOAD_MS) { Hidden.state.filterNotNull().first() } ?: return null
-        val photos = media.inPhotos(AlbumPrefs.hidden.value).withoutHidden(hidden).filter { !it.isVideo }
-        val placeOf = placesById(withTimeoutOrNull(LOAD_MS) { Explore.places.filterNotNull().first() }.orEmpty())
+        val photos = visibleMedia(context)?.inPhotos(AlbumPrefs.hidden.value)?.filter { !it.isVideo } ?: return null
+        val placeOf = placesNow()
         val (memory, photo) = widgetPick(photos, LocalDate.now(), Media::day, Media::isFavorite) { placeOf[it.id] } ?: return null
         val thumb = context.contentResolver.loadThumbnail(photo.uri, Size(WIDGET_THUMB_PX, WIDGET_THUMB_PX), null)
-        return Shown(memory.eyebrow, memory.title, thumb)
-    }
-
-    /** Album's own theme setting: System follows the phone's dark theme, the others stay as chosen. */
-    private fun colorsOf(context: Context): WidgetColors {
-        AppearancePrefs.load(context)
-        val theme = AppearancePrefs.appearance.value.theme
-        fun role(of: (AlbumColors) -> Color) = when (theme) {
-            ThemeMode.System -> DayNight(day = of(albumColors(ThemeMode.Light, Accent.Lime)), night = of(albumColors(ThemeMode.Dark, Accent.Lime)))
-            else -> ColorProvider(of(albumColors(theme, Accent.Lime)))
-        }
-        return WidgetColors(role { it.surface }, role { it.ink }, role { it.inkMuted })
+        return Shown(memory.eyebrow, memory.title, thumb, playMemoryIntent(context, memory))
     }
 
     @Composable
@@ -135,7 +203,7 @@ class MemoryWidget : GlanceAppWidget() {
         val card = GlanceModifier.fillMaxSize()
             .cornerRadius(android.R.dimen.system_app_widget_background_radius)
             .background(colors.surface)
-            .clickable(actionStartActivity<MainActivity>())
+            .clickable(if (shown == null) actionStartActivity<MainActivity>() else actionStartActivity(shown.open))
         if (shown == null) {
             Column(card.padding(16.dp), verticalAlignment = Alignment.Bottom) {
                 Text("Memories", style = TextStyle(colors.ink, fontSize = 17.sp, fontWeight = FontWeight.Medium))

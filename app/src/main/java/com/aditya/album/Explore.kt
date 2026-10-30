@@ -103,7 +103,7 @@ object Explore {
     // Places and things organise the Library, so folders hidden from it stay out of them too, as in the calendar and search.
     // Places and things organise the Library, so folders hidden from it stay out of them too, as in the calendar and
     // search, and so does everything in Hidden items
-    private val photos = combine(Gallery.media.filterNotNull(), AlbumPrefs.hidden, Hidden.state.filterNotNull()) { media, hidden, h ->
+    val photos = combine(Gallery.media.filterNotNull(), AlbumPrefs.hidden, Hidden.state.filterNotNull()) { media, hidden, h ->
         media.inPhotos(hidden).withoutHidden(h)
     }
 
@@ -137,6 +137,7 @@ class SmartAlbum(val title: String, val items: List<Media>, val emptyText: Strin
 /** The thing or place behind album id [id] with its photos. Null for other ids, and while places and things are loading. */
 @Composable
 fun rememberSmartAlbum(id: Long): SmartAlbum? {
+    if (isMapAreaId(id)) return rememberMapArea(id)
     if (thingOf(id) == null && !isPlaceId(id)) return null // a folder, Special or collection: leaves the index alone
     val things = Explore.things.collectAsState().value
     val places = Explore.places.collectAsState().value
@@ -152,15 +153,15 @@ fun rememberSmartAlbum(id: Long): SmartAlbum? {
     }
 }
 
-/** Every city, in a section per state (see placeSections): Collections' "See all", pushed over the tabs. */
+/** Every city, in a section per state (see placeSections): Collections' "See all", pushed over the tabs. Map opens [onMap]. */
 @Composable
-fun PlacesScreen(state: LazyGridState, onBack: () -> Unit, onOpen: (Long) -> Unit) {
+fun PlacesScreen(state: LazyGridState, onBack: () -> Unit, onOpen: (Long) -> Unit, onMap: () -> Unit) {
     val places = Explore.places.collectAsState().value
     val sections = remember(places) { placeSections(places.orEmpty()) }
     val names = remember(places) { placeNames(places.orEmpty().map { it.key }) }
     val countries = remember(sections) { sections.distinctBy { it.countryCode }.size }
     val subtitle = places?.let { "${counted(it.size, "place", "places")} · ${counted(countries, "country", "countries")}" }
-    PushedGridPage("Places", subtitle, state, onBack) {
+    PushedGridPage("Places", subtitle, state, onBack, actions = { if (places?.isNotEmpty() == true) AlbumIconButton(Sym.Map, "Map", onMap) }) {
         if (places?.isEmpty() == true) fullRow("empty") { EmptyState(Sym.LocationOn, "No places yet", "Places appear for photos with a location.") }
         sections.forEach { section ->
             fullRow("section ${section.countryCode}/${section.title}") { SectionHead(section.title) } // titles are one per country

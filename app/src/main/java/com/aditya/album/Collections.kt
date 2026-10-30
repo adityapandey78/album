@@ -23,6 +23,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 /**
@@ -67,6 +72,9 @@ data class CollectionAlbum(val collection: MediaCollection, val items: List<Medi
     val albumId get() = albumIdOf(collection.id)
     val name get() = collection.name
 }
+
+/** Album groups, their albums and chosen covers, as collections.db has them. */
+class Organisation(val groups: List<AlbumGroup>, val members: List<GroupMember>, val covers: List<AlbumCover>)
 
 /** The user's collections, kept in their own database (collections.db) because, unlike the smart index, they can't be rebuilt. */
 object Collections {
@@ -119,6 +127,55 @@ object Collections {
         scope.launch { safely { dao.delete(id) } }
     }
 
+    // ---------- Album groups and covers. Writes return once saved. ----------
+    // A deleted group's pin stays in AlbumPrefs: group ids are never reused, and Undo brings the group back pinned.
+
+    /** Groups, who's in them and chosen covers. Null until first read, so albums never jump into their groups on screen. */
+    val organisation: StateFlow<Organisation?> by lazy {
+        combine(dao.groups(), dao.members(), dao.covers(), ::Organisation)
+            .catch { e ->
+                CrashLog.note("organisation read failed: $e")
+                emit(Organisation(emptyList(), emptyList(), emptyList())) // albums still show, just ungrouped
+            }
+            .stateIn(scope, SharingStarted.Eagerly, null)
+    }
+
+    /** A new group called [name] holding album [key]. */
+    suspend fun newGroup(name: String, key: String): GroupMove = write { it.newGroup(name.trim(), key, System.currentTimeMillis()) }
+
+    /** Moves album [key] into group [id], or out of its group when [id] is null. */
+    suspend fun moveToGroup(key: String, id: Long?): GroupMove = write { it.moveToGroup(key, id, System.currentTimeMillis()) }
+
+    /** Undo for [newGroup] and [moveToGroup]. */
+    suspend fun moveBack(key: String, move: GroupMove) = write { it.moveBack(key, move.before) }
+
+    fun renameGroup(id: Long, name: String) {
+        scope.launch { safely { dao.renameGroup(id, name.trim()) } }
+    }
+
+    /** Deletes group [id] (never its albums) and returns it as it was, for [undoUngroup]. */
+    suspend fun ungroup(id: Long): GroupSnapshot? = write { it.ungroup(id) }
+
+    suspend fun undoUngroup(snapshot: GroupSnapshot) = write { it.undoUngroup(snapshot) }
+
+    /** [mediaId] becomes the cover of the album, collection or group with [key]; null hands the choice back to Album. */
+    suspend fun setCover(key: String, mediaId: Long?) = write { dao -> if (mediaId == null) dao.dropCover(key) else dao.putCover(AlbumCover(key, mediaId)) }
+
+    /** A renamed folder keeps its group and cover ([old] and [new] are [folderKey]s). */
+    suspend fun rekey(old: String, new: String) = write { it.rekey(old, new) }
+
+    // ---------- Dates and places the user fixed (see FixDetails.kt) ----------
+
+    val fixes by lazy { dao.fixes() }
+
+    suspend fun allFixes(): List<MediaFix> = write { it.allFixes() }
+
+    suspend fun fixesOf(ids: List<Long>): List<MediaFix> = write { it.fixesBefore(ids) }
+
+    suspend fun putFixes(fixes: List<MediaFix>) = write { it.putFixes(fixes) }
+
+    /** Undo: the rows of [ids] become [before] again. */
+    suspend fun restoreFixes(ids: List<Long>, before: List<MediaFix>) = write { it.restoreFixes(ids, before) }
 }
 
 private const val COULDNT_SAVE = "Couldn't save that change to your collections"
@@ -176,11 +233,20 @@ fun rememberRemoveFromCollection(snackbar: SnackbarHostState): (CollectionAlbum,
 }
 
 /**
- * Long-press sheet of a collection in Collections: pin, rename or delete it. Deleting asks first; the photos are never
- * touched. [onDismiss] runs when it's finished, whichever way.
+ * Long-press sheet of a collection in Collections: pin, rename, change cover ([onCover]), its group ([group] names the one
+ * it's in; [onGroup] picks) or delete it. Deleting asks first; the photos are never touched. [onDismiss] runs when it's
+ * finished, whichever way.
  */
 @Composable
-fun CollectionSheet(c: CollectionAlbum, all: List<CollectionAlbum>, pinned: Boolean, onDismiss: () -> Unit) {
+fun CollectionSheet(
+    c: CollectionAlbum,
+    all: List<CollectionAlbum>,
+    pinned: Boolean,
+    group: String?,
+    onCover: () -> Unit,
+    onGroup: () -> Unit,
+    onDismiss: () -> Unit,
+) {
     var step by rememberSaveable { mutableStateOf(CollectionStep.Menu) }
     val id = c.collection.id
     when (step) {
@@ -191,6 +257,8 @@ fun CollectionSheet(c: CollectionAlbum, all: List<CollectionAlbum>, pinned: Bool
                 onDismiss()
             }, sub = "Pinned albums come first".takeIf { !pinned }, trailing = null)
             MenuRow(Sym.Edit, "Rename", { step = CollectionStep.Rename }, trailing = null)
+            MenuRow(Sym.Image, "Change cover", onCover, trailing = null)
+            GroupRow(group, onGroup)
             MenuRow(Sym.Delete, "Delete collection", { step = CollectionStep.Delete }, sub = "Its photos stay on your phone", trailing = null, danger = true)
         }
         CollectionStep.Rename -> CollectionNameSheet("Rename collection", c.name, "Rename", all.filter { it !== c }.map { it.name }, onDismiss) { name ->
@@ -224,12 +292,14 @@ fun AddToCollectionSheet(count: Int, collections: List<CollectionAlbum>, onPick:
         CollectionNameSheet("New collection", "", "Create", collections.map { it.name }, onDismiss) { onPick(null, it) }
         return
     }
+    val covers = Collections.organisation.collectAsState().value?.covers
+    val chosen = remember(covers) { covers.orEmpty().associate { it.albumKey to it.mediaId } }
     Sheet(onDismiss, "Add ${itemCount(count)} to") {
         LazyColumn {
             item(key = "new") { MenuRow(Sym.LibraryAdd, "New collection", { naming = true }, sub = "Photos stay where they are, without copies", trailing = null) }
             items(collections, key = { it.albumId }) { c ->
                 CoverRow(c.name, itemCount(c.items.size), { onPick(c.collection.id, c.name) }) {
-                    val cover = c.items.firstOrNull()
+                    val cover = pickCover(chosen[collectionKey(c.collection.id)], { id -> c.items.find { it.id == id } }, { true }, c.items.firstOrNull())
                     if (cover != null) Thumbnail(cover, Modifier.matchParentSize()) else Icon(Sym.CollectionsBookmark, null, tint = AlbumTheme.colors.inkMuted)
                 }
             }

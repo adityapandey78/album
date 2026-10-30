@@ -232,10 +232,10 @@ fun sha256(input: InputStream): ByteArray {
 
 fun ByteArray.hex() = joinToString("") { "%02x".format(it) }
 
-/** Where a photo or video leaving the safe goes: back to its folder if MediaStore still allows it there, else Pictures/Restored. */
-fun restorePath(path: String, isVideo: Boolean): String {
+/** The folder a photo or video leaving the safe goes back to, or null if MediaStore no longer allows it there (then: Restored where Album saves). */
+fun restorePath(path: String, isVideo: Boolean): String? {
     val folder = if (path.isEmpty() || path.endsWith('/')) path else "$path/"
-    return if (folder.isNotEmpty() && canHold(folder, isVideo)) folder else "Pictures/Restored/"
+    return folder.takeIf { it.isNotEmpty() && canHold(it, isVideo) }
 }
 
 /** What the safe keeps about [m]: enough to show it, and to put it back where it was with its date and favourite. */
@@ -700,7 +700,7 @@ object Safe {
         for (item in items) {
             if (stopping) break
             progress.value = Progress(++tried, items.size, inSafe = true)
-            if (restore(context.contentResolver, item, key)) moved++
+            if (restore(context, item, key)) moved++
         }
         movedOutMessage(moved, tried - moved)
     }
@@ -825,19 +825,18 @@ object Safe {
      * hash taken when it went in. Only then is it published and the safe copy deleted; if anything fails the new file is
      * removed and the safe copy stays.
      */
-    private suspend fun restore(resolver: ContentResolver, item: SafeItem, key: ByteArray): Boolean {
+    private suspend fun restore(context: Context, item: SafeItem, key: ByteArray): Boolean {
+        val resolver = context.contentResolver
+        // The safe never noted which storage a photo came from, so going back to its folder means the phone's
+        val to = restorePath(item.path, item.isVideo)?.let { SaveLocation(folder = it) } ?: SavePrefs.target(context).inside("Restored")
         val values = ContentValues().apply {
             put(MediaColumns.DISPLAY_NAME, item.name)
-            put(MediaColumns.RELATIVE_PATH, restorePath(item.path, item.isVideo))
+            put(MediaColumns.RELATIVE_PATH, to.folder)
             put(MediaColumns.MIME_TYPE, item.mime)
             put(MediaColumns.DATE_TAKEN, item.taken)
             put(MediaColumns.IS_PENDING, 1)
         }
-        val collection = if (item.isVideo) {
-            MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        } else {
-            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        }
+        val collection = if (item.isVideo) MediaStore.Video.Media.getContentUri(to.volume) else MediaStore.Images.Media.getContentUri(to.volume)
         var uri: Uri? = null
         return try {
             uri = checkNotNull(resolver.insert(collection, values))

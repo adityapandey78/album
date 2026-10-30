@@ -44,6 +44,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.TextSelectionColors
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.TextFieldColors
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -87,9 +88,10 @@ private const val PLACES_IN_ROW = 12
 private val ROW_CARD = 96.dp
 
 /**
- * A card in the Albums section: a folder on the phone ([folder]) or a collection ([collection], a virtual album whose
- * photos stay where they are). [id] is its album id, unique across both, so it doubles as the lazy key. [key] is what
- * pins are saved under, and [recent] (epoch millis) orders the Default and Recently updated sorts.
+ * A card in the Albums section: a folder on the phone ([folder]), a collection ([collection], a virtual album whose
+ * photos stay where they are) or a group of those ([group]). [id] is its album id, unique across all three, so it doubles
+ * as the lazy key. [key] is what pins, groups and covers are saved under, and [recent] (epoch millis) orders the Default
+ * and Recently updated sorts. [cover] is the photo on its card (see [pickCover]).
  */
 class AlbumEntry(
     val id: Long,
@@ -100,13 +102,15 @@ class AlbumEntry(
     val camera: Boolean = false,
     val folder: Album? = null,
     val collection: CollectionAlbum? = null,
+    val group: GroupAlbum? = null,
+    val cover: Media? = folder?.cover ?: collection?.items?.firstOrNull(),
 )
 
 // A folder's recency is its newest photo, a collection's its last edit: each is the last time that album changed for you
-fun folderEntry(a: Album) = AlbumEntry(a.id, a.key, a.name, a.count, a.cover.taken, camera = a.name == "Camera", folder = a)
+fun folderEntry(a: Album, cover: Media = a.cover) = AlbumEntry(a.id, a.key, a.name, a.count, a.cover.taken, camera = a.name == "Camera", folder = a, cover = cover)
 
-fun collectionEntry(c: CollectionAlbum) =
-    AlbumEntry(c.albumId, collectionKey(c.collection.id), c.name, c.items.size, c.collection.updated, collection = c)
+fun collectionEntry(c: CollectionAlbum, cover: Media? = c.items.firstOrNull()) =
+    AlbumEntry(c.albumId, collectionKey(c.collection.id), c.name, c.items.size, c.collection.updated, collection = c, cover = cover)
 
 /**
  * Folders and collections as one list: pinned first, then [sort]. Default is albumsOf's order applied to both kinds:
@@ -125,41 +129,40 @@ fun collectionsSubtitle(albums: Int, people: Int, places: Int) =
     "${counted(albums, "album", "albums")} · ${counted(people, "person", "people")} · ${counted(places, "place", "places")}"
 
 /**
- * The Collections tab: the top albums (folders and collections together), utilities, people, places and things, with
- * Recently deleted, Private safe and Hidden items last. Every card opens through [onOpen] with an album id; [onAllAlbums]
- * opens the rest when there are more than fit. [contentPadding] already clears the status bar and the floating bottom
- * bar. Long-pressing a folder's card offers [onAction] (and Hide album, handled here); a collection's card handles its own.
+ * The Collections tab: the top albums (folders, collections and groups of them together), utilities, people, places and
+ * things, with Recently deleted, Private safe and Hidden items last. Every card opens through [onOpen] with an album id,
+ * a group's through [onOpenGroup] with its group id; [onAllAlbums] opens the rest when there are more than fit.
+ * [contentPadding] already clears the status bar and the floating bottom bar. [media] is every item Album shows, for
+ * covers. Long-pressing a card opens its sheet; folder actions go through [actions].
  */
 @Composable
 fun CollectionsScreen(
     albums: List<Album>,
     specialCounts: Map<Special, Int>,
     collections: List<CollectionAlbum>,
+    media: List<Media>,
+    actions: AlbumActions,
     state: LazyGridState,
     contentPadding: PaddingValues,
     onOpen: (Long) -> Unit,
+    onOpenGroup: (Long) -> Unit,
     onAllAlbums: () -> Unit,
     onAllPlaces: () -> Unit,
     onAllPeople: () -> Unit,
     onReviewPeople: () -> Unit,
     onOpenSafe: () -> Unit,
     onOpenHidden: () -> Unit,
-    onAction: (Album, AlbumAction) -> Unit,
-    onNewAlbum: () -> Unit,
     onSettings: () -> Unit,
 ) {
     val spec = AlbumTheme.spec
-    val onHide = rememberHideAlbum()
     val places = Explore.places.collectAsState().value
     val things = Explore.things.collectAsState().value
     val everyone by People.albums.collectAsState()
     val scanning by People.progress.collectAsState()
     val pinned by AlbumPrefs.pinned.collectAsState()
     val hidden by AlbumPrefs.hidden.collectAsState()
-    val sort by AlbumPrefs.sort.collectAsState()
-    val entries = remember(albums, collections, sort, pinned) {
-        albumEntries(albums.map(::folderEntry) + collections.map(::collectionEntry), sort, pinned)
-    }
+    val view = rememberAlbumsView(albums, collections, media)
+    val entries = view.top
     val shown = remember(entries) { albumsInSection(entries) }
     val people = remember(everyone) { shownPeople(everyone) }
     val reviews by remember { People.review }.collectAsState(emptyList())
@@ -189,8 +192,9 @@ fun CollectionsScreen(
         horizontalArrangement = Arrangement.spacedBy(Space.s3),
     ) {
         fullRow("top") {
-            LargeTopBar("Collections", subtitle = collectionsSubtitle(entries.size, people.size, places.orEmpty().size)) {
-                AlbumIconButton(Sym.Add, "New album", onNewAlbum)
+            // Counts albums, not groups: a group is a way of keeping them, not another album
+            LargeTopBar("Collections", subtitle = collectionsSubtitle(albums.size + collections.size, people.size, places.orEmpty().size)) {
+                AlbumIconButton(Sym.Add, "New album", actions::newAlbum)
                 AlbumIconButton(Sym.Settings, "Settings", onSettings)
             }
         }
@@ -208,7 +212,7 @@ fun CollectionsScreen(
                 SectionHead("Albums", action = "Sort", onAction = { sorting = true })
             }
         }
-        albumCards(shown, pinned, hidden, onOpen) { menu = it }
+        albumCards(shown, pinned, hidden, onOpen, onOpenGroup) { menu = it }
 
         fullRow("utilities") {
             Column(Modifier.padding(horizontal = Space.s4), verticalArrangement = Arrangement.spacedBy(Space.s2)) {
@@ -293,7 +297,7 @@ fun CollectionsScreen(
         }
     }
 
-    menu?.let { AlbumEntrySheet(it, collections, pinned, hidden, onAction, onHide) { menu = null } }
+    menu?.let { AlbumEntrySheet(it, view, collections, media, pinned, hidden, actions) { menu = null } }
     if (sorting) AlbumSortSheet { sorting = false }
 }
 
@@ -306,103 +310,136 @@ private fun rememberHideAlbum(): (Album) -> Unit {
 }
 
 /**
- * Every album, folders and collections together, in the chosen order with pinned ones first: the page the Albums
- * section's See all opens. Draws its own background, insets and Back. Long-pressing a folder's card offers [onAction];
- * a collection's card handles its own.
+ * Every album, folders and collections together with groups of them, in the chosen order with pinned ones first: the
+ * page the Albums section's See all opens. Draws its own background, insets and Back. Long-pressing a card opens its sheet.
  */
 @Composable
 fun AllAlbumsScreen(
     albums: List<Album>,
     collections: List<CollectionAlbum>,
+    media: List<Media>,
+    actions: AlbumActions,
     state: LazyGridState,
     onBack: () -> Unit,
     onOpen: (Long) -> Unit,
-    onAction: (Album, AlbumAction) -> Unit,
-    onNewAlbum: () -> Unit,
+    onOpenGroup: (Long) -> Unit,
 ) {
     val pinned by AlbumPrefs.pinned.collectAsState()
     val hidden by AlbumPrefs.hidden.collectAsState()
     val sort by AlbumPrefs.sort.collectAsState()
-    val entries = remember(albums, collections, sort, pinned) {
-        albumEntries(albums.map(::folderEntry) + collections.map(::collectionEntry), sort, pinned)
-    }
+    val view = rememberAlbumsView(albums, collections, media)
     var menu by remember { mutableStateOf<AlbumEntry?>(null) }
     var sorting by rememberSaveable { mutableStateOf(false) }
-    val onHide = rememberHideAlbum()
 
-    PushedGridPage("Albums", counted(entries.size, "album", "albums"), state, onBack, actions = {
-        AlbumIconButton(Sym.Add, "New album", onNewAlbum)
+    PushedGridPage("Albums", counted(albums.size + collections.size, "album", "albums"), state, onBack, actions = {
+        AlbumIconButton(Sym.Add, "New album", actions::newAlbum)
     }) {
         // The heading names the order in use, so the Sort link beside it explains itself
         fullRow("sort") { SectionHead(sort.order, action = "Sort", onAction = { sorting = true }) }
-        albumCards(entries, pinned, hidden, onOpen) { menu = it }
+        albumCards(view.top, pinned, hidden, onOpen, onOpenGroup) { menu = it }
     }
 
-    menu?.let { AlbumEntrySheet(it, collections, pinned, hidden, onAction, onHide) { menu = null } }
+    menu?.let { AlbumEntrySheet(it, view, collections, media, pinned, hidden, actions) { menu = null } }
     if (sorting) AlbumSortSheet { sorting = false }
 }
 
-/** A card for each of [entries]: its cover, name and count. Long-press hands the entry to [onMenu]. */
-private fun LazyGridScope.albumCards(
+/** A card for each of [entries]: its cover, name and count, or a group's album count. Long-press hands the entry to [onMenu]. */
+internal fun LazyGridScope.albumCards(
     entries: List<AlbumEntry>,
     pinned: Set<String>,
     hidden: Set<String>,
     onOpen: (Long) -> Unit,
+    onOpenGroup: (Long) -> Unit,
     onMenu: (AlbumEntry) -> Unit,
 ) = items(entries, key = { it.id }) { e ->
     val folder = e.folder
+    val group = e.group
     val isHidden = folder != null && folder.key in hidden
     AlbumCard(
         name = e.name,
-        meta = listOf("%,d".format(e.count) + (if (isHidden) " · Hidden" else "")),
+        // A group shows how many albums it holds: the word "albums" is what tells it from an album at a glance
+        meta = listOf(if (group != null) counted(group.albums.size, "album", "albums") else "%,d".format(e.count) + (if (isHidden) " · Hidden" else "")),
         description = buildString {
-            append("${e.name}, ${itemCount(e.count)}")
-            if (folder == null) append(", collection")
+            if (group != null) append("${e.name}, group of ${counted(group.albums.size, "album", "albums")}") else append("${e.name}, ${itemCount(e.count)}")
+            if (e.collection != null) append(", collection")
             if (e.key in pinned) append(", pinned")
             if (isHidden) append(", hidden from Library")
         },
         onClick = {
-            CrashLog.note(if (folder != null) "open folder" else "open collection")
-            onOpen(e.id)
+            CrashLog.note(if (folder != null) "open folder" else if (group != null) "open group" else "open collection")
+            if (group != null) onOpenGroup(group.id) else onOpen(e.id)
         },
         modifier = Modifier.padding(bottom = Space.s4),
         onLongClick = { onMenu(e) },
     ) {
-        val cover = folder?.cover ?: e.collection?.items?.firstOrNull()
-        if (cover != null) Thumbnail(cover, Modifier.matchParentSize()) else Icon(Sym.CollectionsBookmark, null, tint = AlbumTheme.colors.inkMuted)
+        EntryCover(e)
         if (e.key in pinned) Badge("Pinned", Modifier.align(Alignment.TopStart).padding(Space.s2), BadgeTone.Photo, Sym.PushPin)
     }
 }
 
-/** The long-press sheet of an album card: a folder's own, or a collection's. */
+private enum class EntryStep { Menu, Cover, Group }
+
+/**
+ * The long-press sheet of an album card: a folder's own, a collection's or a group's. Change cover and the group row open
+ * their own sheets in place of this one. [view] is the albums as grouped on screen; [media] every item Album shows.
+ */
 @Composable
-private fun AlbumEntrySheet(
+internal fun AlbumEntrySheet(
     entry: AlbumEntry,
+    view: AlbumsView,
     collections: List<CollectionAlbum>,
+    media: List<Media>,
     pinned: Set<String>,
     hidden: Set<String>,
-    onAction: (Album, AlbumAction) -> Unit,
-    onHide: (Album) -> Unit,
+    actions: AlbumActions,
     onDismiss: () -> Unit,
 ) {
-    entry.folder?.let {
-        AlbumSheet(it, it.key in pinned, it.key in hidden, onDismiss, onHide = {
-            onDismiss()
-            onHide(it)
-        }) { action -> onDismiss(); onAction(it, action) }
+    val onHide = rememberHideAlbum()
+    var step by rememberSaveable { mutableStateOf(EntryStep.Menu) }
+    val group = view.groupOf(entry.key)?.name
+    when (step) {
+        EntryStep.Menu -> {
+            entry.folder?.let {
+                AlbumSheet(
+                    it, it.key in pinned, it.key in hidden, group, onDismiss,
+                    onHide = {
+                        onDismiss()
+                        onHide(it)
+                    },
+                    onCover = { step = EntryStep.Cover },
+                    onGroup = { step = EntryStep.Group },
+                ) { action -> onDismiss(); actions.onAlbum(it, action) }
+            }
+            entry.collection?.let { CollectionSheet(it, collections, entry.key in pinned, group, { step = EntryStep.Cover }, { step = EntryStep.Group }, onDismiss) }
+            if (entry.group != null) GroupSheet(entry, view, media, actions, entry.key in pinned, onDismiss)
+        }
+        EntryStep.Cover -> AlbumCoverSheet(entry, media, onDismiss)
+        EntryStep.Group -> GroupPicker(entry, view, onDismiss)
     }
-    entry.collection?.let { CollectionSheet(it, collections, entry.key in pinned, onDismiss) }
 }
 
 /**
- * Long-press sheet of a folder album: pin, rename, hide from the Library (a tidier timeline; the album stays here), Hide
- * album (it and its photos go to Hidden items, behind the privacy PIN), delete.
+ * Long-press sheet of a folder album: pin, rename, change cover, its group ([group] names the one it's in), hide from the
+ * Library (a tidier timeline; the album stays here), Hide album (it and its photos go to Hidden items, behind the privacy
+ * PIN), delete.
  */
 @Composable
-private fun AlbumSheet(album: Album, pinned: Boolean, hidden: Boolean, onDismiss: () -> Unit, onHide: () -> Unit, onAction: (AlbumAction) -> Unit) {
+private fun AlbumSheet(
+    album: Album,
+    pinned: Boolean,
+    hidden: Boolean,
+    group: String?,
+    onDismiss: () -> Unit,
+    onHide: () -> Unit,
+    onCover: () -> Unit,
+    onGroup: () -> Unit,
+    onAction: (AlbumAction) -> Unit,
+) {
     Sheet(onDismiss, album.name) {
         MenuRow(Sym.PushPin, if (pinned) "Unpin" else "Pin", { onAction(AlbumAction.Pin) }, sub = "Pinned albums come first".takeIf { !pinned }, trailing = null)
         MenuRow(Sym.Edit, "Rename", { onAction(AlbumAction.Rename) }, trailing = null)
+        MenuRow(Sym.Image, "Change cover", onCover, trailing = null)
+        GroupRow(group, onGroup)
         MenuRow(
             if (hidden) Sym.Visibility else Sym.VisibilityOff,
             if (hidden) "Show in Library" else "Hide from Library",
@@ -413,6 +450,12 @@ private fun AlbumSheet(album: Album, pinned: Boolean, hidden: Boolean, onDismiss
         MenuRow(Sym.Lock, "Hide album", onHide, sub = "It and its photos show only in Hidden items", trailing = null)
         MenuRow(Sym.Delete, "Delete", { onAction(AlbumAction.Delete) }, sub = "Moves its ${itemCount(album.count)} to Trash", trailing = null, danger = true)
     }
+}
+
+/** The sheet row that opens [GroupPicker]: "Add to group", or "Change group" with the one it's in now. */
+@Composable
+fun GroupRow(group: String?, onClick: () -> Unit) {
+    MenuRow(Sym.Folder, if (group == null) "Add to group" else "Change group", onClick, sub = group?.let { "In $it" } ?: "Keep albums together, like Trips", trailing = null)
 }
 
 private class Utility(val sym: Sym, val title: String, val count: Int, val albumId: Long)
@@ -527,7 +570,6 @@ fun NameSheet(
     capitalization: KeyboardCapitalization = KeyboardCapitalization.Sentences,
     extra: @Composable ColumnScope.() -> Unit = {},
 ) {
-    val c = AlbumTheme.colors
     val focus = remember { FocusRequester() }
     Sheet(onDismiss, title) {
         Column(verticalArrangement = Arrangement.spacedBy(Space.s4)) {
@@ -543,16 +585,7 @@ fun NameSheet(
                 shape = RoundedCornerShape(Space.radiusMd),
                 keyboardOptions = KeyboardOptions(capitalization = capitalization, imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = { if (enabled) onConfirm() }),
-                // The design's field: surface-high with a line-strong edge, ink text, danger for problems
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = c.ink, unfocusedTextColor = c.ink, errorTextColor = c.ink,
-                    focusedContainerColor = c.surfaceHigh, unfocusedContainerColor = c.surfaceHigh, errorContainerColor = c.surfaceHigh,
-                    cursorColor = c.ink, errorCursorColor = c.danger,
-                    selectionColors = TextSelectionColors(handleColor = c.flashInk, backgroundColor = c.flashSoft),
-                    focusedBorderColor = c.ink, unfocusedBorderColor = c.lineStrong, errorBorderColor = c.danger,
-                    focusedLabelColor = c.inkMuted, unfocusedLabelColor = c.inkMuted, errorLabelColor = c.danger,
-                    focusedSupportingTextColor = c.inkMuted, unfocusedSupportingTextColor = c.inkMuted, errorSupportingTextColor = c.danger,
-                ),
+                colors = albumFieldColors(),
             )
             extra()
             Row(horizontalArrangement = Arrangement.spacedBy(Space.s2)) {
@@ -562,6 +595,22 @@ fun NameSheet(
         }
         LaunchedEffect(focus) { focus.requestFocus() }
     }
+}
+
+/** The design's text field: surface-high with a line-strong edge, ink text, danger for problems. */
+@Composable
+fun albumFieldColors(): TextFieldColors {
+    val c = AlbumTheme.colors
+    return OutlinedTextFieldDefaults.colors(
+        focusedTextColor = c.ink, unfocusedTextColor = c.ink, errorTextColor = c.ink,
+        focusedContainerColor = c.surfaceHigh, unfocusedContainerColor = c.surfaceHigh, errorContainerColor = c.surfaceHigh,
+        cursorColor = c.ink, errorCursorColor = c.danger,
+        selectionColors = TextSelectionColors(handleColor = c.flashInk, backgroundColor = c.flashSoft),
+        focusedBorderColor = c.ink, unfocusedBorderColor = c.lineStrong, errorBorderColor = c.danger,
+        focusedLabelColor = c.inkMuted, unfocusedLabelColor = c.inkMuted, errorLabelColor = c.danger,
+        focusedSupportingTextColor = c.inkMuted, unfocusedSupportingTextColor = c.inkMuted, errorSupportingTextColor = c.danger,
+        focusedPlaceholderColor = c.inkMuted, unfocusedPlaceholderColor = c.inkMuted,
+    )
 }
 
 /**

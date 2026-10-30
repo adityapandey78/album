@@ -25,6 +25,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- Private safe: asks for the fingerprint (or the screen lock) through Android's own prompt before it opens. -->
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <!-- On this day (Settings, off by default): at most one quiet notification a day. Android 13+ asks before any. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Added by WorkManager and ML Kit's telemetry; nothing here watches the network (no network constraints, telemetry cut below). -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" tools:node="remove" />
 
@@ -38,6 +40,14 @@
             <action android:name="android.intent.action.EDIT" />
             <data android:mimeType="video/*" />
         </intent>
+        <!-- Clean up, For you and Storage show the launcher icon of the app a folder belongs to (MediaApp in StorageScreen.kt). -->
+        <package android:name="com.whatsapp" />
+        <package android:name="com.whatsapp.w4b" />
+        <package android:name="org.telegram.messenger" />
+        <package android:name="com.instagram.android" />
+        <package android:name="com.snapchat.android" />
+        <package android:name="com.facebook.orca" />
+        <package android:name="com.facebook.katana" />
     </queries>
 
     <application
@@ -68,6 +78,18 @@
             android:foregroundServiceType="mediaProcessing|dataSync"
             tools:node="merge" />
 
+        <!-- Share as ZIP: the app picked in the share sheet reads the ZIP from Album's cache through this, with a one-off grant.
+             Not exported; nothing else in Album's storage is reachable through it (res/xml/zip_paths.xml). -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.zip"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/zip_paths" />
+        </provider>
+
         <receiver
             android:name=".InstallResultReceiver"
             android:exported="false" />
@@ -85,14 +107,74 @@
                 android:resource="@xml/memory_widget" />
         </receiver>
 
+        <!-- The Person, Album and Favourites widgets (Widgets.kt), exported like the Memories widget. Their labels are
+             the names in the launcher's widget list. -->
+        <receiver
+            android:name=".PersonWidgetReceiver"
+            android:exported="true"
+            android:label="Person">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/person_widget" />
+        </receiver>
+        <receiver
+            android:name=".AlbumWidgetReceiver"
+            android:exported="true"
+            android:label="Album">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/album_widget" />
+        </receiver>
+        <receiver
+            android:name=".FavouritesWidgetReceiver"
+            android:exported="true"
+            android:label="Favourites">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/favourites_widget" />
+        </receiver>
+
+        <!-- Choosing who or what a Person or Album widget shows. Exported because the launcher opens it as a widget is
+             placed; its own task, so it never brings Album's screens along or stays in Recents. -->
+        <activity
+            android:name=".WidgetConfigureActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:taskAffinity="">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_CONFIGURE" />
+            </intent-filter>
+        </activity>
+
+        <!-- Backup: a drive plugged in starts an automatic backup, or carries on one that unplugging it stopped. The
+             media-mounted broadcast needs no permission and reaches Album while it isn't running. Exported because
+             Android sends it; a fake one from another app only makes Album look for its drive. -->
+        <receiver
+            android:name=".BackupMountReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_MOUNTED" />
+                <data android:scheme="file" />
+            </intent-filter>
+        </receiver>
+
         <!-- adjustResize: the keyboard is an inset Compose pads for (search sits at the bottom), not a pan of the window -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:windowSoftInputMode="adjustResize" />
 
-        <!-- The home-screen entries: one per accent, so the icon's sun can follow it. LauncherIcon keeps exactly one
-             enabled; lime until the accent says otherwise. -->
+        <!-- The home-screen entries: one per accent, so the icon's sun can follow it, and one per disguise (below).
+             LauncherIcon keeps exactly one enabled; lime until the accent or a disguise says otherwise. -->
         <activity-alias
             android:name=".IconLime"
             android:enabled="true"
@@ -153,6 +235,105 @@
             android:enabled="false"
             android:exported="true"
             android:icon="@mipmap/ic_launcher_wallpaper"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- The disguises (Disguise.kt): Album's entry under the name and icon of an app found on most work phones, so it
+             isn't seen as a gallery. The label is also what recent apps show. Labels match Disguise.label (DisguiseTest). -->
+        <activity-alias
+            android:name=".DisguiseCalculator"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_disguise_calculator"
+            android:label="Calculator"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name=".DisguiseClock"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_disguise_clock"
+            android:label="Clock"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name=".DisguiseCompass"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_disguise_compass"
+            android:label="Compass"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name=".DisguiseNotes"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_disguise_notes"
+            android:label="Notes"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name=".DisguiseFiles"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_disguise_files"
+            android:label="Files"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name=".DisguiseScanner"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_disguise_scanner"
+            android:label="Scanner"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name=".DisguiseAuthenticator"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_disguise_authenticator"
+            android:label="Authenticator"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+        <activity-alias
+            android:name=".DisguiseWorkspace"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_disguise_workspace"
+            android:label="Workspace"
             android:targetActivity=".MainActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

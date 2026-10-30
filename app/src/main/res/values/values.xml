@@ -2,6 +2,9 @@
 <resources>
     <string name="app_name">Album</string>
     <string name="memory_widget_description">A photo from this day in earlier years, a recent trip or a favourite</string>
+    <string name="person_widget_description">Someone\'s newest photos, a few at a time</string>
+    <string name="album_widget_description">Photos from an album or collection, a few at a time</string>
+    <string name="favourites_widget_description">Your favourite photos, a few at a time</string>
     <color name="launcher_bg">#FF111110</color>
 
     <style name="Theme.Album" parent="android:Theme.DeviceDefault.DayNight">

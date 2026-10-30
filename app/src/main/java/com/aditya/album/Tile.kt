@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -24,11 +25,13 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 
@@ -36,7 +39,7 @@ import java.time.format.DateTimeFormatter
  * One photo or video in a grid (the design system's MediaTile). The caller sizes it and handles taps. When [selected] the
  * image shrinks to 0.84 and rounds from the look's tile corner to radius-md, and the flash check pops in; with Remove
  * animations on both change at once. [small] (5 or more columns) leaves out the footer. [badge] is one short trait in
- * mono ("HDR", "29d"). TalkBack reads [tileLabel].
+ * mono ("HDR", "29d"); left out, it's the photo's own ([traitBadge]) unless [small]. TalkBack reads [tileLabel].
  */
 @Composable
 fun MediaTile(
@@ -45,7 +48,7 @@ fun MediaTile(
     selected: Boolean,
     modifier: Modifier = Modifier,
     small: Boolean = false,
-    badge: String? = null,
+    badge: String? = if (small) null else traitBadge(m), // tiny tiles keep only what the caller insists on
     badgeTone: BadgeTone = BadgeTone.Photo,
     checkSize: Dp = Space.check,
 ) {
@@ -65,7 +68,12 @@ fun MediaTile(
                 .clip(RoundedCornerShape(corner))
                 .background(c.surfaceHigh),
         ) {
-            AsyncImage(Thumb(m.uri), contentDescription = null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            // RAW photos' thumbnails are turned upright by Album: Android leaves some on their side (see Raw)
+            val model: Any = if (isRaw(m.name)) {
+                val context = LocalContext.current
+                remember(m.uri, editVersion(m.uri)) { ImageRequest.Builder(context).raw(m.uri, thumb = true).build() }
+            } else Thumb(m.uri)
+            AsyncImage(model, contentDescription = null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             badge?.let { Badge(it, Modifier.align(Alignment.TopEnd).padding(Space.s1), badgeTone) }
             if (!small && (m.isVideo || m.isFavorite)) {
                 Row(
@@ -88,6 +96,14 @@ fun MediaTile(
     }
 }
 
+/** A photo's own trait for its tile: "RAW", or "Pano" for a wide panorama (tall ones could as well be long screenshots). */
+fun traitBadge(m: Media): String? = when {
+    m.isVideo -> null
+    isRaw(m.name) -> "RAW"
+    panoramaOf(m.width, m.height, isScreenshot(m.path, m.name)) == Pano.Wide -> "Pano"
+    else -> null
+}
+
 /** The selection check shrinks as tiles do, so it never covers a small tile: 24dp up to 4 columns, down to 12dp at the month zoom. */
 fun checkSizeFor(columns: Int): Dp = when {
     columns <= 4 -> Space.check
@@ -99,11 +115,21 @@ fun checkSizeFor(columns: Int): Dp = when {
 private val spokenDay = DateTimeFormatter.ofPattern("d MMMM")
 private val spokenOldDay = DateTimeFormatter.ofPattern("d MMMM yyyy")
 
-/** What TalkBack reads for a tile: kind, length, date and state, like "Video, 42 seconds, 24 October, favourite, selected". */
+/**
+ * What TalkBack reads for a tile: kind (its badge's trait too), length, date and state, like "Video, 42 seconds,
+ * 24 October, favourite, selected" or "RAW photo, 3 March".
+ */
 fun tileLabel(m: Media, selected: Boolean, today: LocalDate = LocalDate.now()): String {
     val date = LocalDate.ofEpochDay(m.day)
     return buildString {
-        append(if (m.isVideo) "Video, ${spokenDuration(m.durationMs)}" else "Photo")
+        append(
+            when {
+                m.isVideo -> "Video, ${spokenDuration(m.durationMs)}"
+                isRaw(m.name) -> "RAW photo"
+                traitBadge(m) == "Pano" -> "Panorama"
+                else -> "Photo"
+            },
+        )
         append(", ").append(date.format(if (date.year == today.year) spokenDay else spokenOldDay))
         if (m.isFavorite) append(", favourite")
         if (selected) append(", selected")

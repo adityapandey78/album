@@ -365,7 +365,8 @@ fun AlbumIconButton(
 
 /**
  * A chip. Selected shows a check in flash-ink on flash-soft; the check, not the tint, carries the state. [toggle] false
- * makes it an action (a suggestion, a thing to open), which TalkBack then calls a button rather than a checkbox.
+ * makes it an action (a suggestion, a thing to open), which TalkBack then calls a button rather than a checkbox. [leading]
+ * draws something other than a symbol in the icon's place (an app's own icon), [Space.iconSm] square.
  */
 @Composable
 fun Chip(
@@ -376,6 +377,7 @@ fun Chip(
     icon: Sym? = null,
     count: String? = null,
     toggle: Boolean = true,
+    leading: (@Composable () -> Unit)? = null,
 ) {
     val c = AlbumTheme.colors
     val shape = CircleShape
@@ -385,12 +387,13 @@ fun Chip(
             .clip(shape)
             .then(if (selected) Modifier.background(c.flashSoft, shape) else Modifier.border(1.dp, c.lineStrong, shape))
             .then(if (toggle) Modifier.toggleable(selected, role = Role.Checkbox, onValueChange = { onClick() }) else Modifier.clickable(role = Role.Button, onClick = onClick))
-            .padding(start = if (selected || icon != null) Space.s3 else Space.s4, end = Space.s4, top = 6.dp, bottom = 6.dp),
+            .padding(start = if (selected || icon != null || leading != null) Space.s3 else Space.s4, end = Space.s4, top = 6.dp, bottom = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(Space.s2),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         when {
             selected -> Icon(Sym.Check, null, size = Space.iconSm, tint = c.flashInk)
+            leading != null -> leading()
             icon != null -> Icon(icon, null, size = Space.iconSm, tint = c.ink)
         }
         Text(label, style = AlbumTheme.type.label, color = c.ink, maxLines = 1)

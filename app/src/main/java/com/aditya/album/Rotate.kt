@@ -291,9 +291,6 @@ fun generationOf(resolver: ContentResolver, uri: Uri): Long? =
 
 // ---------- Rotated copies ----------
 
-/** Copies go here when MediaStore won't let Album add photos to the original's folder (WhatsApp's, Download). */
-private const val ROTATED_FOLDER = "Pictures/Rotated/"
-
 /** Room left over after saving, so a copy never fills the phone up. */
 private const val SPARE = 50L shl 20
 
@@ -307,9 +304,6 @@ fun rotatedName(name: String, extension: String): String {
     val stem = name.substringBeforeLast('.').replace(ROTATED_SUFFIX, "").ifEmpty { "Photo" }
     return "${stem}_rotated.$extension"
 }
-
-/** Where a rotated copy of a photo in the folder at [path] goes: next to it if MediaStore lets Album add photos there, else Pictures/Rotated/. */
-fun copyFolder(path: String): String = if (canHold(path, isVideo = false)) path else ROTATED_FOLDER
 
 /** The smallest power-of-two downsampling that brings a [width] x [height] photo within [maxPixels]: 1 keeps it full size. */
 fun sampleSize(width: Int, height: Int, maxPixels: Long): Int {
@@ -333,7 +327,7 @@ sealed interface RotatedCopy {
 }
 
 /**
- * Saves [m] turned [quarters] clockwise as a new photo next to it (or in Pictures/Rotated/ where Album can't add photos),
+ * Saves [m] turned [quarters] clockwise as a new photo next to it (or in Rotated where Album saves, if it can't add photos there),
  * with its date taken, camera details, place and favourite. The original is only ever read. JPEG and WebP copies keep
  * every pixel and only get a new orientation tag (see [copyWay]); other photos are decoded upright, turned and saved
  * again: PNG, GIF (its first frame) and anything with transparency as PNG, which loses nothing, the rest as JPEG at
@@ -344,9 +338,11 @@ suspend fun saveRotatedCopy(context: Context, m: Media, quarters: Int): RotatedC
     val turns = Math.floorMod(quarters, 4)
     // Without this Android blanks the GPS tags in what it reads out, and the copy would lose where it was taken
     val source = if (context.checkSelfPermission(ACCESS_MEDIA_LOCATION) == PackageManager.PERMISSION_GRANTED) MediaStore.setRequireOriginal(m.uri) else m.uri
-    val folder = copyFolder(m.path)
-    val album = folder.trimEnd('/').substringAfterLast('/')
-    val taken = Gallery.media.value.orEmpty().filter { folderKey(it.path) == folderKey(folder) }.map { it.name }
+    // Next to the original means on its storage too, which may be an SD card. WhatsApp's folder and Download can't take
+    // photos from Album, so those copies go to Rotated where Album saves.
+    val to = if (canHold(m.path, isVideo = false)) SaveLocation(volumeOf(resolver, m.uri), m.path) else SavePrefs.target(context).inside("Rotated")
+    val album = to.folder.trimEnd('/').substringAfterLast('/')
+    val taken = Gallery.media.value.orEmpty().filter { folderKey(it.path) == folderKey(to.folder) }.map { it.name }
     fun nameAs(extension: String) = freeNames(listOf(rotatedName(m.name, extension)), taken).single()
     val scratch = File(context.cacheDir, "rotate-${m.id}.tmp")
     try {
@@ -359,7 +355,7 @@ suspend fun saveRotatedCopy(context: Context, m: Media, quarters: Int): RotatedC
         val extension = m.name.substringAfterLast('.', "").ifEmpty { if (mime == "image/webp") "webp" else "jpg" }
         when (copyWay(mime, turnsInPlace(resolver, m.uri))) {
             CopyWay.Patch -> {
-                val uri = publish(resolver, m, nameAs(extension), folder, mime!!) { copy ->
+                val uri = publish(resolver, m, nameAs(extension), to, mime!!) { copy ->
                     pour(checkNotNull(resolver.openInputStream(source)), resolver, copy)
                     writeOrientation(resolver, copy, turns) // the same 2-byte patch an original gets, on the copy
                 }
@@ -368,7 +364,7 @@ suspend fun saveRotatedCopy(context: Context, m: Media, quarters: Int): RotatedC
             CopyWay.Retag, CopyWay.Resave -> {
                 val retagged = mime in PATCHABLE && retag(resolver, source, scratch, turns)
                 val resaved = if (retagged) null else resave(context, source, mime, scratch, turns)
-                val uri = publish(resolver, m, nameAs(resaved?.extension ?: extension), folder, resaved?.mime ?: mime!!) { copy ->
+                val uri = publish(resolver, m, nameAs(resaved?.extension ?: extension), to, resaved?.mime ?: mime!!) { copy ->
                     pour(scratch.inputStream(), resolver, copy)
                 }
                 RotatedCopy.Saved(uri, album, resaved?.megapixels)
@@ -386,26 +382,26 @@ suspend fun saveRotatedCopy(context: Context, m: Media, quarters: Int): RotatedC
 }
 
 /** Writes all of [input] into [uri], then closes both. */
-private fun pour(input: InputStream, resolver: ContentResolver, uri: Uri) = input.use {
+internal fun pour(input: InputStream, resolver: ContentResolver, uri: Uri) = input.use {
     // 1 MB chunks: the default 8 KB means hundreds of thousands of trips through Android's storage layer for a big photo
     checkNotNull(resolver.openOutputStream(uri, "w")).use { out -> it.copyTo(out, 1 shl 20) }
 }
 
 /**
- * Adds a photo called [name] to [folder] through MediaStore and fills it with [write]. The row stays pending (invisible
+ * Adds a photo called [name] to [to] through MediaStore and fills it with [write]. The row stays pending (invisible
  * to other apps) until every byte is written; if anything fails it's deleted again. Keeps [m]'s date taken and favourite.
  */
-private fun publish(resolver: ContentResolver, m: Media, name: String, folder: String, mime: String, write: (Uri) -> Unit): Uri {
+internal fun publish(resolver: ContentResolver, m: Media, name: String, to: SaveLocation, mime: String, write: (Uri) -> Unit): Uri {
     val values = ContentValues().apply {
         put(MediaColumns.DISPLAY_NAME, name)
-        put(MediaColumns.RELATIVE_PATH, folder)
+        put(MediaColumns.RELATIVE_PATH, to.folder)
         put(MediaColumns.MIME_TYPE, mime)
         put(MediaColumns.DATE_TAKEN, m.taken) // keeps the copy next to the original in the timeline
         put(MediaColumns.IS_PENDING, 1)
     }
     var copy: Uri? = null
     try {
-        val uri = checkNotNull(resolver.insert(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values)).also { copy = it }
+        val uri = checkNotNull(resolver.insert(MediaStore.Images.Media.getContentUri(to.volume), values)).also { copy = it }
         write(uri)
         check(resolver.update(uri, ContentValues().apply { put(MediaColumns.IS_PENDING, 0) }, null, null) == 1)
         // Publishing rescans the file and recomputes DATE_TAKEN, from its own clock where it has no Exif date: put the
@@ -496,7 +492,7 @@ private val PLACE = listOf(
 )
 
 /** Copies [from]'s details into the re-saved photo [to], marked upright. Best effort: the copy is fine without, and MediaStore keeps its date. */
-private fun carryExif(from: ExifInterface, to: File) = runCatching {
+internal fun carryExif(from: ExifInterface, to: File) = runCatching {
     val exif = ExifInterface(to)
     // Without location access Android hands out zeros, which aren't a place
     val located = from.latLong?.let { it[0] != 0.0 || it[1] != 0.0 } == true

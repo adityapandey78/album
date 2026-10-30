@@ -29,9 +29,12 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -78,8 +81,9 @@ object Gallery {
         val app = context.applicationContext
         scope.launch {
             changes(app.contentResolver)
+                .combine(fixedDates()) { _, fixes -> fixes }
                 .conflate() // a burst of changes (camera, bulk delete) collapses into one reload
-                .map { load(app.contentResolver) }
+                .map { load(app.contentResolver, it) }
                 .flowOn(Dispatchers.IO)
                 .catch { CrashLog.note("media load failed: $it"); emit(emptyList()) }
                 .collect { media.value = it }
@@ -99,7 +103,19 @@ object Gallery {
         awaitClose { resolver.unregisterContentObserver(observer) }
     }
 
-    private fun load(resolver: ContentResolver): List<Media> {
+    /**
+     * Dates the user fixed (see FixDetails.kt), by MediaStore id. Album keeps them because MediaStore works a date out
+     * again whenever it rescans a file. Without collections.db the timeline still loads, with MediaStore's dates.
+     */
+    private fun fixedDates(): Flow<Map<Long, MediaFix>> = Collections.fixes
+        .map { all -> all.filter { it.taken != null }.associateBy { it.mediaId } }
+        .distinctUntilChanged() // a fixed place doesn't reload the timeline
+        .catch { e ->
+            CrashLog.note("fixed dates read failed: $e")
+            emit(emptyMap())
+        }
+
+    private fun load(resolver: ContentResolver, fixes: Map<Long, MediaFix>): List<Media> {
         val projection = arrayOf(
             FileColumns._ID, FileColumns.MEDIA_TYPE, FileColumns.DATE_TAKEN, FileColumns.DATE_MODIFIED,
             FileColumns.WIDTH, FileColumns.HEIGHT, FileColumns.DURATION, FileColumns.BUCKET_ID,
@@ -112,7 +128,7 @@ object Gallery {
             while (c.moveToNext()) {
                 val id = c.getLong(0)
                 val isVideo = c.getInt(1) == FileColumns.MEDIA_TYPE_VIDEO
-                val taken = takenOf(c.getLong(2), c.getLong(3), c.getString(11).orEmpty(), zone)
+                val taken = fixedTaken(fixes[id], c.getLong(3)) ?: takenOf(c.getLong(2), c.getLong(3), c.getString(11).orEmpty(), zone)
                 out += Media(
                     id = id,
                     uri = mediaUri(id, isVideo),

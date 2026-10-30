@@ -66,7 +66,7 @@ private fun microVideo(xmp: String, fileSize: Long): LongRange? {
 }
 
 /** A property in either XMP spelling, prefix:Name="value" or <prefix:Name>value<. Prefixes differ between cameras. */
-private fun xmpValue(xmp: String, name: String): String? =
+internal fun xmpValue(xmp: String, name: String): String? =
     Regex("""[\w-]+:$name(?:\s*=\s*"([^"]*)"|>([^<]*)<)""").find(xmp)?.groupValues?.drop(1)?.firstOrNull { it.isNotBlank() }?.trim()
 
 /** Pixel and older Google cameras write the XMP into the first segments of the file, well within this. */

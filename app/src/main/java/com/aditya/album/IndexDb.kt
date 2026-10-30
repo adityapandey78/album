@@ -65,6 +65,9 @@ data class ItemGps(val id: Long, val lat: Double, val lng: Double)
 /** An item's place as the index has it: from its own GPS ([gps]) or [estimated] from other photos, or neither. */
 data class ItemPlace(val id: Long, val gps: Boolean, val estimated: Boolean, @Embedded val place: Place?)
 
+/** All the index says about where an item is, so Edit place can set it, and put it back on Undo. */
+data class ItemSpot(val id: Long, val lat: Double?, val lng: Double?, val estimated: Boolean, @Embedded val place: Place?)
+
 /** A photo a search reading found, and how sure the index is of it (an ML Kit confidence, 0 to 1). */
 data class Scored(val id: Long, val score: Float?)
 
@@ -121,6 +124,10 @@ interface IndexDao {
     @Query("SELECT id, lat, lng FROM items WHERE lat IS NOT NULL AND lng IS NOT NULL")
     suspend fun located(): List<ItemGps>
 
+    /** The same points, live, for the map. */
+    @Query("SELECT id, lat, lng FROM items WHERE lat IS NOT NULL AND lng IS NOT NULL")
+    fun gps(): Flow<List<ItemGps>>
+
     @Query("SELECT id, lat IS NOT NULL AS gps, estimated, city, admin1, countryCode, country, locality, district FROM items")
     suspend fun itemPlaces(): List<ItemPlace>
 
@@ -135,6 +142,28 @@ interface IndexDao {
     suspend fun setPlaces(places: Map<Long, Place?>, estimated: Boolean = false) = places.forEach { (id, p) ->
         setPlace(id, p?.city, p?.admin1, p?.countryCode, p?.country, p?.locality, p?.district, estimated && p != null)
     }
+
+    @Query("SELECT id, lat, lng, estimated, city, admin1, countryCode, country, locality, district FROM items WHERE id IN (:ids)")
+    suspend fun spots(ids: List<Long>): List<ItemSpot>
+
+    @Query(
+        "UPDATE items SET lat = :lat, lng = :lng, estimated = :estimated, city = :city, admin1 = :admin1, countryCode = :countryCode, " +
+            "country = :country, locality = :locality, district = :district WHERE id = :id",
+    )
+    suspend fun setSpot(
+        id: Long, lat: Double?, lng: Double?, estimated: Boolean,
+        city: String?, admin1: String?, countryCode: String?, country: String?, locality: String?, district: String?,
+    )
+
+    @Transaction
+    suspend fun setSpots(spots: List<ItemSpot>) = spots.forEach { s ->
+        val p = s.place
+        setSpot(s.id, s.lat, s.lng, s.estimated, p?.city, p?.admin1, p?.countryCode, p?.country, p?.locality, p?.district)
+    }
+
+    /** Where photos in a city were taken, from their own GPS (or a place the user set with a spot). */
+    @Query("SELECT id, lat, lng FROM items WHERE city = :city AND admin1 = :admin1 AND countryCode = :countryCode AND lat IS NOT NULL AND lng IS NOT NULL")
+    suspend fun gpsIn(city: String, admin1: String, countryCode: String): List<ItemGps>
 
     @Query("SELECT category, COUNT(*) AS count FROM items WHERE category IS NOT NULL GROUP BY category ORDER BY count DESC")
     fun categories(): Flow<List<CategoryCount>>

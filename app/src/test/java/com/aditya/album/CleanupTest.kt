@@ -39,6 +39,9 @@ class CleanupTest {
 
     private fun random(seed: Long) = Random(seed).let { r -> LongArray(4) { r.nextLong() } }
 
+    // A camera's capture time, [s] seconds into a minute: the photo has camera details
+    private fun cam(s: Int) = "2026:01:01 10:00:${"%02d".format(s)}.00"
+
     // --- What a pass measures
 
     @Test fun measuresNewPhotosAndHashesOnlyFilesThatMayBeTheSame() {
@@ -75,11 +78,12 @@ class CleanupTest {
     @Test fun looksForFacesOnlyInSimilarShotsAndBlurSuspects() {
         val h = random(2)
         val rows = listOf(
-            row(1, h), row(2, near(h, 10)), // similar
-            row(3, random(3), blur = 0.01f, textured = 0.9f), // may be blurry
-            row(4, random(4), blur = 0.5f, textured = 0.9f), // sharp, alone
+            row(1, h, capture = cam(1)), row(2, near(h, 10), capture = cam(3)), // similar
+            row(3, random(3), blur = 0.01f, textured = 0.9f, capture = cam(5)), // may be blurry
+            row(4, random(4), blur = 0.5f, textured = 0.9f, capture = cam(7)), // sharp, alone
+            row(5, random(5), blur = 0.01f, textured = 0.9f), // soft, but no camera details (a forward): never judged for blur
         )
-        val found = listOf(shot(1), shot(2, taken = now + 2000), shot(3, taken = now - day), shot(4, taken = now - 2 * day))
+        val found = listOf(shot(1), shot(2, taken = now + 2000), shot(3, taken = now - day), shot(4, taken = now - 2 * day), shot(5, taken = now - 3 * day))
         val plan = planCleanup(found, rows, emptyList(), 2, now)
         assertEquals(listOf(1L, 2L, 3L), plan.work.filter { it.faces }.map { it.item.id })
         // Looked at already: nothing more to do
@@ -198,16 +202,18 @@ class CleanupTest {
     }
 
     @Test fun trashedCopiesHandOverToTheOriginalThatStays() {
-        val r = CleanupResult(
-            exact = listOf(ShotGroup(1, listOf(1L, 2L)), ShotGroup(4, listOf(4L, 5L))),
-            copies = listOf(ShotGroup(1, listOf(1L, 3L)), ShotGroup(6, listOf(6L, 4L))), // 4 is kept over 5 but is a copy of 6
-            similar = listOf(ShotGroup(8, listOf(8L, 9L))),
-            blurry = listOf(7L), dark = emptyList(), bright = emptyList(), screenshots = emptyList(), whatsApp = emptyList(), bigVideos = emptyList(),
-        )
-        assertEquals(listOf(1L to 2L, 1L to 3L), r.originalsOf(listOf(2L, 3L, 7L))) // swiped copies and a blurry photo
-        assertEquals(emptyList<Pair<Long, Long>>(), r.originalsOf(listOf(1L, 2L))) // the original goes too: nothing stays to take over
-        assertEquals(listOf(6L to 5L, 6L to 4L), r.originalsOf(listOf(5L, 4L))) // up the chain to the one that stays
+        val r = result(copies = listOf(ShotGroup(1, listOf(1L, 2L, 3L)), ShotGroup(6, listOf(6L, 4L, 5L))), similar = listOf(ShotGroup(8, listOf(8L, 9L))), blurry = listOf(7L))
+        assertEquals(listOf(1L to 2L, 1L to 3L), r.originalsOf(listOf(2L, 3L, 7L))) // picked copies and a blurry photo
+        assertEquals(listOf(6L to 5L), r.originalsOf(listOf(1L, 2L, 5L))) // 1 goes too: nothing stays to take over from 2
         assertEquals(emptyList<Pair<Long, Long>>(), r.originalsOf(listOf(9L))) // a similar shot is another moment, not a copy
+    }
+
+    @Test fun exactCopiesJoinTheCopiesOfTheirOriginal() {
+        // 2 and 3 are one WhatsApp photo saved twice, 2 a copy of camera photo 1; 6 is 1 saved again; 5 the same file as 4
+        val near = listOf(ShotGroup(1, listOf(1L, 2L)))
+        val exact = listOf(ShotGroup(2, listOf(2L, 3L)), ShotGroup(4, listOf(4L, 5L)), ShotGroup(1, listOf(1L, 6L)))
+        val merged = mergeCopies(exact, near) { if (it == 5L) 100L else 1L }
+        assertEquals(listOf(ShotGroup(4, listOf(4L, 5L)), ShotGroup(1, listOf(1L, 2L, 3L, 6L))), merged) // the one freeing most first
     }
 
     @Test fun exactCopiesNeedTheSamePictureData() {
@@ -303,70 +309,100 @@ class CleanupTest {
         assertTrue(isBright(row(3).copy(low = 240)))
     }
 
-    @Test fun sortsTheLibraryIntoCategories() {
+    @Test fun everyItemShowsUnderTheOneCategoryThatExplainsIt() {
         val h = random(41)
+        val b = random(46)
+        val whatsApp = "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/"
         val shots = listOf(
             shot(1, taken = now - 31 * day, path = "Pictures/Screenshots/", name = "Screenshot_1.png"),
-            shot(2, taken = now - 5 * day, path = "Pictures/Screenshots/", name = "Screenshot_2.png"),
-            shot(3, path = "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/", bucket = "WhatsApp Images"),
+            shot(2, taken = now - 5 * day, path = "Pictures/Screenshots/", name = "Screenshot_2.png"), // not old yet
+            shot(3, path = whatsApp, bucket = "WhatsApp Images"),
             shot(4, isVideo = true, size = 150_000_000),
-            shot(5, isVideo = true, size = 300_000_000),
+            shot(5, isVideo = true, size = 300_000_000, path = whatsApp, bucket = "WhatsApp Video"), // big before WhatsApp
             shot(6, isVideo = true, size = 50_000_000),
             shot(7, size = 777), shot(8, size = 777, path = "Download/"), // exact copies, which also look alike
-            shot(9, w = 1600, h = 1200, taken = now + 1000), // a smaller copy of 7
+            shot(9, w = 1600, h = 1200, taken = now + 1000, path = whatsApp, bucket = "WhatsApp Images"), // shared: a copy of 7, not WhatsApp
             shot(10), // blurry
-            shot(11, path = "Pictures/Screenshots/", name = "Screenshot_11.png"), // a blurry-looking screenshot is still a screenshot
+            shot(11, taken = now - 40 * day, path = "Pictures/Screenshots/", name = "Screenshot_11.png"), // of 7: a copy before an old screenshot
             shot(12), shot(13), // too dark, too bright
+            shot(14, path = whatsApp, bucket = "WhatsApp Images"), // a soft forward: no camera details, never called blurry
+            shot(15, taken = now + 60_000), shot(16, taken = now + 62_000), // a burst; 16 also blurry
+            shot(17, taken = now + 62_500), // blurry and too dark: too dark says it better
         )
         val rows = listOf(
-            row(7, h, hash = "x"), row(8, h, hash = "x"), row(9, near(h, 5)),
-            row(10, random(42), blur = 0.001f, textured = 0.9f, faces = 0), row(11, random(43), blur = 0.001f, textured = 0.9f, faces = 0),
-            row(12, random(44), quality = 10).copy(high = 12), row(13, random(45), quality = 10).copy(low = 250),
+            row(7, h, hash = "x", capture = cam(1)), row(8, h, hash = "x", capture = cam(1)), row(9, near(h, 5)), row(11, near(h, 8)),
+            row(10, random(42), blur = 0.001f, textured = 0.9f, faces = 0, capture = cam(2)),
+            row(12, random(44), quality = 10, capture = cam(3)).copy(high = 12), row(13, random(45), quality = 10, capture = cam(4)).copy(low = 250),
+            row(14, random(47), blur = 0.001f, textured = 0.9f, faces = 0),
+            row(15, b, blur = 0.5f, capture = cam(5)), row(16, near(b, 6), blur = 0.001f, textured = 0.9f, faces = 0, capture = cam(7)),
+            row(17, random(48), blur = 0.001f, textured = 0.9f, faces = 0, capture = cam(8)).copy(high = 10),
         ).associateBy { it.id }
-        val r = cleanupOf(shots, rows, listOf(CopyPair(7, 9, 5), CopyPair(8, 9, 5)), now)
-        assertEquals(listOf(1L), r.screenshots)
-        assertEquals(listOf(3L), r.whatsApp)
-        assertEquals(listOf(5L, 4L), r.bigVideos)
-        assertEquals(listOf(ShotGroup(7, listOf(7L, 8L))), r.exact)
-        assertEquals(listOf(ShotGroup(7, listOf(7L, 9L))), r.copies)
-        assertTrue(r.similar.isEmpty()) // 8 and 9 are copies already, so 7 has nothing alike left
-        assertEquals(listOf(10L), r.blurry)
-        assertEquals(listOf(12L), r.dark)
+        val r = cleanupOf(shots, rows, listOf(CopyPair(7, 9, 5), CopyPair(8, 9, 5), CopyPair(7, 11, 8)), now)
+        assertEquals(listOf(ShotGroup(7, listOf(7L, 9L, 11L, 8L))), r.copies) // the exact copy joins the copies of its original
+        assertEquals(listOf(ShotGroup(15, listOf(15L, 16L))), r.similar)
+        assertEquals(listOf(12L, 17L), r.dark)
         assertEquals(listOf(13L), r.bright)
-        assertEquals("Too dark", r.reason(CleanupKind.Exposure, 12))
-        assertEquals("Too bright", r.reason(CleanupKind.Exposure, 13))
+        assertEquals(listOf(10L), r.blurry)
+        assertEquals(listOf(1L), r.screenshots)
+        assertEquals(listOf(5L, 4L), r.bigVideos)
+        assertEquals(listOf(3L, 14L), r.whatsApp)
+        // Nothing suggested twice, and what stays (the original 7, the best shot 15) suggested nowhere
+        val all = CleanupKind.entries.flatMap { r.candidates(it) }
+        assertEquals(all.size, all.toSet().size)
+        assertFalse(7L in all || 15L in all)
+    }
+
+    @Test fun aSharedShotStaysAmongItsSimilarShots() {
+        val a = random(71)
+        val shots = listOf(shot(1), shot(2, taken = now + 1000), shot(3, w = 1600, h = 1200, path = "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/"))
+        val rows = mapOf(
+            1L to row(1, a, blur = 0.2f, capture = cam(0)), // softer, but the one you shared
+            2L to row(2, near(a, 10), blur = 0.6f, capture = cam(1)),
+            3L to row(3, near(a, 2)),
+        )
+        val r = cleanupOf(shots, rows, listOf(CopyPair(1, 2, 10), CopyPair(1, 3, 2), CopyPair(2, 3, 12)), now)
+        assertEquals(listOf(ShotGroup(1, listOf(1L, 3L))), r.copies)
+        assertEquals(listOf(ShotGroup(1, listOf(1L, 2L))), r.similar)
+        assertEquals(listOf(2L), r.candidates(CleanupKind.Similar))
     }
 
     private fun result(
-        exact: List<ShotGroup> = emptyList(), copies: List<ShotGroup> = emptyList(), similar: List<ShotGroup> = emptyList(),
-        blurry: List<Long> = emptyList(), dark: List<Long> = emptyList(), screenshots: List<Long> = emptyList(), whatsApp: List<Long> = emptyList(),
-    ) = CleanupResult(exact, copies, similar, blurry, dark, emptyList(), screenshots, whatsApp, emptyList())
+        copies: List<ShotGroup> = emptyList(), similar: List<ShotGroup> = emptyList(), blurry: List<Long> = emptyList(),
+        screenshots: List<Long> = emptyList(), whatsApp: List<Long> = emptyList(),
+    ) = CleanupResult(copies, similar, emptyList(), emptyList(), blurry, screenshots, emptyList(), whatsApp)
 
     @Test fun summaryCountsEachSuggestedItemOnce() {
-        val r = result(similar = listOf(ShotGroup(1, listOf(1L, 2L, 3L))), blurry = listOf(2L, 4L), whatsApp = listOf(5L))
+        val r = result(similar = listOf(ShotGroup(1, listOf(1L, 2L, 3L))), blurry = listOf(4L), whatsApp = listOf(5L))
         val s = summaryOf(r) { it * 10 }
         assertEquals(CleanupCount(2, 50), s.kinds[CleanupKind.Similar]) // the best shot isn't suggested
-        assertEquals(CleanupCount(2, 60), s.kinds[CleanupKind.Blurry])
+        assertEquals(CleanupCount(1, 40), s.kinds[CleanupKind.Blurry])
         assertEquals(3, s.toReview) // 2, 3 and 4; WhatsApp is there to browse, not a suggestion
         assertEquals(90, s.reviewBytes)
     }
 
-    @Test fun reviewQueueShowsBestShotsFirstAndMergesReasons() {
+    @Test fun sectionsKeepGroupsTogetherAndTheViewerGetsEachTileOnce() {
         val r = result(
-            exact = listOf(ShotGroup(4, listOf(4L, 5L))), copies = listOf(ShotGroup(6, listOf(6L, 8L))), similar = listOf(ShotGroup(1, listOf(1L, 2L, 3L))),
-            blurry = listOf(2L, 7L), dark = listOf(10L), screenshots = listOf(9L), whatsApp = listOf(11L),
+            copies = listOf(ShotGroup(1, listOf(1L, 2L)), ShotGroup(3, listOf(3L, 4L))),
+            similar = listOf(ShotGroup(5, listOf(5L, 1L, 6L))), // 1 is an original and one of these shots
+            blurry = listOf(7L, 8L), whatsApp = listOf(9L),
         )
-        val q = reviewQueue(r, CleanupKind.entries.filter { it.suggested })
-        assertEquals(listOf(5L, 8L, 1L, 2L, 3L, 7L, 10L, 9L), q.map { it.id })
-        assertEquals(listOf("Exact copy"), q[0].reasons)
-        assertEquals(ReviewItem(1, listOf("Similar · 3"), best = true), q[2])
-        assertEquals(listOf("Similar · 3", "Blurry"), q[3].reasons)
-        assertEquals(listOf("Too dark"), q[6].reasons)
-        assertEquals(listOf(11L), reviewQueue(r, listOf(CleanupKind.WhatsApp)).map { it.id })
+        val gone = setOf(4L, 8L) // trashed meanwhile
+        val lookup = { id: Long -> id.takeIf { it !in gone } }
+        val sections = cleanupSections(r, CleanupKind.entries.filter { it.suggested }, lookup)
+        assertEquals(listOf(CleanupKind.Copies, CleanupKind.Similar, CleanupKind.Blurry), sections.map { it.kind })
+        assertEquals(listOf(listOf(1L, 2L)), sections[0].runs) // the group left with one is gone
+        assertEquals(listOf(1L, 2L, 5L, 6L, 7L), tilesOf(sections) { it }) // screen order, each photo once
+        assertEquals(listOf(9L), tilesOf(cleanupSections(r, listOf(CleanupKind.WhatsApp), lookup)) { it })
+        assertEquals(listOf(6L), r.candidates(CleanupKind.Similar)) // neither the best shot nor the original
     }
 
-    @Test fun reviewQueueFitsOneTrashRequest() {
-        assertEquals(MAX_REQUEST, reviewQueue(result(blurry = (1L..2500L).toList()), listOf(CleanupKind.Blurry)).size)
+    @Test fun foldersBelongToTheirApps() {
+        assertEquals(MediaApp.WhatsApp, MediaApp.of("WhatsApp Images"))
+        assertEquals(MediaApp.WhatsAppBusiness, MediaApp.of("WhatsApp Business Images"))
+        assertEquals(MediaApp.Telegram, MediaApp.of("Telegram Images"))
+        assertEquals(MediaApp.Instagram, MediaApp.of("Instagram"))
+        assertNull(MediaApp.of("Camera"))
+        assertEquals(MediaApp.WhatsApp, CleanupKind.WhatsApp.app)
     }
 
     @Test fun topFoldersBySizeTellSameNamesApart() {

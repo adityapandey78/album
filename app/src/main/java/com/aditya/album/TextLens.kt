@@ -12,6 +12,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -108,7 +109,7 @@ private const val LENS_PX = 3072
 
 /** Everything ML Kit can read in [uri]; no words when it has none or can't be read. */
 private suspend fun readText(context: Context, uri: Uri): LensText {
-    val bitmap = withContext(Dispatchers.IO) { decodeUpright(context, uri) } ?: return LensText(emptyList(), emptyList(), 0, 0)
+    val bitmap = withContext(Dispatchers.IO) { decodeUpright(context, uri, LENS_PX) } ?: return LensText(emptyList(), emptyList(), 0, 0)
     val reader = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
     try {
         val text = suspendCancellableCoroutine<MlText?> { c ->
@@ -121,20 +122,23 @@ private suspend fun readText(context: Context, uri: Uri): LensText {
 }
 
 /**
- * The photo as it's shown (ImageDecoder applies the Exif orientation), at most [LENS_PX] on its longest side, in the
- * software sRGB ARGB_8888 that ML Kit reads (as SmartIndex decodes). Null when it can't be decoded.
+ * The photo as it's shown (ImageDecoder applies the Exif orientation; RAW photos are turned by [uprightRaw]), at most
+ * [maxPx] on its longest side, in the software sRGB ARGB_8888 that ML Kit reads (as SmartIndex decodes). Also what codes,
+ * straightening and the RAW viewer read. Null when it can't be decoded. Blocking: call off the main thread.
  */
-private fun decodeUpright(context: Context, uri: Uri): Bitmap? = try {
-    val bitmap = ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, uri)) { decoder, info, _ ->
+internal fun decodeUpright(context: Context, uri: Uri, maxPx: Int): Bitmap? = try {
+    val resolver = context.contentResolver
+    val decoded = ImageDecoder.decodeBitmap(ImageDecoder.createSource(resolver, uri)) { decoder, info, _ ->
         decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
         decoder.setTargetColorSpace(ColorSpace.get(ColorSpace.Named.SRGB))
-        val scale = LENS_PX.toFloat() / max(info.size.width, info.size.height)
+        val scale = maxPx.toFloat() / max(info.size.width, info.size.height)
         if (scale < 1) decoder.setTargetSize((info.size.width * scale).roundToInt().coerceAtLeast(1), (info.size.height * scale).roundToInt().coerceAtLeast(1))
     }
     // 10-bit HDR photos decode to other configs
-    if (bitmap.config == Bitmap.Config.ARGB_8888) bitmap else bitmap.copy(Bitmap.Config.ARGB_8888, false).also { bitmap.recycle() }
+    val bitmap = if (decoded.config == Bitmap.Config.ARGB_8888) decoded else decoded.copy(Bitmap.Config.ARGB_8888, false).also { decoded.recycle() }
+    if (runCatching { resolver.getType(uri) }.getOrNull() == RAW_MIME) uprightRaw(resolver, uri, bitmap, thumbnail = false) else bitmap
 } catch (e: Exception) {
-    CrashLog.note("text lens: can't decode ($e)")
+    CrashLog.note("decode upright failed ($e)")
     null
 }
 
@@ -316,11 +320,12 @@ fun TextLensBar(onClose: () -> Unit, modifier: Modifier = Modifier) {
 }
 
 /**
- * The lens's panel at the bottom: the selected words (all the text while none are), Select all and Copy. While reading,
- * and when the photo has no text, it says so instead. [onCopied] confirms the copy (the viewer's snackbar).
+ * The lens's panel at the bottom: the selected words (all the text while none are), the links, phone numbers and e-mail
+ * addresses in all of it as chips ([onLink] asks before opening one), Select all and Copy. While reading, and when the
+ * photo has no text, it says so instead. [onCopied] confirms the copy (the viewer's snackbar).
  */
 @Composable
-fun TextLensPanel(lens: TextLens, onCopied: () -> Unit, modifier: Modifier = Modifier) {
+fun TextLensPanel(lens: TextLens, onCopied: () -> Unit, onLink: (CodeContent) -> Unit, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val c = AlbumTheme.colors
     val type = AlbumTheme.type
@@ -342,6 +347,17 @@ fun TextLensPanel(lens: TextLens, onCopied: () -> Unit, modifier: Modifier = Mod
                 val shown = remember(text, selection) { selectedText(text.words, selection ?: all) }
                 Text(if (selection == null) "All text" else "Selected text", style = type.label, color = c.inkMuted)
                 Text(shown, Modifier.fillMaxWidth().heightIn(max = 160.dp).verticalScroll(rememberScrollState()), style = type.body, color = c.ink)
+                val links = remember(text) { linksIn(selectedText(text.words, all)) }
+                if (links.isNotEmpty()) {
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(Space.s2)) {
+                        links.forEach { link ->
+                            Chip(chipLabel(link), {
+                                CrashLog.note("text link")
+                                onLink(link)
+                            }, icon = link.icon(), toggle = false)
+                        }
+                    }
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(Space.s2)) {
                     AlbumButton("Select all", {
                         CrashLog.note("text select all")

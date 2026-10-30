@@ -12,6 +12,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -48,6 +49,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -99,11 +101,18 @@ private const val LOST_SETUP_NOTE =
 
 /**
  * Asks for the privacy PIN in a sheet titled after the action ([title]: "Hide Asha"), offering the fingerprint, Forgot
- * PIN, and setting a PIN first if there's none. [onDone] runs with privacy unlocked.
+ * PIN, and setting a PIN first if there's none. [onDone] runs with privacy unlocked. [resettable] false: Forgot PIN never
+ * offers to reset the safe, for a sheet anyone could open (a disguise's way in), where a reset would be a way past it.
  */
 @Composable
-fun PrivacySheet(title: String, onDone: () -> Unit, onDismiss: () -> Unit, purpose: PrivacyPurpose = PrivacyPurpose.Unlock) {
-    Sheet(onDismiss) { PrivacyFlow(title, purpose, onDone, onCancel = onDismiss, page = false) }
+fun PrivacySheet(
+    title: String,
+    onDone: () -> Unit,
+    onDismiss: () -> Unit,
+    purpose: PrivacyPurpose = PrivacyPurpose.Unlock,
+    resettable: Boolean = true,
+) {
+    Sheet(onDismiss) { PrivacyFlow(title, purpose, onDone, onCancel = onDismiss, page = false, resettable = resettable) }
 }
 
 /**
@@ -277,6 +286,7 @@ private fun PrivacyFlow(
     page: Boolean,
     icon: Sym = Sym.Lock,
     intro: String? = null,
+    resettable: Boolean = true,
 ) {
     val context = LocalContext.current
     val c = AlbumTheme.colors
@@ -485,8 +495,9 @@ private fun PrivacyFlow(
         is Step.Confirm -> "Confirm it's you" to "Use your fingerprint or screen lock once, so they can reset this PIN if you forget it."
         is Step.Lost -> "Private safe can't be opened" to LOST_SETUP_NOTE
         Step.CantRecover -> "Forgot PIN can't help here" to "Forgot PIN checks it's you with your screen lock, which was off for a " +
-            "while after you set this PIN. If you remember the PIN, it still opens everything. Resetting erases what's in " +
-            "Private safe and starts again with a new PIN. Hidden people and albums stay hidden."
+            "while after you set this PIN. If you remember the PIN, it still opens everything." + if (resettable) {
+                " Resetting erases what's in Private safe and starts again with a new PIN. Hidden people and albums stay hidden."
+            } else ""
     }
     val padShown = step == Step.Enter || step is Step.Choose || step is Step.Repeat
     val hint = when {
@@ -560,9 +571,11 @@ private fun PrivacyFlow(
             is Step.Lost, Step.CantRecover -> Row(horizontalArrangement = Arrangement.spacedBy(Space.s2)) {
                 val back = if (s is Step.Lost) onCancel else ({ step = Step.Enter })
                 back?.let { AlbumButton(if (s is Step.Lost) "Cancel" else "Back", it, Modifier.weight(1f)) }
-                AlbumButton(
-                    if (s is Step.Lost) "Reset safe" else "Reset", { resetting = true }, Modifier.weight(1.5f), ButtonVariant.Danger, icon = Sym.DeleteForever,
-                )
+                if (resettable) {
+                    AlbumButton(
+                        if (s is Step.Lost) "Reset safe" else "Reset", { resetting = true }, Modifier.weight(1.5f), ButtonVariant.Danger, icon = Sym.DeleteForever,
+                    )
+                }
             }
         }
     }
@@ -658,10 +671,21 @@ private fun PinPad(onDigit: (Int) -> Unit, erase: Pair<String, () -> Unit>?, fin
     }
 }
 
-/** One key: presses like the design's Button (scales to 0.96, squares toward radius-md). TalkBack reads the digit. */
+/**
+ * One key: presses like the design's Button (scales to 0.96, squares toward radius-md). TalkBack reads [description].
+ * The calculator disguise (Calculator.kt) uses it too, with its own [fill], [ink] and a hold on "=".
+ */
 @Composable
-private fun PinKey(digit: String, modifier: Modifier, enabled: Boolean, onClick: () -> Unit) {
-    val c = AlbumTheme.colors
+internal fun PinKey(
+    text: String,
+    modifier: Modifier,
+    enabled: Boolean,
+    fill: Color = AlbumTheme.colors.surfaceHigh,
+    ink: Color = AlbumTheme.colors.ink,
+    description: String = text,
+    onLongClick: (() -> Unit)? = null,
+    onClick: () -> Unit,
+) {
     val still = AlbumTheme.spec.still
     val source = remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
@@ -672,10 +696,10 @@ private fun PinKey(digit: String, modifier: Modifier, enabled: Boolean, onClick:
         modifier
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(shape)
-            .background(c.surfaceHigh, shape)
-            .clickable(source, indication = null, enabled = enabled, role = Role.Button, onClick = onClick)
-            .semantics { contentDescription = digit }
+            .background(fill, shape)
+            .combinedClickable(source, indication = null, enabled = enabled, role = Role.Button, onLongClick = onLongClick, onClick = onClick)
+            .semantics { contentDescription = description }
             .graphicsLayer { alpha = if (enabled) 1f else 0.38f },
         contentAlignment = Alignment.Center,
-    ) { Text(digit, Modifier.clearAndSetSemantics {}, style = AlbumTheme.type.titleLg, color = c.ink) }
+    ) { Text(text, Modifier.clearAndSetSemantics {}, style = AlbumTheme.type.titleLg, color = ink) }
 }

@@ -111,16 +111,23 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.toSize
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import java.text.NumberFormat
 import kotlin.math.hypot
 
 class MainActivity : ComponentActivity() {
+    // What a widget or the On this day notification asked to open, until AlbumShell has opened it
+    private val link = MutableStateFlow<AlbumLink?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // A fresh start only: after a rotation or a restore it was opened already
+        if (savedInstanceState == null) link.value = linkOf(intent)
         enableEdgeToEdge()
         AlbumPrefs.load(this)
         AppearancePrefs.load(this)
+        SavePrefs.load(this)
         setContent {
             val appearance by AppearancePrefs.appearance.collectAsState()
             // Status bar icons follow Album's theme, not the phone's: a Light theme on a dark phone still needs dark icons
@@ -130,13 +137,21 @@ class MainActivity : ComponentActivity() {
                 else SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT)
                 enableEdgeToEdge(bars, bars)
             }
-            AlbumTheme(appearance) { AlbumShell() }
+            // Disguised, the disguise's front shows until the privacy PIN, and again whenever Album leaves the screen
+            AlbumTheme(appearance) { DisguiseGate { AlbumShell(link) } }
         }
+    }
+
+    // A widget or the notification tapped while Album is open
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        linkOf(intent)?.let { link.value = it }
     }
 
     override fun onStop() {
         super.onStop()
-        // The home-screen icon's sun follows the accent; switching it closes this task, so only once Album is out of sight
+        // The home-screen icon's sun follows the accent, unless Album is disguised; switching it closes this task, so only
+        // once Album is out of sight
         if (!isChangingConfigurations) LauncherIcon.sync(this, AppearancePrefs.appearance.value.accent)
     }
 }
@@ -151,11 +166,17 @@ private enum class Tab(val sym: Sym, val label: String) {
 private sealed class Route(val key: String) {
     /** An album: a folder, Favourites or Videos, a collection, a place, a thing or a person. */
     data class Open(val id: Long) : Route("open:$id")
+    /** A group of albums (AlbumGroups.kt), by its group id. */
+    data class Group(val id: Long) : Route("group:$id")
     data object Albums : Route("albums")
     data object Places : Route("places")
+
+    /** The map of your photos, opened on one photo from its details ([focus]) or fitted to them all. */
+    data class Map(val focus: MapFocus? = null) : Route(focus?.let { "map:${it.mediaId},${it.lat},${it.lng}" } ?: "map")
     data object Storage : Route("storage")
     data object PrivateSafe : Route("safe") // not "Safe": that's the object in Safe.kt
     data object HiddenItems : Route("hidden") // not "Hidden": that's the object in Hidden.kt
+    data object DriveBackup : Route("backup") // not "Backup": that's the object in Backup.kt
 
     /** Clean up, on one category (a CleanupKind name) or the suggested ones. */
     data class Clean(val category: String?) : Route("cleanup:${category.orEmpty()}")
@@ -167,6 +188,7 @@ private sealed class Route(val key: String) {
 
     // Pages pushed from Settings
     data object Appearance : Route("appearance")
+    data object DisguisePage : Route("disguise") // not "Disguise": that's the enum in Disguise.kt
     data object Describe : Route("describe")
     data object Updates : Route("updates")
     data object Diagnostics : Route("diagnostics")
@@ -175,8 +197,12 @@ private sealed class Route(val key: String) {
 
     companion object {
         fun of(key: String): Route? = key.removePrefix("open:").toLongOrNull()?.takeIf { key.startsWith("open:") }?.let(::Open)
+            ?: key.removePrefix("group:").toLongOrNull()?.takeIf { key.startsWith("group:") }?.let(::Group)
             ?: key.removePrefix("cleanup:").takeIf { key.startsWith("cleanup:") }?.let { Clean(it.ifEmpty { null }) }
-            ?: listOf(Albums, Places, People, PeopleReview, Trash, Search, Settings, Storage, PrivateSafe, HiddenItems, Appearance, Describe, Updates, Diagnostics, About, Licences)
+            ?: key.takeIf { it == "map" }?.let { Map() }
+            ?: key.removePrefix("map:").takeIf { key.startsWith("map:") }?.split(',')?.takeIf { it.size == 3 }
+                ?.let { (id, lat, lng) -> Map(MapFocus(id.toLong(), lat.toDouble(), lng.toDouble())) }
+            ?: listOf(Albums, Places, People, PeopleReview, Trash, Search, Settings, Storage, PrivateSafe, HiddenItems, DriveBackup, Appearance, DisguisePage, Describe, Updates, Diagnostics, About, Licences)
                 .find { it.key == key }
     }
 }
@@ -206,14 +232,14 @@ private val mediaPermissions = buildList {
     add(ACCESS_MEDIA_LOCATION) // lets the smart index read where photos were taken (EXIF GPS), for Places
 }.toTypedArray()
 
-/** What an open album page shows, reported up so the viewer and the selection bar work on the same photos. */
-private class PageInfo(val key: String, val items: List<Media>, val collection: CollectionAlbum?, val person: PersonAlbum?)
+/** What an open album page (or Clean up, or Storage) shows, reported up so the viewer and the selection bar work on the same photos. */
+private class PageInfo(val key: String, val items: List<Media>, val collection: CollectionAlbum?, val person: PersonAlbum?, val title: String? = null)
 
 /** A memory or album playing as a story. */
 private class Story(val items: List<Media>, val title: String?, val eyebrow: String?)
 
 @Composable
-private fun AlbumShell() {
+private fun AlbumShell(link: MutableStateFlow<AlbumLink?>) {
     val context = LocalContext.current
     val spec = AlbumTheme.spec
     val c = spec.colors
@@ -265,6 +291,7 @@ private fun AlbumShell() {
     var jumpDay by rememberSaveable { mutableStateOf<Long?>(null) } // a day picked in the calendar, until the Library is there
     var libraryMenu by remember { mutableStateOf(false) }
     var albumMenu by remember { mutableStateOf<List<Media>?>(null) } // the selection, while "Add to" is open
+    var moreMenu by remember { mutableStateOf<List<Media>?>(null) } // the selection, while its More is open
     var addingToCollection by remember { mutableStateOf<List<Long>?>(null) }
     var story by remember { mutableStateOf<Story?>(null) }
     var protecting by remember { mutableStateOf<List<Media>?>(null) } // For you's ID-card photos, while asking
@@ -283,15 +310,36 @@ private fun AlbumShell() {
     val albums = remember(media) { albumsOf(media) }
     val specials = remember(media, trash) { specialCounts(media, trash.orEmpty().size) }
     val collections = rememberCollections(media)
+    // Opened once the Library and Hidden items have loaded, and only among what Album shows: any app can send a link
+    val pending by link.collectAsState()
+    LaunchedEffect(pending, loaded != null) {
+        val l = pending ?: return@LaunchedEffect
+        if (loaded == null) return@LaunchedEffect
+        link.value = null
+        CrashLog.note("open link ${l.javaClass.simpleName}")
+        clearSelection()
+        viewerId = null
+        when (l) {
+            is AlbumLink.OpenAlbum -> if (hiddenItems?.isHiddenAlbum(l.albumId, everything) != true) {
+                story = null
+                stack.clear() // Back from it lands on the tabs
+                push(Route.Open(l.albumId))
+            }
+            is AlbumLink.PlayMemory -> {
+                val byId = media.associateBy { it.id }
+                val items = l.ids.mapNotNull { byId[it] }
+                if (items.isNotEmpty()) story = Story(items, l.title, l.eyebrow)
+            }
+        }
+    }
 
     // Pages report what they show, so the viewer and the selection bar act on the photos on screen
     var page by remember { mutableStateOf<PageInfo?>(null) }
     var searchState by remember { mutableStateOf<SearchState?>(null) }
     val shown = when (top) {
-        is Route.Open -> page?.takeIf { it.key == top.key }?.items.orEmpty()
+        is Route.Open, is Route.Clean, Route.Storage -> page?.takeIf { it.key == top.key }?.items.orEmpty()
+        Route.DriveBackup -> media // the not-backed-up grid opens photos from the whole Library
         Route.Search -> searchState?.items.orEmpty()
-        // Clean up and Storage show items from every folder (WhatsApp may be hidden from the Library)
-        is Route.Clean, Route.Storage -> media
         null -> if (tab == Tab.Library) photos else emptyList()
         else -> emptyList()
     }
@@ -395,6 +443,11 @@ private fun AlbumShell() {
             PermissionScreen { askAccess.launch(mediaPermissions) }
             return@Box
         }
+        // Once, after photo access: where Album saves what it makes. Photos keep loading meanwhile.
+        if (!SavePrefs.asked.collectAsState().value) {
+            SaveLocationStep()
+            return@Box
+        }
 
         @Composable
         fun TabPage(t: Tab) {
@@ -417,19 +470,18 @@ private fun AlbumShell() {
                         onMore = { libraryMenu = true },
                     )
                     Tab.Collections -> CollectionsScreen(
-                        albums, specials, collections, collectionsGrid, tabPadding,
+                        albums, specials, collections, media, albumActions, collectionsGrid, tabPadding,
                         onOpen = { id ->
                             CrashLog.note("open album ${Special.entries.find { it.id == id }?.name ?: if (collectionIdOf(id) != null) "collection" else "other"}")
                             openId(id)
                         },
+                        onOpenGroup = { push(Route.Group(it)) },
                         onAllAlbums = { push(Route.Albums) },
                         onAllPlaces = { push(Route.Places) },
                         onAllPeople = { push(Route.People) },
                         onReviewPeople = { push(Route.PeopleReview) },
                         onOpenSafe = { push(Route.PrivateSafe) },
                         onOpenHidden = { push(Route.HiddenItems) },
-                        onAction = albumActions::onAlbum,
-                        onNewAlbum = albumActions::newAlbum,
                         onSettings = { push(Route.Settings) },
                     )
                     Tab.ForYou -> ForYouScreen(
@@ -515,17 +567,23 @@ private fun AlbumShell() {
                                 selectMode = selectMode,
                                 onStartSelecting = startSelecting,
                                 report = { page = it },
+                                onZip = albumActions::shareZip,
                             )
                         }
+                        is Route.Group -> AlbumGroupScreen(
+                            route.id, albums, collections, media, albumActions, albumGrids.getOrPut(route.key) { LazyGridState() },
+                            onBack = pop, onOpen = openId,
+                        )
                         Route.HiddenItems -> HiddenItemsScreen(onBack = pop, onOpen = openId)
                         Route.Albums -> AllAlbumsScreen(
-                            albums, collections, albumsGrid, onBack = pop, onOpen = openId,
-                            onAction = albumActions::onAlbum, onNewAlbum = albumActions::newAlbum,
+                            albums, collections, media, albumActions, albumsGrid, onBack = pop, onOpen = openId,
+                            onOpenGroup = { push(Route.Group(it)) },
                         )
-                        Route.Places -> PlacesScreen(placesGrid, onBack = pop, onOpen = openId)
+                        Route.Places -> PlacesScreen(placesGrid, onBack = pop, onOpen = openId, onMap = { push(Route.Map()) })
+                        is Route.Map -> MapScreen(onBack = pop, onOpen = openId, focus = route.focus)
                         // Clean up and Storage get every item: WhatsApp may live in folders hidden from the Library
-                        is Route.Clean -> CleanupScreen(media, onBack = pop, onOpen = open, category = route.category)
-                        Route.Storage -> StorageScreen(media, onBack = pop, onOpenCategory = { push(Route.Clean(it)) }, onOpen = open)
+                        is Route.Clean -> CleanupScreen(media, onBack = pop, onOpen = open, category = route.category, report = { page = PageInfo(route.key, it, null, null) })
+                        Route.Storage -> StorageScreen(media, onBack = pop, onOpenCategory = { push(Route.Clean(it)) }, onOpen = open, report = { page = PageInfo(route.key, it, null, null) })
                         Route.PrivateSafe -> SafeScreen(onBack = pop)
                         Route.People -> PeopleScreen(peopleGrid, onBack = pop, onOpenPerson = openId, onReviewPeople = { push(Route.PeopleReview) })
                         Route.PeopleReview -> PeopleReviewScreen(onBack = pop)
@@ -533,10 +591,12 @@ private fun AlbumShell() {
                         Route.Settings -> SettingsScreen(
                             onBack = pop, onAppearance = { push(Route.Appearance) }, onOpenTrash = { push(Route.Trash) },
                             onHiddenItems = { push(Route.HiddenItems) }, onOpenSafe = { push(Route.PrivateSafe) },
-                            onDescribe = { push(Route.Describe) },
+                            onDescribe = { push(Route.Describe) }, onDisguise = { push(Route.DisguisePage) }, onBackup = { push(Route.DriveBackup) },
                             onUpdates = { push(Route.Updates) }, onDiagnostics = { push(Route.Diagnostics) }, onAbout = { push(Route.About) },
                         )
                         Route.Appearance -> AppearanceScreen(onBack = pop, columns = photosColumns)
+                        Route.DisguisePage -> DisguiseScreen(onBack = pop)
+                        Route.DriveBackup -> BackupScreen(onBack = pop, onOpen = open)
                         Route.Describe -> DescribeScreen(onBack = pop)
                         Route.Updates -> UpdatesScreen(onBack = pop)
                         Route.Diagnostics -> DiagnosticsScreen(onBack = pop)
@@ -617,6 +677,7 @@ private fun AlbumShell() {
                         CrashLog.note("trash ${items.size}")
                         trashWithUndo(items)
                     },
+                    onMore = { moreMenu = it },
                 )
             }
         }
@@ -669,6 +730,10 @@ private fun AlbumShell() {
                 MenuRow(Sym.Lock, "Private safe", { albumMenu = null; moveToSafe(items) }, sub = "Encrypted, opens with your fingerprint")
             }
         }
+        moreMenu?.let { items ->
+            val title = page?.takeIf { top is Route.Open && it.key == top.key }?.title
+            SelectionMoreSheet(items, title, albumActions) { moreMenu = null }
+        }
         protecting?.let { items ->
             ConfirmBar(
                 title = "Move ${countOf(items.size, "photo")} to Private safe?",
@@ -697,7 +762,7 @@ private fun AlbumShell() {
         // A recreated activity (rotation, dark mode, split screen) restores viewerId before the open album or search has
         // reported its photos; waiting for them keeps the viewer from closing itself on an empty list
         val shownReady = when (top) {
-            is Route.Open -> page?.key == top.key
+            is Route.Open, is Route.Clean, Route.Storage -> page?.key == top.key
             Route.Search -> searchState?.result != null
             else -> loaded != null
         }
@@ -710,6 +775,12 @@ private fun AlbumShell() {
                 onMoveToSafe = { m -> moveToSafe(listOf(m)) },
                 openFrom = openedFrom,
                 closeTo = cellOnScreen,
+                onEditDate = { m -> albumActions.editDate(listOf(m)) },
+                onEditPlace = { m -> albumActions.editPlace(listOf(m)) },
+                onShowOnMap = { f ->
+                    viewerId = null // the map opens on its own, not under the viewer
+                    push(Route.Map(f))
+                },
             )
             // The main snackbar sits under the viewer, so the viewer gets its own host for Undo
             SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = viewerSnackbarGap)) { AlbumSnackbar(it) }
@@ -882,6 +953,7 @@ private fun AlbumPage(
     selectMode: Boolean,
     onStartSelecting: () -> Unit,
     report: (PageInfo) -> Unit,
+    onZip: (title: String, items: List<Media>) -> Unit,
 ) {
     val id = route.id
     val album = albums.find { it.id == id }
@@ -892,8 +964,9 @@ private fun AlbumPage(
     val items = remember(media, id, collection, smart, person) {
         collection?.items ?: smart?.items ?: person?.items ?: media.filter { it.isIn(id) }
     }
-    DisposableEffect(route.key, items, collection, person) {
-        report(PageInfo(route.key, items, collection, person))
+    val title = album?.name ?: special?.title ?: collection?.name ?: smart?.title ?: person?.let(::personTitle).orEmpty()
+    DisposableEffect(route.key, items, collection, person, title) {
+        report(PageInfo(route.key, items, collection, person, title.ifEmpty { null }))
         onDispose {}
     }
     // An album that stops existing (merged, emptied, deleted) closes after a moment for its data to load, instead of
@@ -905,10 +978,10 @@ private fun AlbumPage(
             onBack()
         }
     }
-    val title = album?.name ?: special?.title ?: collection?.name ?: smart?.title ?: person?.let(::personTitle).orEmpty()
     val subtitle = countOf(items.size, "item")
     val actions: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {
         if (items.isNotEmpty()) {
+            AlbumIconButton(Sym.Share, "Share as ZIP", { onZip(title, items) })
             AlbumIconButton(Sym.CheckCircle, "Select", onStartSelecting)
         }
     }
@@ -950,6 +1023,7 @@ private fun SelectionActions(
     onRemove: (CollectionAlbum, List<Long>) -> Unit,
     onNotPerson: (PersonAlbum, List<Long>) -> Unit,
     onTrash: (List<Media>) -> Unit,
+    onMore: (List<Media>) -> Unit,
 ) {
     // Read at tap time, not on every selection change. With nothing picked yet (Select), the actions wait.
     val items = { shown.filter { it.id in selected } }
@@ -967,6 +1041,7 @@ private fun SelectionActions(
         add(act("Favourite", Sym.Favorite) { onFavourite(items()) })
         if (person != null) add(act("Not them", Sym.PersonRemove) { onNotPerson(person, items().map { it.id }) })
         if (collection == null) add(act("Delete", Sym.Delete, danger = true) { onTrash(items()) })
+        add(act("More", Sym.MoreHoriz) { onMore(items()) }) // Share as ZIP, Edit date and time, Edit place
     }
     SelectionBar(
         selected.size, actions, onClear,

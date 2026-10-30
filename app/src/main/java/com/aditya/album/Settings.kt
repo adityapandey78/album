@@ -84,9 +84,11 @@ fun SettingsScreen(
     onHiddenItems: () -> Unit,
     onOpenSafe: () -> Unit,
     onDescribe: () -> Unit,
+    onDisguise: () -> Unit,
     onUpdates: () -> Unit,
     onDiagnostics: () -> Unit,
     onAbout: () -> Unit,
+    onBackup: () -> Unit,
 ) {
     val context = LocalContext.current
     val c = AlbumTheme.colors
@@ -107,6 +109,7 @@ fun SettingsScreen(
 
         Title("Privacy")
         PrivacyRows(onHiddenItems, Modifier.bleed(Space.s1), onOpenSafe)
+        DisguiseRow(onDisguise, Modifier.bleed(Space.s1))
         SwitchRow(
             "Hide private places", "Leaves Recently deleted, Private safe and Hidden items out of Collections. Open them from here.", a.hidePrivate,
             { v -> AppearancePrefs.update { it.copy(hidePrivate = v) } }, icon = Sym.VisibilityOff,
@@ -115,8 +118,10 @@ fun SettingsScreen(
 
         Title("Behaviour")
         MediaManagementRow()
+        SaveLocationRow(Modifier.bleed(Space.s1))
         EditingAppRow(Modifier.bleed(Space.s1))
         RotateSaveRow(Modifier.bleed(Space.s1))
+        MemoryNotificationRow(Modifier.bleed(Space.s1))
         SwitchRow(
             "Haptic feedback", "Ticks on select, pinch and swipe.", a.haptics,
             { v -> AppearancePrefs.update { it.copy(haptics = v) } }, icon = Sym.Vibration,
@@ -127,6 +132,7 @@ fun SettingsScreen(
 
         // A section's gap without a title: these rows are pages, not choices
         Spacer(Modifier.height(Space.s4))
+        BackupRow(onBackup, Modifier.bleed(Space.s1))
         MenuRow(Sym.SystemUpdate, "Updates", onUpdates, Modifier.bleed(Space.s1), sub = "Version ${remember { Updater.currentVersion(context) }}")
         MenuRow(Sym.BugReport, "Diagnostics", onDiagnostics, Modifier.bleed(Space.s1), sub = logs?.let(::crashLogs))
         MenuRow(Sym.Info, "About", onAbout, Modifier.bleed(Space.s1), sub = "Developer and open-source licences")
@@ -217,7 +223,7 @@ fun AppearanceScreen(onBack: () -> Unit, columns: MutableIntState) {
 
 /** A page of Settings, or one pushed from it: the collapsed top bar over a scrolling column at the screen's margin. */
 @Composable
-private fun SettingsPage(
+internal fun SettingsPage(
     title: String,
     onBack: () -> Unit,
     scroll: ScrollState = rememberScrollState(),
@@ -247,14 +253,14 @@ private fun Modifier.bleed(x: Dp) = layout { measurable, constraints ->
 
 // ---------- Appearance controls ----------
 
-private class Choice<T>(val value: T, val label: String, val sublabel: String? = null, val preview: @Composable () -> Unit)
+internal class Choice<T>(val value: T, val label: String, val sublabel: String? = null, val preview: @Composable () -> Unit)
 
 /**
  * A row of visual choices where exactly one is picked: theme, look and gallery style. The picked one gets a 2dp flash-ink
  * outline and a flash check, so the choice never rests on colour alone. Choosing applies at once.
  */
 @Composable
-private fun <T> ChoiceGroup(options: List<Choice<T>>, value: T, onChange: (T) -> Unit) {
+internal fun <T> ChoiceGroup(options: List<Choice<T>>, value: T, onChange: (T) -> Unit) {
     val c = AlbumTheme.colors
     val type = AlbumTheme.type
     val shape = RoundedCornerShape(Space.radiusMd)
@@ -560,6 +566,7 @@ private val Licences = listOf(
     Licence("Face detection (YuNet)", "OpenCV Zoo", "MIT License", "yunet-MIT.txt", Sym.Face),
     Licence("Face recognition (EdgeFace-S)", "Idiap Research Institute", "CC BY-NC-SA 4.0, non-commercial", "edgeface-CC-BY-NC-SA-4.0.txt", Sym.Face),
     Licence("Place names", "GeoNames, geonames.org", "CC BY 4.0", "geonames-CC-BY-4.0.txt", Sym.LocationOn),
+    Licence("Map", "Natural Earth, naturalearthdata.com", "Public domain", "natural-earth-public-domain.txt", Sym.Map),
     Licence("Photo hashing (PDQ)", "Meta ThreatExchange", "BSD License", "pdq-BSD.txt", Sym.ContentCopy),
     Licence("Describe-it search model", "Meta Perception Encoder, downloaded on request", "Apache License 2.0", "perception-encoder-Apache-2.0.txt", Sym.Search),
     Licence("Describe-it search vocabulary", "OpenAI CLIP", "MIT License", "clip-bpe-vocabulary-MIT.txt", Sym.MenuBook),

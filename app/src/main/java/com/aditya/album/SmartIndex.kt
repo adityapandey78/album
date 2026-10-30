@@ -245,6 +245,9 @@ object SmartIndex {
     }
 
     /** Where photo [mediaId] was taken as the index has it, or null when it isn't indexed. Blocking: call off the main thread. */
+    /** Where each photo with its own GPS was taken, for the map. Estimated places have no point, so they aren't here. */
+    fun gps(): Flow<List<ItemGps>> = dao.gps()
+
     fun placeOf(mediaId: Long): ItemPlace? = dao.place(mediaId)
 
     /**
@@ -253,6 +256,28 @@ object SmartIndex {
      */
     suspend fun forget(ids: Collection<Long>) = withContext(Dispatchers.IO) {
         if (::app.isInitialized) ids.chunked(500).forEach { dao.remove(it) } // under SQLite's 999-variable limit
+    }
+
+    // ---------- Places the user fixed (FixDetails.kt) ----------
+
+    /** A spot in [place]: where one of its photos was taken, nearest the middle of them all. Null when none has GPS. */
+    suspend fun spotIn(place: Place): DoubleArray? = withContext(Dispatchers.IO) {
+        middleOf(dao.gpsIn(place.city, place.admin1, place.countryCode).map { doubleArrayOf(it.lat, it.lng) })
+    }
+
+    /** Where [ids] are as the index has them now, for Undo. */
+    suspend fun spotsOf(ids: List<Long>): List<ItemSpot> = withContext(Dispatchers.IO) { ids.chunked(500).flatMap { dao.spots(it) } }
+
+    suspend fun restoreSpots(spots: List<ItemSpot>) = withContext(Dispatchers.IO) { dao.setSpots(spots) }
+
+    /**
+     * Puts the places the user fixed into the index, so Places, search and the details show them: the place they picked,
+     * at its spot when Album knows one, or no place. Only rows that differ are written.
+     */
+    suspend fun applyFixes(fixes: List<MediaFix>) = withContext(Dispatchers.IO) {
+        val wanted = fixes.filter { it.placeFixed }.map { ItemSpot(it.mediaId, it.lat, it.lng, estimated = false, place = it.place) }
+        val now = wanted.map { it.id }.chunked(500).flatMap { dao.spots(it) }.associateBy { it.id }
+        dao.setSpots(wanted.filter { w -> now[w.id]?.let { it != w } == true }) // an item not indexed yet gets it at the end of its pass
     }
 
     /** Text read from photo [mediaId], or null when it has none (or isn't indexed yet). Blocking: call off the main thread. */
@@ -316,7 +341,13 @@ object SmartIndex {
                 }
                 analysed += plan.analyse.size
             } while (plan.analyse.isNotEmpty()) // photos taken during the pass are picked up before it ends
-            estimate(found)
+            // Places the user fixed win over GPS and estimates, while the file is as it was when they fixed it. They live in
+            // collections.db, so they come back here after the index is analysed again or rebuilt.
+            val stamps = found.associateBy { it.id }
+            val fixed = runCatching { Collections.allFixes() }.getOrDefault(emptyList())
+                .filter { it.placeFixed && stamps[it.mediaId]?.modified == it.modified }
+            estimate(found, fixed.mapTo(HashSet()) { it.mediaId })
+            applyFixes(fixed)
         } finally {
             labeler.close()
             reader.close()
@@ -335,16 +366,17 @@ object SmartIndex {
     /**
      * Gives camera photos without GPS the place of a camera photo with GPS taken around the same time (see
      * [estimatePlaces]), marked estimated, and takes estimates back when their photos change. Only the phone's own
-     * camera photos give or get one ([captureTime]); every other item's estimate is taken back. Writes only what changed.
+     * camera photos give or get one ([captureTime]); every other item's estimate is taken back. Places the user [fixed] are
+     * left alone. Writes only what changed.
      */
-    private suspend fun estimate(found: List<MediaStamp>) {
+    private suspend fun estimate(found: List<MediaStamp>, fixed: Set<Long>) {
         val stamps = found.associateBy { it.id }
         val rows = dao.itemPlaces().filter { it.id in stamps }
         val with = rows.mapNotNull { row ->
             val place = row.place?.takeIf { row.gps } ?: return@mapNotNull null
             stamps.getValue(row.id).taken?.let { row.id to (it to place) }
         }.toMap()
-        val without = rows.filter { !it.gps }
+        val without = rows.filter { !it.gps && it.id !in fixed }
         val times = without.mapNotNull { row -> stamps.getValue(row.id).taken?.let { row.id to it } }.toMap()
         val zone = ZoneId.systemDefault()
         // An estimate claims the city, not the street: two hours is time enough to cross town

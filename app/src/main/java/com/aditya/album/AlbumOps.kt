@@ -36,7 +36,9 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalBottomSheetProperties
 import androidx.compose.material3.SheetValue
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -58,6 +60,9 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.core.content.edit
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -71,6 +76,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.time.ZoneId
 
 // Folder albums: move and copy photos between them, create, rename, pin, hide from the Library, delete, and sort.
 // Files only ever change through MediaStore, one item at a time, so a job that fails or stops part-way leaves
@@ -88,6 +95,9 @@ enum class AlbumSort(val label: String, val order: String) {
     Count("Most items", "Most items first"),
     Updated("Recently updated", "Recently updated first"),
 }
+
+/** The progress card's line for jobs where every item is done whole. */
+private const val DONE_WHOLE = "Each item is done whole, so stopping loses nothing."
 
 /** What the long-press menu on a folder album can do. */
 enum class AlbumAction { Rename, Pin, Hide, Delete }
@@ -166,7 +176,8 @@ fun canHold(path: String, isVideo: Boolean): Boolean {
 /** RELATIVE_PATH of the folder at [path] after renaming it to [name]: same parent folder. */
 fun renamedPath(path: String, name: String) = path.trimEnd('/').substringBeforeLast('/') + "/$name/"
 
-private val systemFolders = setOf("dcim/camera/", "dcim/screenshots/", "pictures/screenshots/", "movies/screen recordings/", "dcim/screen recordings/")
+/** Folders the camera, screenshots and screen recorder write to: Album never renames them or saves inside them. */
+val systemFolders = setOf("dcim/camera/", "dcim/screenshots/", "pictures/screenshots/", "movies/screen recordings/", "dcim/screen recordings/")
 
 /** Why the folder at [path] can't be renamed, or null if it can. The camera, screenshots and other apps expect their folders to stay put. */
 fun renameBlocked(path: String): String? {
@@ -248,8 +259,14 @@ object AlbumOps {
     private var job: Job? = null
     @Volatile private var stopping = false
 
-    /** [current] is 1-based: "Moving 3 of 40". */
-    class Progress(val doing: String, val current: Int, val total: Int)
+    /**
+     * [current] is 1-based: "Moving 3 of 40". [note] says what stopping does. [fraction] moves the line by bytes where
+     * one item can take long (a big video in a ZIP); null moves it by items.
+     */
+    class Progress(val doing: String, val current: Int, val total: Int, val note: String = DONE_WHOLE, val fraction: Float? = null)
+
+    /** A result for the snackbar, with [undo] when it can be taken back. */
+    class Message(val text: String, val undo: (() -> Unit)? = null)
 
     /** A MediaStore write request waiting for Android's pop-up, which [AlbumActionsHost] shows. */
     class Ask(val request: PendingIntent) {
@@ -261,7 +278,11 @@ object AlbumOps {
     val asking = MutableStateFlow<Ask?>(null)
 
     /** Results for the snackbar, kept until shown, so a rotation can't drop one. */
-    val messages = Channel<String>(Channel.UNLIMITED)
+    val messages = Channel<Message>(Channel.UNLIMITED)
+
+    fun say(text: String, undo: (() -> Unit)? = null) {
+        messages.trySend(Message(text, undo))
+    }
 
     /** Finishes the item in hand, then stops. Everything done so far stays done. */
     fun stop() {
@@ -273,24 +294,28 @@ object AlbumOps {
         asking.value?.answer?.complete(granted)
     }
 
-    /** Moves or copies [items] into the folder at [path], shown to the user as [album]. */
-    fun transfer(context: Context, items: List<Media>, path: String, album: String, transfer: Transfer) = start {
+    /**
+     * Moves or copies [items] into the folder at [path], shown to the user as [album]. [into] is a photo already in that
+     * folder, so copies land on its storage; null for a new album, which goes where Album saves (see [SavePrefs]).
+     */
+    fun transfer(context: Context, items: List<Media>, path: String, album: String, transfer: Transfer, into: Uri?) = start {
         val todo = if (transfer == Transfer.Move) items.filter { folderKey(it.path) != folderKey(path) } else items
         when {
             todo.isEmpty() -> "Already in $album"
             transfer == Transfer.Move -> move(context.contentResolver, todo, path, transfer.doing).let { (moved, tried) ->
                 transferMessage(transfer, moved, tried - moved, album)
             }
-            // Shared storage sits on the same partition as the app's own files
-            todo.sumOf { it.size } > context.filesDir.usableSpace -> "Not enough space to copy ${itemCount(todo.size)}"
             else -> {
+                // A move never changes storage (Android renames the file where it is), so only copies need to know which
+                val volume = if (into != null) volumeOf(context.contentResolver, into) else SavePrefs.target(context).volume
+                if (todo.sumOf { it.size } > (freeSpace(context, volume) ?: Long.MAX_VALUE)) return@start "Not enough space to copy ${itemCount(todo.size)}"
                 val names = freeNames(todo.map { it.name }, namesIn(path))
                 var copied = 0
                 var tried = 0
                 for ((m, name) in todo.zip(names)) {
                     if (stopping) break
                     progress.value = Progress(transfer.doing, ++tried, todo.size)
-                    if (copy(context, m, path, name)) copied++
+                    if (copy(context, m, volume, path, name)) copied++
                 }
                 transferMessage(transfer, copied, tried - copied, album)
             }
@@ -301,6 +326,7 @@ object AlbumOps {
     fun rename(context: Context, album: Album, items: List<Media>, name: String) = start {
         val path = renamedPath(album.cover.path, name)
         // Carried over before moving, so a hidden album's photos never flash up in the Library on the way
+        savedOrNull { Collections.rekey(album.key, folderKey(path)) } // its group and cover, if it has them
         if (album.key in AlbumPrefs.pinned.value) AlbumPrefs.setPinned(folderKey(path), true)
         if (album.key in AlbumPrefs.hidden.value) AlbumPrefs.setHidden(folderKey(path), true)
         if (album.key in AlbumPrefs.locked.value) AlbumPrefs.setLocked(folderKey(path), true)
@@ -316,6 +342,8 @@ object AlbumOps {
             AlbumPrefs.setHidden(it, false)
             AlbumPrefs.setLocked(it, false)
         }
+        // Nothing moved (the user said no): the old folder keeps its group and cover. Part moved: the new one has them.
+        if (moved == 0) savedOrNull { Collections.rekey(folderKey(path), album.key) }
         when {
             tried == 0 -> null
             moved == items.size -> "Renamed to $name"
@@ -323,7 +351,10 @@ object AlbumOps {
         }
     }
 
-    private fun start(work: suspend () -> String?) {
+    private fun start(work: suspend () -> String?) = runJob { work()?.let { Message(it) } }
+
+    /** Runs [work] as the one job: its progress card shows, Stop ends it, and what it returns goes to the snackbar. */
+    internal fun runJob(work: suspend () -> Message?) {
         val previous = job
         job = scope.launch {
             previous?.cancelAndJoin() // only ever one left waiting on a pop-up that a closed screen never answered
@@ -333,9 +364,9 @@ object AlbumOps {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                // Each item is moved or copied whole or not at all, so an unexpected failure loses nothing
+                // Each item is moved, copied or fixed whole or not at all, so an unexpected failure loses nothing
                 CrashLog.note("album job failed: $e")
-                messages.trySend("Something went wrong. Nothing was lost.")
+                say("Something went wrong. Nothing was lost.")
             } finally {
                 progress.value = null
                 asking.value = null
@@ -343,7 +374,10 @@ object AlbumOps {
         }
     }
 
-    private suspend fun ask(request: PendingIntent): Boolean {
+    /** Whether Stop was tapped: a job checks between items (and a ZIP inside big ones). */
+    internal val stopped get() = stopping
+
+    internal suspend fun ask(request: PendingIntent): Boolean {
         val ask = Ask(request)
         asking.value = ask
         return ask.answer.await().also { asking.value = null }
@@ -378,10 +412,10 @@ object AlbumOps {
     }
 
     /**
-     * Copies [m] to a new MediaStore row in [path]. The row stays pending (invisible to other apps) until every
+     * Copies [m] to a new MediaStore row in [path] on [volume]. The row stays pending (invisible to other apps) until every
      * byte is written; if anything fails it's deleted again. The original is only ever read.
      */
-    private fun copy(context: Context, m: Media, path: String, name: String): Boolean {
+    private fun copy(context: Context, m: Media, volume: String, path: String, name: String): Boolean {
         val resolver = context.contentResolver
         // Without this Android blanks the GPS tags in what it reads out, and the copy would lose where it was taken
         val source = if (context.checkSelfPermission(ACCESS_MEDIA_LOCATION) == PackageManager.PERMISSION_GRANTED) MediaStore.setRequireOriginal(m.uri) else m.uri
@@ -392,11 +426,7 @@ object AlbumOps {
             put(MediaColumns.DATE_TAKEN, m.taken) // keeps the copy next to the original in the timeline
             put(MediaColumns.IS_PENDING, 1)
         }
-        val collection = if (m.isVideo) {
-            MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        } else {
-            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        }
+        val collection = if (m.isVideo) MediaStore.Video.Media.getContentUri(volume) else MediaStore.Images.Media.getContentUri(volume)
         var copy: Uri? = null
         return try {
             val uri = checkNotNull(resolver.insert(collection, values)).also { copy = it }
@@ -433,9 +463,58 @@ class AlbumActions internal constructor(private val context: Context, private va
         class Delete(val album: Album) : Step
         /** A move Android won't ask about itself (Media management is on), so Album asks before files leave their folder. */
         class ConfirmMove(val items: List<Media>, val path: String, val album: String) : Step
+        /** Share as ZIP's sheet, for [parts] in a ZIP called [name]. */
+        class Zip(val name: String, val parts: List<ZipPart>) : Step
+        class EditDate(val items: List<Media>) : Step
+        class EditPlace(val items: List<Media>) : Step
     }
 
     internal var step by mutableStateOf<Step?>(null)
+
+    /** A ZIP waiting for the folder the user picks for it, and whether it keeps location. */
+    internal var saving: Pair<Step.Zip, Boolean>? = null
+
+    /**
+     * Share as ZIP for [items]: a selection, or an album's photos. [title] names the ZIP ("Goa 2024.zip"); without one
+     * (the Library, search) the photos' dates do.
+     */
+    fun shareZip(title: String?, items: List<Media>) = shareZipParts(title, listOf(ZipPart(null, items)))
+
+    /** Share as ZIP with a folder for each part: a group's albums. */
+    internal fun shareZipParts(title: String?, parts: List<ZipPart>) {
+        val items = parts.flatMap { it.items }
+        if (items.isEmpty()) return
+        CrashLog.note("share as zip ${items.size}")
+        step = Step.Zip(zipName(title, items.map { it.taken }, ZoneId.systemDefault()), parts)
+    }
+
+    internal fun startZip(zip: Step.Zip, keepLocation: Boolean, target: ZipTarget) {
+        step = null
+        onStart()
+        Zips.start(context.applicationContext, zip.name, zip.parts, keepLocation, target)
+    }
+
+    /** Edit date and time for [items]: one from the viewer, or a selection of up to [MAX_REQUEST]. */
+    fun editDate(items: List<Media>) {
+        if (context.canSend(items.size, MAX_REQUEST, "change")) step = Step.EditDate(items)
+    }
+
+    /** Edit place for [items]: one from the viewer, or a selection of up to [MAX_REQUEST]. */
+    fun editPlace(items: List<Media>) {
+        if (context.canSend(items.size, MAX_REQUEST, "change")) step = Step.EditPlace(items)
+    }
+
+    internal fun fixDates(items: List<Media>, shift: Long) {
+        step = null
+        onStart()
+        FixDetails.dates(context.applicationContext, items, shift)
+    }
+
+    internal fun fixPlaces(items: List<Media>, to: Place?) {
+        step = null
+        onStart()
+        FixDetails.places(context.applicationContext, items, to)
+    }
 
     /** Selection bar: pick an album (or make one), then move or copy [items] into it. */
     fun moveOrCopy(items: List<Media>, transfer: Transfer) {
@@ -453,13 +532,13 @@ class AlbumActions internal constructor(private val context: Context, private va
         when (action) {
             AlbumAction.Rename -> {
                 val blocked = renameBlocked(album.cover.path)
-                if (blocked != null) AlbumOps.messages.trySend(blocked) else step = Step.Rename(album)
+                if (blocked != null) AlbumOps.say(blocked) else step = Step.Rename(album)
             }
             AlbumAction.Pin -> AlbumPrefs.setPinned(album.key, album.key !in AlbumPrefs.pinned.value)
             AlbumAction.Hide -> AlbumPrefs.setHidden(album.key, album.key !in AlbumPrefs.hidden.value)
             // Android takes at most MAX_REQUEST items per request, and splitting an album across two Undos would muddle both
             AlbumAction.Delete -> if (album.count > MAX_REQUEST) {
-                AlbumOps.messages.trySend(
+                AlbumOps.say(
                     "${album.name} has ${itemCount(album.count)}. Android moves up to ${"%,d".format(MAX_REQUEST)} at a time to Trash, " +
                         "so open the album and delete its photos in parts.",
                 )
@@ -469,7 +548,8 @@ class AlbumActions internal constructor(private val context: Context, private va
         }
     }
 
-    internal fun start(items: List<Media>, path: String, album: String, transfer: Transfer, confirmed: Boolean = false) {
+    /** [into] is a photo already in the target folder, null for a new album (see [AlbumOps.transfer]). */
+    internal fun start(items: List<Media>, path: String, album: String, transfer: Transfer, confirmed: Boolean = false, into: Uri? = null) {
         // A move has no Undo; without Media management Android's own pop-up asks first, with it nothing would
         if (transfer == Transfer.Move && !confirmed && MediaStore.canManageMedia(context)) {
             step = Step.ConfirmMove(items, path, album)
@@ -478,7 +558,7 @@ class AlbumActions internal constructor(private val context: Context, private va
         step = null
         onStart()
         CrashLog.note("${transfer.verb} ${items.size}")
-        AlbumOps.transfer(context.applicationContext, items, path, album, transfer)
+        AlbumOps.transfer(context.applicationContext, items, path, album, transfer, into)
     }
 }
 
@@ -497,6 +577,7 @@ fun rememberAlbumActions(onStart: () -> Unit): AlbumActions {
 @Composable
 fun AlbumActionsHost(actions: AlbumActions, media: List<Media>, albums: List<Album>, snackbar: SnackbarHostState) {
     val context = LocalContext.current
+    SavePrefs.load(context)
     val trashWithUndo = rememberTrashWithUndo(snackbar)
     val request = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {
         AlbumOps.answer(it.resultCode == Activity.RESULT_OK)
@@ -508,10 +589,35 @@ fun AlbumActionsHost(actions: AlbumActions, media: List<Media>, albums: List<Alb
             request.launch(IntentSenderRequest.Builder(ask.request).build())
         }
     }
-    LaunchedEffect(snackbar) { for (message in AlbumOps.messages) snackbar.showSnackbar(message) }
+    val save = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        val pending = actions.saving
+        actions.saving = null
+        if (uri != null && pending != null) actions.startZip(pending.first, pending.second, ZipTarget.Document(uri))
+    }
+    // A shared ZIP opens the share sheet once Album is on screen: Android doesn't let an app open one from the background
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(lifecycle) {
+        withContext(Dispatchers.IO) { Zips.clean(context) }
+        lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            for (file in Zips.ready) context.startSafely(Zips.shareIntent(context, file))
+        }
+    }
+    LaunchedEffect(snackbar) {
+        for (m in AlbumOps.messages) {
+            val undo = m.undo
+            if (undo == null) {
+                snackbar.showSnackbar(m.text)
+            } else if (snackbar.showSnackbar(m.text, "Undo", duration = SnackbarDuration.Long) == SnackbarResult.ActionPerformed) {
+                CrashLog.note("undo")
+                undo()
+            }
+        }
+    }
 
     val names = remember(albums) { albums.map { it.name } }
     val close = { actions.step = null }
+    // A new album goes where Album saves; read when it's named, so a change in Settings counts straight away
+    val newFolder = { name: String -> albumFolder(SavePrefs.location.value.folder, name) }
     when (val step = actions.step) {
         null -> {}
         is AlbumActions.Step.Pick -> {
@@ -521,16 +627,22 @@ fun AlbumActionsHost(actions: AlbumActions, media: List<Media>, albums: List<Alb
             val targets = remember(albums, step, pinned, sort) {
                 albums.ordered(sort, pinned).filter { a -> step.items.all { canHold(a.cover.path, it.isVideo) } && step.items.any { it.bucketId != a.id } }
             }
-            AlbumPicker(step, targets, close, onNew = { actions.step = AlbumActions.Step.NewName(step) }) { a ->
-                actions.start(step.items, a.cover.path, a.name, step.transfer)
+            val covers = Collections.organisation.collectAsState().value?.covers
+            val coverOf = remember(covers, media) {
+                val chosen = covers.orEmpty().associate { it.albumKey to it.mediaId }
+                val byId = media.associateBy { it.id };
+                { a: Album -> pickCover(chosen[a.key], byId::get, { it.bucketId == a.id }, a.cover)!! }
+            }
+            AlbumPicker(step, targets, coverOf, close, onNew = { actions.step = AlbumActions.Step.NewName(step) }) { a ->
+                actions.start(step.items, a.cover.path, a.name, step.transfer, into = a.cover.uri)
             }
         }
         is AlbumActions.Step.NewName -> AlbumNameSheet("New album", "", step.pick?.transfer?.name ?: "Next", names, close) { name ->
             val pick = step.pick
-            if (pick == null) actions.step = AlbumActions.Step.Choose(name) else actions.start(pick.items, "Pictures/$name/", name, pick.transfer)
+            if (pick == null) actions.step = AlbumActions.Step.Choose(name) else actions.start(pick.items, newFolder(name), name, pick.transfer)
         }
         is AlbumActions.Step.Choose -> ChoosePhotos(step.name, media, close) { items, transfer ->
-            actions.start(items, "Pictures/${step.name}/", step.name, transfer)
+            actions.start(items, newFolder(step.name), step.name, transfer)
         }
         is AlbumActions.Step.Rename -> AlbumNameSheet("Rename album", step.album.name, "Rename", names, close) { name ->
             close()
@@ -565,6 +677,18 @@ fun AlbumActionsHost(actions: AlbumActions, media: List<Media>, albums: List<Alb
             tone = ConfirmTone.Flash,
             thumbs = step.items.take(3),
         )
+        is AlbumActions.Step.Zip -> ZipSheet(step.name, step.parts, close) { toFolder, keepLocation ->
+            if (toFolder) {
+                // The folder picker comes first; the ZIP is then written straight into the file it makes
+                actions.saving = step to keepLocation
+                close()
+                save.launch(step.name)
+            } else {
+                actions.startZip(step, keepLocation, ZipTarget.Share(Zips.newFile(context, step.name)))
+            }
+        }
+        is AlbumActions.Step.EditDate -> EditDateSheet(step.items, close) { shift -> actions.fixDates(step.items, shift) }
+        is AlbumActions.Step.EditPlace -> EditPlaceSheet(step.items, close) { place -> actions.fixPlaces(step.items, place) }
     }
 
     AlbumOps.progress.collectAsState().value?.let { p ->
@@ -577,14 +701,14 @@ fun AlbumActionsHost(actions: AlbumActions, media: List<Media>, albums: List<Alb
     }
 }
 
-/** Where a move or copy goes: a new album first, then every folder that can hold these items, with its cover. */
+/** Where a move or copy goes: a new album first, then every folder that can hold these items, with its cover ([coverOf]). */
 @Composable
-private fun AlbumPicker(pick: AlbumActions.Step.Pick, albums: List<Album>, onDismiss: () -> Unit, onNew: () -> Unit, onPick: (Album) -> Unit) {
+private fun AlbumPicker(pick: AlbumActions.Step.Pick, albums: List<Album>, coverOf: (Album) -> Media, onDismiss: () -> Unit, onNew: () -> Unit, onPick: (Album) -> Unit) {
     Sheet(onDismiss, "${pick.transfer.name} ${itemCount(pick.items.size)} to") {
         LazyColumn {
             item(key = "new") { MenuRow(Sym.AddPhotoAlternate, "New album", onNew, trailing = null) }
             items(albums, key = { it.id }) { a ->
-                CoverRow(a.name, itemCount(a.count), { onPick(a) }) { Thumbnail(a.cover, Modifier.matchParentSize()) }
+                CoverRow(a.name, itemCount(a.count), { onPick(a) }) { Thumbnail(coverOf(a), Modifier.matchParentSize()) }
             }
         }
     }
@@ -658,8 +782,8 @@ private fun ProgressCard(p: AlbumOps.Progress) {
             verticalArrangement = Arrangement.spacedBy(Space.s4),
         ) {
             Text("${p.doing} ${"%,d".format(p.current)} of ${"%,d".format(p.total)}", style = AlbumTheme.type.titleLg, color = c.ink)
-            Text("Each item is done whole, so stopping loses nothing.", style = AlbumTheme.type.body, color = c.inkMuted)
-            ProgressLine((p.current - 1f) / p.total)
+            Text(p.note, style = AlbumTheme.type.body, color = c.inkMuted)
+            ProgressLine(p.fraction ?: ((p.current - 1f) / p.total))
             AlbumButton("Stop", AlbumOps::stop, Modifier.fillMaxWidth().heightIn(min = Space.target + Space.s2))
         }
     }
@@ -693,5 +817,22 @@ fun AlbumSortSheet(onDismiss: () -> Unit) {
                 trailing = if (on) Sym.Check else null,
             )
         }
+    }
+}
+
+/**
+ * The selection bar's More: what's done to a selection less often. [title] names a ZIP after the open album; null names it
+ * by the photos' dates.
+ */
+@Composable
+fun SelectionMoreSheet(items: List<Media>, title: String?, actions: AlbumActions, onDismiss: () -> Unit) {
+    fun closing(action: () -> Unit): () -> Unit = {
+        onDismiss()
+        action()
+    }
+    Sheet(onDismiss, itemCount(items.size)) {
+        MenuRow(Sym.Share, "Share as ZIP", closing { actions.shareZip(title, items) }, sub = "One file, with the photos as they are", trailing = null)
+        MenuRow(Sym.Schedule, "Edit date and time", closing { actions.editDate(items) }, sub = "For photos saved with the wrong date", trailing = null)
+        MenuRow(Sym.LocationOn, "Edit place", closing { actions.editPlace(items) }, sub = "Set where they were taken, or remove it", trailing = null)
     }
 }

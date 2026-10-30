@@ -236,6 +236,17 @@ object Embeddings {
         }
     }
 
+    /**
+     * The vectors, at unit length, of the photos in [ids] encoded so far, for grouping pets (see groupPets). Empty without
+     * describe-it search: Remove deletes them all. Read from the database, not [state], which is only known a moment
+     * after launch.
+     */
+    suspend fun vectorsOf(ids: Collection<Long>): Map<Long, FloatArray> {
+        if (!::app.isInitialized) return emptyMap()
+        return ids.chunked(500).flatMap { dao.vectorsIn(it) } // under SQLite's 999-variable limit
+            .associate { r -> r.id to unit(FloatArray(r.vector.size) { r.vector[it] * r.scale }) }
+    }
+
     private fun installed() = _state.value.let { it is DescribeState.Ready || it is DescribeState.Indexing }
 
     private fun index() {

@@ -13,8 +13,8 @@ android {
         applicationId = "com.aditya.album"
         minSdk = 33 // Android 13+: READ_MEDIA_* permissions and AGSL shaders, no legacy branches
         targetSdk = 37 // Android 17
-        versionCode = 14
-        versionName = "1.1.0"
+        versionCode = 15
+        versionName = "1.1.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // 64-bit ARM only: the phone and the emulator. Each extra ABI would add another 11 MB ML Kit library.
         ndk { abiFilters += "arm64-v8a" }
@@ -73,6 +73,8 @@ dependencies {
     implementation("com.google.mlkit:text-recognition:16.0.1")
     // Clean up: eyes open and smiles for the best shot; bundled like the labeller. Pinned for the same proguard rule reason.
     implementation("com.google.mlkit:face-detection:16.1.7")
+    // QR codes and barcodes in a photo, on demand in the viewer; model bundled like the others. Pinned for the same proguard rule reason.
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
     // People: runs the bundled YuNet and EdgeFace-S models (assets/faces) on the CPU; describe-it search runs its
     // downloaded model the same way. No Play services.
     implementation("com.google.ai.edge.litert:litert:1.4.2")

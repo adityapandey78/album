@@ -123,14 +123,6 @@ class RotatedCopyTest {
 
     @Test fun aWhatsAppCopyKeepsTheDateInItsName() = assertTrue(isWhatsAppName(rotatedName("IMG-20240315-WA0012.jpg", "jpg")))
 
-    @Test fun copiesGoNextToTheOriginalWhereAlbumCanAddPhotos() {
-        assertEquals("DCIM/Camera/", copyFolder("DCIM/Camera/"))
-        assertEquals("Pictures/Screenshots/", copyFolder("Pictures/Screenshots/"))
-        assertEquals("Pictures/Rotated/", copyFolder("Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/"))
-        assertEquals("Pictures/Rotated/", copyFolder("Download/"))
-        assertEquals("Pictures/Rotated/", copyFolder(""))
-    }
-
     @Test fun hugePhotosAreDecodedSmallerOnlyWhenTheyMustBe() {
         assertEquals(1, sampleSize(8160, 6144, 100_000_000)) // 50 MP fits whole
         assertEquals(2, sampleSize(16320, 12240, 100_000_000)) // 200 MP halves to 50 MP

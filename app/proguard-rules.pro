@@ -29,3 +29,10 @@
 -assumenosideeffects class com.google.android.gms.internal.mlkit_vision_face.zzoe {
     void zzc(int, int, long, long);
 }
+
+# Same telemetry in the bundled barcode scanner (QR codes in the viewer), in ML Kit's barcode API wrapper. Pinned to
+# barcode-scanning 17.3.0 (and its play-services-mlkit-barcode-scanning 18.3.1). After an upgrade, this must print:
+#   grep -A5 "mlkit_vision_barcode.zzwr:" app/build/outputs/mapping/release/usage.txt | grep zzc
+-assumenosideeffects class com.google.android.gms.internal.mlkit_vision_barcode.zzwr {
+    void zzc(int, int, long, long);
+}

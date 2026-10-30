@@ -21,7 +21,7 @@ import kotlinx.coroutines.flow.Flow
  * A person the user named, hid or corrected. Automatic groups only live in the face index; touching one makes it a person.
  * [coverMediaId] and [cover]: the face the user picked as their cover photo, by photo and box like [PersonFace], or null
  * for the automatic pick. [hidden] only leaves them out of People; [locked] puts them and every photo they're in behind
- * the privacy PIN (Hidden items).
+ * the privacy PIN (Hidden items). [species] makes it a pet (see Pets.kt): its faces are whole photos ([WHOLE]).
  */
 @Entity(tableName = "people")
 class Person(
@@ -37,6 +37,7 @@ class Person(
     val coverMediaId: Long? = null,
     @Embedded(prefix = "cover_") val cover: FaceBox? = null,
     @ColumnInfo(defaultValue = "0") val locked: Boolean = false,
+    val species: Species? = null, // null: a person
 )
 
 /**
@@ -84,20 +85,28 @@ data class PersonName(
     val coverMediaId: Long? = null,
     @Embedded(prefix = "cover_") val cover: FaceBox? = null,
     val locked: Boolean = false,
+    val species: Species? = null,
 )
 
 /**
  * What a "Not <name>" changed, so Undo can put it back exactly. [personId] may be new: an automatic group became a person.
- * [faceIds] are the faces (face index ids) that were in the person, including ones it gained automatically.
+ * [faceIds] are the faces (face index ids) that were in the person, including ones it gained automatically; for a [pet],
+ * its photos' ids in pets.db.
  */
-class NotPersonChange(val personId: Long, val removed: List<PersonFace>, val added: List<NotPerson>, val faceIds: List<Long> = emptyList())
+class NotPersonChange(
+    val personId: Long,
+    val removed: List<PersonFace>,
+    val added: List<NotPerson>,
+    val faceIds: List<Long> = emptyList(),
+    val pet: Boolean = false,
+)
 
 /** SQLite allows a limited number of `?` per statement, so long id lists go in chunks. */
 private const val CHUNK = 500
 
 @Dao
 interface PeopleDao {
-    @Query("SELECT id, name, hidden, coverMediaId, cover_left, cover_top, cover_right, cover_bottom, locked FROM people")
+    @Query("SELECT id, name, hidden, coverMediaId, cover_left, cover_top, cover_right, cover_bottom, locked, species FROM people")
     fun names(): Flow<List<PersonName>>
 
     @Query("SELECT id FROM people WHERE locked = 1")
@@ -242,11 +251,12 @@ interface PeopleDao {
  * and add an AutoMigration (or a hand-written Migration for renames and splits), with a test in PeopleDbTest.
  * 2 (v0.10): pinned cover photos (nullable columns) and "Different" pairs (a new table); nothing existing changes.
  * 3 (v1.1): people locked behind the privacy PIN (a column that starts false for everyone); nothing existing changes.
+ * 4 (v1.1.1): pets (a species column, null for everyone already there); nothing existing changes.
  */
 @Database(
     entities = [Person::class, PersonFace::class, NotPerson::class, DifferentPeople::class],
-    version = 3,
-    autoMigrations = [AutoMigration(from = 1, to = 2), AutoMigration(from = 2, to = 3)],
+    version = 4,
+    autoMigrations = [AutoMigration(from = 1, to = 2), AutoMigration(from = 2, to = 3), AutoMigration(from = 3, to = 4)],
 )
 abstract class PeopleDb : RoomDatabase() {
     abstract fun dao(): PeopleDao

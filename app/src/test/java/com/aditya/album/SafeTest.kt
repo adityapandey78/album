@@ -121,11 +121,13 @@ class SafeTest {
         assertEquals("Movies/Clips/", restorePath("Movies/Clips/", isVideo = true))
     }
 
-    @Test fun restoresElsewhereToPicturesRestored() {
-        assertEquals("Pictures/Restored/", restorePath("Movies/Clips/", isVideo = false)) // photos can't live in Movies
-        assertEquals("Pictures/Restored/", restorePath("Download/", isVideo = false))
-        assertEquals("Pictures/Restored/", restorePath("Android/media/com.whatsapp/WhatsApp/Media/", isVideo = true))
-        assertEquals("Pictures/Restored/", restorePath("", isVideo = true))
+    @Test fun restoresElsewhereToRestoredWhereAlbumSaves() {
+        assertNull(restorePath("Movies/Clips/", isVideo = false)) // photos can't live in Movies
+        assertNull(restorePath("Download/", isVideo = false))
+        assertNull(restorePath("Android/media/com.whatsapp/WhatsApp/Media/", isVideo = true))
+        assertNull(restorePath("", isVideo = true))
+        assertEquals("Pictures/Restored/", SaveLocation().inside("Restored").folder) // the default: same as before 1.2
+        assertEquals("DCIM/Album/Restored/", SaveLocation(folder = "DCIM/Album/").inside("Restored").folder)
     }
 
     @Test fun movedInMessages() {
