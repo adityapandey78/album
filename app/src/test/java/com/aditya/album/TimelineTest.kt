@@ -1,5 +1,6 @@
 package com.aditya.album
 
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.unit.IntRect
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -219,5 +220,13 @@ class TimelineTest {
         assertEquals("3 minutes 5 seconds", spokenDuration(185_000))
         assertEquals("1 hour 2 minutes", spokenDuration(3_725_000))
         assertFalse(spokenDuration(7_200_000).contains("minute")) // "2 hours"
+    }
+
+    @Test
+    fun aRestingThumbIsNotAPinch() {
+        val slop = 8f
+        assertFalse(isPinch(listOf(Offset(0f, 300f), Offset(2f, 3f)), slop)) // one finger scrolls, the grip stays put
+        assertFalse(isPinch(listOf(Offset(0f, 300f)), slop))
+        assertTrue(isPinch(listOf(Offset(-40f, -40f), Offset(40f, 40f)), slop))
     }
 }

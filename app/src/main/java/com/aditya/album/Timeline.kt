@@ -16,7 +16,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
@@ -57,7 +56,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.AwaitPointerEventScope
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventTimeoutCancellationException
+import androidx.compose.ui.input.pointer.PointerId
+import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onSizeChanged
@@ -553,7 +556,7 @@ fun MediaGrid(
                         zoomNote = ZoomNote(next)
                     }
                 }
-                .dragToSelect(state, media, layout, gutter, startPadding, shapeAt, rememberUpdatedState(selected), rememberUpdatedState(onSelect), haptics),
+                .dragToSelect(state, media, layout, gutter, startPadding, shapeAt, rememberUpdatedState(selected), rememberUpdatedState(selecting), rememberUpdatedState(onSelect), haptics),
             contentPadding = contentPadding,
             horizontalArrangement = Arrangement.spacedBy(spec.gutter),
             verticalArrangement = Arrangement.spacedBy(spec.gutter),
@@ -710,15 +713,20 @@ fun duration(ms: Long): String {
 
 /**
  * Two-finger pinch moves the column count one step per gesture (like Google Photos / OPPO).
- * Watches the Initial pass and consumes the events, so the grid doesn't scroll during a pinch.
+ * Watches the Initial pass and consumes the events, so the grid doesn't scroll during a pinch. It only counts as a pinch
+ * once two fingers have moved: a thumb or palm resting on the screen's edge must not freeze the scroll.
  */
 private fun Modifier.pinchToZoom(key: Any, onStep: (zoomIn: Boolean) -> Unit) = pointerInput(key) {
     awaitEachGesture {
         var scale = 1f
         var stepped = false
+        var pinching = false
+        val starts = HashMap<PointerId, Offset>()
         do {
             val event = awaitPointerEvent(PointerEventPass.Initial)
-            if (event.changes.count { it.pressed } >= 2) {
+            event.changes.forEach { starts.getOrPut(it.id) { it.position } }
+            if (!pinching) pinching = isPinch(event.changes.filter { it.pressed }.map { it.position - starts.getValue(it.id) }, viewConfiguration.touchSlop)
+            if (pinching && event.changes.count { it.pressed } >= 2) {
                 event.changes.forEach { it.consume() }
                 if (!stepped) {
                     scale *= event.calculateZoom()
@@ -732,12 +740,16 @@ private fun Modifier.pinchToZoom(key: Any, onStep: (zoomIn: Boolean) -> Unit) = 
     }
 }
 
+/** True when at least two of the fingers on the screen have each moved past [slop] from where they went down. */
+internal fun isPinch(moves: List<Offset>, slop: Float): Boolean = moves.count { it.getDistance() > slop } >= 2
+
 /**
  * Long-press a photo to select it, then keep dragging to select every photo between it and the finger, in reading
  * order. Dragging back shrinks the range, and holding near the top or bottom edge scrolls. Starting on a photo that
- * is already selected clears the range instead, just as a long-press on its own toggles one photo.
+ * is already selected clears the range instead, just as a long-press on its own toggles one photo. While already
+ * selecting, a swipe that starts sideways over a photo selects straight away; an up or down swipe still scrolls.
  *
- * Built on awaitLongPressOrCancellation rather than detectDragGesturesAfterLongPress: that consumes in the Main pass,
+ * Built on [awaitSelectStart] rather than detectDragGesturesAfterLongPress: that consumes in the Main pass,
  * which reaches the cells and the grid's own scrolling first, so lifting after a long-press would also tap the photo
  * (unselecting it again) and a quick drag could scroll the grid. Consuming in the Initial pass keeps the gesture ours.
  */
@@ -749,6 +761,7 @@ private fun Modifier.dragToSelect(
     startPadding: Int,
     shapeAt: (Int) -> Float,
     selected: State<Set<Long>>,
+    selecting: State<Boolean>,
     onSelect: State<(Set<Long>) -> Unit>,
     haptics: Haptics,
 ) = pointerInput(state, media, layout, gutter, startPadding, haptics) {
@@ -757,8 +770,8 @@ private fun Modifier.dragToSelect(
     coroutineScope {
         awaitEachGesture {
             val down = awaitFirstDown(requireUnconsumed = false)
-            val press = awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
-            val anchor = state.photoAt(press.position, startPadding, layout, gutter, shapeAt) ?: return@awaitEachGesture
+            val press = awaitSelectStart(down, sideways = selecting.value) ?: return@awaitEachGesture
+            val anchor = state.photoAt(down.position, startPadding, layout, gutter, shapeAt) ?: return@awaitEachGesture
             val base = selected.value
             val adding = media[anchor].id !in base
             var finger = press.position
@@ -801,6 +814,33 @@ private fun Modifier.dragToSelect(
                 scroller.cancel()
             }
         }
+    }
+}
+
+/**
+ * Waits for a drag-select to start: a long-press, or with [sideways] a drag that first moves more across than up or down.
+ * Returns null when the finger lifts, scrolls, or a second finger joins (a pinch, or a grip on the screen's edge).
+ */
+private suspend fun AwaitPointerEventScope.awaitSelectStart(down: PointerInputChange, sideways: Boolean): PointerInputChange? {
+    var last = down
+    return try {
+        withTimeout(viewConfiguration.longPressTimeoutMillis) {
+            var start: PointerInputChange? = null
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                val change = event.changes.firstOrNull { it.id == down.id }
+                if (change == null || !change.pressed || change.isConsumed || event.changes.count { it.pressed } > 1) break
+                last = change
+                val move = change.position - down.position
+                if (move.getDistance() > viewConfiguration.touchSlop) {
+                    if (sideways && abs(move.x) > abs(move.y)) start = change.also { it.consume() }
+                    break // otherwise it's a scroll, the grid's
+                }
+            }
+            start
+        }
+    } catch (_: PointerEventTimeoutCancellationException) {
+        last
     }
 }
 
