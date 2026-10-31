@@ -184,4 +184,11 @@ class ForYouTest {
         assertEquals(setOf("b"), markPlayed(setOf("old"), "b", shown)) // "old" left For you
         assertEquals(setOf("a"), markPlayed(setOf("a"), "a", shown))
     }
+
+    @Test fun idSuggestionsLeaveOutPhotosMarkedNotADocument() {
+        val photos = listOf(5L, 4L, 3L, 2L, 1L) // the Library's order, newest first
+        assertEquals(listOf(5L, 3L, 1L), idSuggestions(photos, setOf(1L, 3L, 5L, 9L), emptySet()) { it }) // 9 left the Library
+        assertEquals(listOf(5L, 1L), idSuggestions(photos, setOf(1L, 3L, 5L), setOf(3L, 4L)) { it }) // the count drops by one
+        assertEquals(emptyList<Long>(), idSuggestions(photos, emptySet(), emptySet()) { it })
+    }
 }

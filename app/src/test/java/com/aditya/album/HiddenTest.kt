@@ -67,7 +67,7 @@ class HiddenTest {
     }
 
     @Test fun hidingSaysWhatTheDesignSays() {
-        assertEquals("Hid 2 items", hiddenNote(listOf("Asha"), listOf("Goa trip"), hide = true, counted = true))
+        assertEquals("Hid 2 items. Other apps still show their photos.", hiddenNote(listOf("Asha"), listOf("Goa trip"), hide = true, counted = true))
         assertEquals("Unhid 1 item", hiddenNote(emptyList(), listOf("Goa trip"), hide = false, counted = true))
         assertEquals("Hid Goa trip. It is in Hidden items.", hiddenNote(emptyList(), listOf("Goa trip"), hide = true, counted = false))
         assertEquals("Unhid Asha", hiddenNote(listOf("Asha"), emptyList(), hide = false, counted = false))

@@ -24,6 +24,14 @@ class TimelineTest {
         assertEquals(listOf(2, 1), s.map { it.items.size }) // Oct, Oct, Sep
     }
 
+    // The safe's dayOf converts time zones: with 20,000 items, reading each day twice was a visible stall on the main thread
+    @Test fun readsEachItemsDayOncePlusOncePerLabel() {
+        var calls = 0
+        val s = sections(listOf(today, today, today - 1, today - 1, today - 1, today - 400), byMonth = false, today = today) { calls++; it }
+        assertEquals(listOf(2, 3, 1), s.map { it.items.size })
+        assertEquals(6 + s.size, calls)
+    }
+
     @Test fun emptyListHasNoSections() {
         assertEquals(0, sections(emptyList<Long>(), byMonth = false, today = today) { it }.size)
     }

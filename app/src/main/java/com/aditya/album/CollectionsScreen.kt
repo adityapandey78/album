@@ -135,13 +135,6 @@ fun seeAllAlbums(total: Int) = if (total > ALBUMS_IN_SECTION) "See all ${"%,d".f
 /** Collections' and All albums' subtitle: how many cards there are, groups and Favourites included, "12 albums and groups". */
 fun albumsSubtitle(cards: Int) = if (cards == 1) "1 album" else "${"%,d".format(cards)} albums and groups"
 
-/**
- * Where a folder the phone itself fills lives, as its card and page show it instead of a count: the camera's,
- * Screenshots and an app's own ("DCIM/Camera"). [path] is the folder's RELATIVE_PATH. Null for the folders the user made.
- */
-fun systemPath(name: String, path: String): String? =
-    path.trimEnd('/').takeIf { name == "Camera" || name.equals("Screenshots", ignoreCase = true) || MediaApp.of(name) != null }
-
 /** Whether a card shows under Pinned: Favourites always leads, the rest when the user pinned them. */
 private fun AlbumEntry.pinnedIn(pinned: Set<String>) = special != null || key in pinned
 
@@ -227,7 +220,7 @@ fun CollectionsScreen(
             MenuRow(Sym.Add, "New album", {
                 more = false
                 actions.newAlbum()
-            })
+            }, sub = "Name a folder, then move or copy photos in")
             MenuRow(Sym.CreateNewFolder, "New album group", {
                 more = false
                 grouping = true
@@ -235,11 +228,11 @@ fun CollectionsScreen(
             MenuRow(Sym.Sort, "Sort albums", {
                 more = false
                 allAlbums()
-            }, sub = sort.label)
+            }, sub = "Every album, by ${sort.label.lowercase()}")
             MenuRow(Sym.Settings, "Settings", {
                 more = false
                 onSettings()
-            })
+            }, sub = SETTINGS_SUB)
         }
     }
     if (grouping) NewGroupSheets(view) { grouping = false }
@@ -332,7 +325,7 @@ internal fun LazyGridScope.albumCards(
         // A group shows how many albums it holds: the word "albums" is what tells it from an album at a glance
         meta = listOf(
             sub?.invoke(e) ?: if (group != null) "${counted(group.albums.size, "album", "albums")} · ${"%,d".format(e.count)}"
-            else (folder?.let { systemPath(it.name, it.cover.path) } ?: "%,d".format(e.count)) + (if (isHidden) " · Hidden" else ""),
+            else "%,d".format(e.count) + (if (isHidden) " · Hidden" else ""),
         ),
         description = buildString {
             if (group != null) append("${e.name}, album group of ${counted(group.albums.size, "album", "albums")}") else append("${e.name}, ${itemCount(e.count)}")
@@ -440,7 +433,7 @@ internal fun AlbumEntrySheet(
             if (entry.group != null) GroupSheet(entry, view, media, actions, entry.key in pinned, onDismiss)
             // No pin: Favourites always leads the albums
             if (entry.special != null) Sheet(onDismiss, entry.name) {
-                MenuRow(Sym.Image, "Change cover", { step = EntryStep.Cover })
+                MenuRow(Sym.Image, "Change cover", { step = EntryStep.Cover }, sub = CHANGE_COVER_SUB)
                 if (entry.count > 0) ShareZipRow(share)
             }
         }
@@ -469,26 +462,32 @@ private fun AlbumSheet(
     onAction: (AlbumAction) -> Unit,
 ) {
     Sheet(onDismiss, album.name) {
-        MenuRow(Sym.PushPin, if (pinned) "Unpin" else "Pin to the top", { onAction(AlbumAction.Pin) }, trailing = null)
-        MenuRow(Sym.Edit, "Rename", { onAction(AlbumAction.Rename) })
-        MenuRow(Sym.Image, "Change cover", onCover)
+        MenuRow(Sym.PushPin, if (pinned) "Unpin" else "Pin to the top", { onAction(AlbumAction.Pin) }, sub = pinSub(pinned), trailing = null)
+        MenuRow(Sym.Edit, "Rename", { onAction(AlbumAction.Rename) }, sub = "Renames the folder on your phone too")
+        MenuRow(Sym.Image, "Change cover", onCover, sub = CHANGE_COVER_SUB)
         GroupMoveRows(group, onGroup, onTakeOut)
         ShareZipRow(onShare)
         MenuRow(
             if (hidden) Sym.Visibility else Sym.VisibilityOff,
             if (hidden) "Show in Library" else "Hide from Library",
             { onAction(AlbumAction.Hide) },
-            sub = if (hidden) "Its photos show in the Library again" else "The photos stay in this folder",
+            sub = if (hidden) "Its photos show in the Library again" else "It stays here. Show it again from Hidden items.",
             trailing = null,
         )
-        MenuRow(Sym.VisibilityOff, "Hide album", onHide, sub = "Moves it to Hidden items, behind your PIN", trailing = null)
+        MenuRow(Sym.VisibilityOff, "Hide album", onHide, sub = "Moves it to Hidden items, behind your PIN. Other apps still show it.", trailing = null)
         MenuRow(Sym.Delete, "Delete album", { onAction(AlbumAction.Delete) }, sub = "Moves its ${itemCount(album.count)} to Trash", trailing = null)
     }
 }
 
 /** Share as ZIP in an album's sheet: every photo and video in it, as one file. */
 @Composable
-internal fun ShareZipRow(onShare: () -> Unit) = MenuRow(Sym.Share, "Share as ZIP", onShare, trailing = null)
+internal fun ShareZipRow(onShare: () -> Unit) = MenuRow(Sym.Share, "Share as ZIP", onShare, sub = "Every photo and video in it, as one file", trailing = null)
+
+/** What Change cover does, on every album sheet. */
+internal const val CHANGE_COVER_SUB = "Pick the photo on its card"
+
+/** What Pin to the top, or Unpin when [pinned], does to an album, collection or group. */
+internal fun pinSub(pinned: Boolean) = if (pinned) "Back to its place in the sort" else "Keeps it first in Albums"
 
 /** Whether an album page has Album options: a folder (not one in Hidden items), a collection or Favourites. */
 fun hasAlbumOptions(id: Long, album: Album?, collection: CollectionAlbum?) =

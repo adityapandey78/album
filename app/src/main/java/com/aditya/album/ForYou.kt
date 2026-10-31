@@ -195,6 +195,49 @@ private fun luhn(digits: String) = digits.reversed().withIndex().sumOf { (i, c) 
 private fun idCardIds(): Set<Long> =
     ID_WORDS.flatMapTo(HashSet()) { SmartIndex.idsWithText(it) }.filterTo(HashSet()) { SmartIndex.textOf(it)?.let(::looksLikeIdCard) == true }
 
+/**
+ * Ids of indexed photos that look like ID cards, null until first read. Text is read as the index runs, so they're read
+ * again whenever a pass ends (and once at the start, even mid-pass, so a page opened then isn't left empty).
+ */
+@Composable
+fun rememberIdCardIds(): Set<Long>? {
+    val indexing = SmartIndex.progress.collectAsState().value.let { it.done < it.total }
+    return produceState<Set<Long>?>(null, indexing) {
+        if (indexing && value != null) return@produceState
+        value = withContext(Dispatchers.IO) { runCatching { idCardIds() }.onFailure { CrashLog.note("id cards: $it") }.getOrDefault(emptySet()) }
+    }.value
+}
+
+/**
+ * The photos For you suggests protecting: those of [photos] (in their order) the index [found] as ID cards, less the ones
+ * the user marked Not a document ([dismissed]).
+ */
+fun <T> idSuggestions(photos: List<T>, found: Set<Long>, dismissed: Set<Long>, id: (T) -> Long): List<T> =
+    if (found.isEmpty()) emptyList() else photos.filter { id(it) in found && id(it) !in dismissed }
+
+/** Photos the user marked Not a document, saved in the "settings" preferences: For you stops suggesting them. */
+object NotDocuments {
+    private const val KEY = "not_documents"
+    private var prefs: SharedPreferences? = null
+    private val state = MutableStateFlow(emptySet<Long>())
+    val ids = state.asStateFlow()
+
+    /** Reads the saved set once. Safe to call repeatedly. */
+    fun load(context: Context) {
+        if (prefs != null) return
+        prefs = context.applicationContext.getSharedPreferences("settings", Context.MODE_PRIVATE).also {
+            state.value = it.getStringSet(KEY, null).orEmpty().mapNotNullTo(HashSet()) { id -> id.toLongOrNull() }
+        }
+    }
+
+    /** Marks [ids] as not documents, or ([on] false) as suggestible again, for Undo. */
+    fun mark(ids: Set<Long>, on: Boolean = true) {
+        // ponytail: ids of photos deleted since stay in the set, a few bytes each; prune against the Library if it ever grows
+        state.update { if (on) it + ids else it - ids }
+        prefs?.edit { putStringSet(KEY, state.value.mapTo(HashSet()) { it.toString() }) }
+    }
+}
+
 private val monthName = DateTimeFormatter.ofPattern("MMMM")
 private val dayMonth = DateTimeFormatter.ofPattern("d MMM")
 
@@ -311,8 +354,8 @@ private val RingWidth = 72.dp
  * and the hero under them. Suggestions: Clean up, the photos that look like ID cards (only when there are some) and Storage.
  * [contentPadding] already clears the status bar and the floating bottom bar. [onPlay] opens a memory as a story with its
  * title, eyebrow and up to [STORY_LENGTH] photos; every memory card plays through `play` here. [cleanupCount] is how many
- * photos Clean up suggests; [onCleanup] opens it on them, and [onProtect] gets the photos that look like ID cards, for ID
- * cards.
+ * photos Clean up suggests; [onCleanup] opens it on them, and [onProtect] opens the review of the photos that look like
+ * ID cards ([ProtectReviewScreen]).
  */
 @Composable
 fun ForYouScreen(
@@ -323,7 +366,7 @@ fun ForYouScreen(
     onPlay: (title: String, eyebrow: String, items: List<Media>) -> Unit,
     onCleanup: () -> Unit,
     onStorage: () -> Unit,
-    onProtect: (List<Media>) -> Unit,
+    onProtect: () -> Unit,
     onSettings: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -347,15 +390,12 @@ fun ForYouScreen(
     }
     // Where shared storage lives, which is the app's own partition (see freeSpace)
     val free by produceState<Long?>(null, all) { value = withContext(Dispatchers.IO) { freeSpace(context, PHONE_STORAGE) } }
-    // Text is read as the index runs, so ID cards are looked for again whenever a pass ends. Only photos still in the
-    // Library count: ones moved to ID cards (or the Private safe) leave MediaStore, so they drop out at once, before the
-    // index forgets them.
-    val indexing = SmartIndex.progress.collectAsState().value.let { it.done < it.total }
-    val idCardIds by produceState(emptySet<Long>(), indexing) {
-        if (indexing) return@produceState
-        value = withContext(Dispatchers.IO) { runCatching { idCardIds() }.onFailure { CrashLog.note("id cards: $it") }.getOrDefault(emptySet()) }
-    }
-    val idCards = remember(photos, idCardIds) { if (idCardIds.isEmpty()) emptyList() else photos.filter { it.id in idCardIds } }
+    // Only photos still in the Library count: ones moved to ID cards (or the Private safe) leave MediaStore, so they drop
+    // out at once, before the index forgets them
+    val idCardIds = rememberIdCardIds()
+    NotDocuments.load(context)
+    val notDocuments by NotDocuments.ids.collectAsState()
+    val idCards = remember(photos, idCardIds, notDocuments) { idSuggestions(photos, idCardIds.orEmpty(), notDocuments, Media::id) }
     val summary by Cleanup.summary.collectAsState()
     val left = produceState<Int?>(null) { IndexStatus.running.collect { value = stillChecking(value, it[CLEANUP_JOB]) } }.value
     fun size(bytes: Long) = Formatter.formatShortFileSize(context, bytes) // KB, MB or GB as fits, in the phone's locale
@@ -398,8 +438,8 @@ fun ForYouScreen(
                 )
                 if (idCards.isNotEmpty()) {
                     GroupRow(
-                        "Protect ${counted(idCards.size, "ID photo", "ID photos")}", { onProtect(idCards) }, icon = Sym.IdCard,
-                        sub = "Aadhaar, PAN or bank cards, move them to ID cards",
+                        "Protect ${counted(idCards.size, "ID photo", "ID photos")}", onProtect, icon = Sym.IdCard,
+                        sub = "Aadhaar, PAN or bank cards, look them over and lock them away",
                     )
                 }
                 GroupRow(
@@ -414,7 +454,7 @@ fun ForYouScreen(
             MenuRow(Sym.Settings, "Settings", {
                 more = false
                 onSettings()
-            })
+            }, sub = SETTINGS_SUB)
         }
     }
 }

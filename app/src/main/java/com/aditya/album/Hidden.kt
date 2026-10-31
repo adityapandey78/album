@@ -50,14 +50,14 @@ fun hiddenWhat(people: List<String?>, albums: List<String>): String = when {
 }
 
 /**
- * What a hide or unhide says: "Hid 2 items" for Hidden items' own picks ([counted]), else naming the one thing hidden
+ * What a hide or unhide says: "Hid 2 items. Other apps still show their photos." for Hidden items' own picks ([counted]), else naming the one thing hidden
  * from its page or menu: "Hid Goa trip. It is in Hidden items."
  */
 fun hiddenNote(people: List<String?>, albums: List<String>, hide: Boolean, counted: Boolean): String {
     val what = if (counted) itemCount(people.size + albums.size) else hiddenWhat(people, albums)
     return when {
         !hide -> "Unhid $what"
-        counted -> "Hid $what"
+        counted -> "Hid $what. Other apps still show their photos."
         people.size + albums.size == 1 -> "Hid $what. It is in Hidden items."
         else -> "Hid $what. They are in Hidden items."
     }

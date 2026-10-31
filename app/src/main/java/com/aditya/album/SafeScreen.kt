@@ -117,27 +117,30 @@ import androidx.media3.datasource.DataSource as MediaDataSource
 private const val LOST_NOTE =
     "Android erased this safe's key when the screen lock was turned off, so what's inside can't be opened any more."
 
-/** What the first move into the safe says: nothing in it has a second copy. */
-private const val SAFE_NOTE =
-    "They're encrypted on this phone and open with your privacy PIN or fingerprint. The safe isn't backed up, so uninstalling " +
-        "Album or clearing its storage erases what's inside."
-
 /**
- * Moves photos and videos into the safe, asking once first: a ConfirmBar with the photos while privacy is unlocked (with
- * the safe's note on its first use), else the privacy PIN or fingerprint in a sheet that names the move (setting up a PIN
- * first if there's none). Android's pop-up then deletes the originals, once every copy is verified; the result shows in
- * the snackbar: "Moved 12 items to Private safe". Get one with [rememberMoveToSafe].
+ * Moves photos and videos into the safe, asking once first: a ConfirmBar with the photos (with the only-copy line on its
+ * first use). No PIN: the move is sealed to the safe's public key and privacy stays locked (a safe not opened since it got
+ * that key asks for the PIN once, see [PrivacyAsk.forMoveIn]). Android's pop-up then deletes the originals, once every copy
+ * is verified; the result shows in the snackbar: "Moved 12 items to Private safe". Get one with [rememberMoveToSafe].
  */
 @Stable
-class MoveToSafe internal constructor(private val start: (List<Media>, Boolean) -> Unit) {
-    /** [confirmed]: the caller already asked with its own ConfirmBar (For you's ID cards), so only the PIN may be asked for. */
-    operator fun invoke(items: List<Media>, confirmed: Boolean = false) = start(items, confirmed)
+class MoveToSafe internal constructor(private val start: (MoveRequest, Boolean) -> Unit) {
+    /**
+     * [confirmed]: the caller already asked on its own page (For you's ID photos), so nothing more is asked. [note]: a
+     * line the ConfirmBar adds. [onStart] runs once the move begins.
+     */
+    operator fun invoke(items: List<Media>, confirmed: Boolean = false, note: String? = null, onStart: () -> Unit = {}) =
+        start(MoveRequest(items, note, onStart), confirmed)
 }
+
+/** A move into the safe waiting for its ConfirmBar: see [MoveToSafe]. */
+class MoveRequest(val items: List<Media>, val note: String?, val onStart: () -> Unit)
 
 /**
  * Returns the [MoveToSafe] of this screen. [onStart] runs once the move begins (the selection it came from is done), so
- * a cancelled PIN leaves the selection as it was. Draws its own ConfirmBar, PIN sheet and progress card (windows of their
- * own, so it works wherever it's called) and also finishes a move the app was closed in the middle of.
+ * a cancelled ConfirmBar (or the one-time PIN) leaves the selection as it was. Draws its own ConfirmBar, PIN sheet and
+ * progress card (windows of their own, so it works wherever it's called) and also finishes a move the app was closed in
+ * the middle of.
  */
 @Composable
 fun rememberMoveToSafe(snackbar: SnackbarHostState, onStart: () -> Unit = {}): MoveToSafe {
@@ -147,7 +150,7 @@ fun rememberMoveToSafe(snackbar: SnackbarHostState, onStart: () -> Unit = {}): M
     val scope = rememberCoroutineScope()
     val privacy = rememberPrivacyAsk()
     val started by rememberUpdatedState(onStart)
-    var confirming by remember { mutableStateOf<List<Media>?>(null) }
+    var confirming by remember { mutableStateOf<MoveRequest?>(null) }
     val request = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {
         Safe.answer(it.resultCode == Activity.RESULT_OK)
     }
@@ -161,24 +164,26 @@ fun rememberMoveToSafe(snackbar: SnackbarHostState, onStart: () -> Unit = {}): M
     LaunchedEffect(snackbar) { for (message in Safe.libraryMessages) snackbar.showSnackbar(message) }
     Safe.progress.collectAsState().value?.takeIf { !it.inSafe }?.let { SafeProgress(it) }
 
-    // The move holds its own copy of the key, so privacy locking mid-move (Android's pop-up, leaving Album) doesn't stop it
-    fun move(items: List<Media>) = privacy.run("Move ${itemCount(items.size)} to Private safe") {
-        val key = Safe.key.value?.copyOf() ?: return@run
-        CrashLog.note("safe move in ${items.size}")
+    // Sealed, the move needs no key and never unlocks privacy; with a key, it holds its own copy, which it wipes
+    fun move(request: MoveRequest) = privacy.forMoveIn("Move ${itemCount(request.items.size)} to Private safe") { key ->
+        CrashLog.note("safe move in ${request.items.size}${if (key == null) " sealed" else ""}")
         started()
-        Safe.moveIn(context.applicationContext, items, key)
+        request.onStart()
+        Safe.moveIn(context.applicationContext, request.items, key)
     }
-    confirming?.let { items ->
-        // The safe's note on its first use only: whether it has anything yet, read once off the main thread
+    confirming?.let { request ->
+        val items = request.items
+        // The only-copy line on its first use: whether it has anything yet, read once off the main thread
         val empty by produceState<Boolean?>(null) { value = withContext(Dispatchers.IO) { Safe.isEmpty() } }
         empty?.let {
             ConfirmBar(
                 title = "Move ${these(items.size, items.first().isVideo)} to Private safe?",
-                body = "${if (items.size == 1) "It leaves" else "They leave"} the Library and search, and open${if (items.size == 1) "s" else ""} only with your PIN or fingerprint." + if (it) " $SAFE_NOTE" else "",
+                body = "${if (items.size == 1) "It leaves" else "They leave"} the Library and search, and open${if (items.size == 1) "s" else ""} only with your PIN or fingerprint." + (if (it) " ${onlyCopyLine(items.size)}" else "") +
+                    request.note?.let { note -> " $note" }.orEmpty(),
                 confirmLabel = "Move to safe",
                 onConfirm = {
                     confirming = null
-                    move(items)
+                    move(request)
                 },
                 onCancel = { confirming = null },
                 icon = Sym.Lock,
@@ -188,17 +193,17 @@ fun rememberMoveToSafe(snackbar: SnackbarHostState, onStart: () -> Unit = {}): M
         }
     }
     return remember {
-        MoveToSafe { items, confirmed ->
+        MoveToSafe { request, confirmed ->
             when {
-                !context.canSend(items.size, MAX_REQUEST, "move") -> {}
+                !context.canSend(request.items.size, MAX_REQUEST, "move") -> {}
                 // Without it Android hands over photos with their GPS blanked, and deleting the original would lose the place
                 context.checkSelfPermission(ACCESS_MEDIA_LOCATION) != PackageManager.PERMISSION_GRANTED -> {
                     haptics.reject()
                     scope.launch { snackbar.showSnackbar(SAFE_NEEDS_LOCATION) }
                 }
-                // Locked, the PIN sheet naming the move is the one deliberate step; unlocked, the ConfirmBar is
-                confirmed || !PrivacyLock.isOpen -> move(items)
-                else -> confirming = items
+                // The ConfirmBar is the one deliberate step, or the caller's own page was
+                confirmed -> move(request)
+                else -> confirming = request
             }
         }
     }
@@ -206,20 +211,28 @@ fun rememberMoveToSafe(snackbar: SnackbarHostState, onStart: () -> Unit = {}): M
 
 /**
  * Private safe, a pushed page. Locked: the privacy PIN pad (or the fingerprint key). Open: decrypted thumbnails under
- * their days, as many across as the Library has, long-press to select, then Move out or Delete forever; tap to view.
- * Screenshots and the recents preview are blocked while it's on screen (FLAG_SECURE), and privacy locks when you leave
- * the page, when Album leaves the screen, and on Lock now.
+ * their days, as many across as the Library has, long-press to select, then Move out (to where each came from or a
+ * folder picked) or Delete forever; tap to view. Add picks more from the Library ([photos], [albums], [collections] and
+ * People, all among [media]) for [moveToSafe]. Screenshots and the recents preview are blocked while it's on screen
+ * (FLAG_SECURE), and privacy locks when you leave the page, when Album leaves the screen, and on Lock now.
  */
 @Composable
-fun SafeScreen(onBack: () -> Unit) {
+fun SafeScreen(
+    photos: List<Media>,
+    media: List<Media>,
+    albums: List<Album>,
+    collections: List<CollectionAlbum>,
+    moveToSafe: MoveToSafe,
+    onBack: () -> Unit,
+) {
     val context = LocalContext.current
     remember { PrivacyLock.init(context) }
     val key by Safe.key.collectAsState()
-    PrivatePage(lockOnLeave = true)
+    PrivatePage()
     Box(Modifier.fillMaxSize().background(AlbumTheme.colors.canvas).pointerInput(Unit) {}) { // catches taps meant for the screen underneath
         when (val k = key) {
             null -> LockedSafe(onBack)
-            else -> OpenSafe(k, onBack)
+            else -> OpenSafe(k, albums, onBack) { onClose -> AddToSafePage(photos, media, albums, collections, moveToSafe, onClose) }
         }
     }
     Safe.progress.collectAsState().value?.takeIf { it.inSafe }?.let { SafeProgress(it) }
@@ -266,8 +279,9 @@ private const val LIBRARY_COLUMNS = "columns_photos"
 // A few thumbnails decrypt at a time, like the grid's (see Media.kt), so a fling doesn't starve the UI threads
 private val safeLoads = Dispatchers.IO.limitedParallelism(4)
 
+/** The open safe. Move out offers [albums] as folders to go to; [addPage] draws the Add page over it until its onClose runs. */
 @Composable
-private fun OpenSafe(key: ByteArray, onBack: () -> Unit) {
+private fun OpenSafe(key: ByteArray, albums: List<Album>, onBack: () -> Unit, addPage: @Composable (onClose: () -> Unit) -> Unit) {
     val context = LocalContext.current
     val spec = AlbumTheme.spec
     val c = spec.colors
@@ -276,6 +290,8 @@ private fun OpenSafe(key: ByteArray, onBack: () -> Unit) {
     var selected by remember { mutableStateOf(emptySet<Long>()) }
     var viewing by rememberSaveable { mutableStateOf<Long?>(null) }
     var toDelete by remember { mutableStateOf<List<SafeItem>?>(null) }
+    var toMoveOut by remember { mutableStateOf<List<SafeItem>?>(null) }
+    var adding by rememberSaveable { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(snackbar) { for (message in Safe.safeMessages) snackbar.showSnackbar(message) }
     val chosen = list.filter { it.id in selected } // ignores items that left the safe meanwhile
@@ -287,6 +303,7 @@ private fun OpenSafe(key: ByteArray, onBack: () -> Unit) {
         Column(Modifier.fillMaxSize()) {
             Box(Modifier.background(c.canvas).statusBarsPadding()) {
                 CollapsedTopBar("Private safe", subtitle = "${itemCount(list.size)} · locks when you leave", onBack = onBack) {
+                    AlbumIconButton(Sym.Add, "Add to safe", { adding = true })
                     AlbumIconButton(Sym.Lock, "Lock now", {
                         CrashLog.note("safe lock now")
                         PrivacyLock.lock()
@@ -298,8 +315,13 @@ private fun OpenSafe(key: ByteArray, onBack: () -> Unit) {
                 list.isEmpty() -> EmptyState(
                     Sym.Lock, "Nothing in the safe",
                     "Photos you move here leave the Library and search, and open only with your privacy PIN or fingerprint.",
-                )
-                else -> SafeGrid(list, key, chosen.mapTo(HashSet()) { it.id }, { selected = it }, { viewing = it }, bottom + if (selecting) SelectionClearance else Space.s8)
+                ) {
+                    AlbumButton("Add photos", { adding = true }, variant = ButtonVariant.Primary, icon = Sym.Add)
+                }
+                else -> {
+                    OnlyCopyNote(Modifier.padding(start = Space.s4, end = Space.s4, top = Space.s3, bottom = Space.s2))
+                    SafeGrid(list, key, chosen.mapTo(HashSet()) { it.id }, { selected = it }, { viewing = it }, bottom + if (selecting) SelectionClearance else Space.s8)
+                }
             }
         }
         AnimatedVisibility(
@@ -311,11 +333,7 @@ private fun OpenSafe(key: ByteArray, onBack: () -> Unit) {
             SelectionBar(
                 chosen.size,
                 listOf(
-                    SelAction(Sym.LockOpen, "Move out") {
-                        CrashLog.note("safe move out ${chosen.size}")
-                        Safe.moveOut(context.applicationContext, chosen, key.copyOf()) // the job wipes its copy when done
-                        selected = emptySet()
-                    },
+                    SelAction(Sym.LockOpen, "Move out") { toMoveOut = chosen },
                     SelAction(Sym.DeleteForever, "Delete forever", danger = true) { toDelete = chosen },
                 ),
                 onClose = { selected = emptySet() },
@@ -331,6 +349,17 @@ private fun OpenSafe(key: ByteArray, onBack: () -> Unit) {
         viewing?.let { id ->
             val start = list.indexOfFirst { it.id == id }
             if (start >= 0) SafeViewer(list, start, key, onClose = { viewing = null }) // else moved out or deleted meanwhile
+        }
+        if (adding) addPage { adding = false }
+    }
+
+    toMoveOut?.let { leaving ->
+        MoveOutSheet(leaving, albums, onDismiss = { toMoveOut = null }) { into ->
+            CrashLog.note("safe move out ${leaving.size} ${if (into == null) "back" else "to folder"}")
+            toMoveOut = null
+            selected = emptySet()
+            // The job wipes its copy when done. A folder is looked up off the main thread first: the safe may lock meanwhile
+            Safe.key.value?.let { Safe.moveOut(context.applicationContext, leaving, it.copyOf(), into) }
         }
     }
 
@@ -377,7 +406,11 @@ internal fun SafeGrid(list: List<SafeItem>, key: ByteArray, selected: Set<Long>,
     val columns = rememberColumns(LIBRARY_COLUMNS).intValue
     val byMonth = columns >= MONTH_COLUMNS
     val zone = remember { ZoneId.systemDefault() }
-    val sections = remember(list, byMonth) { sections(list, byMonth) { Instant.ofEpochMilli(it.taken).atZone(zone).toLocalDate().toEpochDay() } }
+    // Off the main thread: each item's day is a time zone conversion, ~100 ms for 20,000 items, again after every change.
+    // Until the first grouping is done the grid is empty for a frame or two; after a change it shows the last one meanwhile.
+    val sections by produceState(emptyList<Section<SafeItem>>(), list, byMonth) {
+        value = withContext(Dispatchers.Default) { sections(list, byMonth) { Instant.ofEpochMilli(it.taken).atZone(zone).toLocalDate().toEpochDay() } }
+    }
     val selecting = selected.isNotEmpty()
     LazyVerticalGrid(
         GridCells.Fixed(columns),

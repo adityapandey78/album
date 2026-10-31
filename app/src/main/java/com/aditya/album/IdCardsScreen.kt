@@ -60,9 +60,8 @@ private fun screenLockSettings() = Intent(DevicePolicyManager.ACTION_SET_NEW_PAS
 
 /** Moves photos and videos into ID cards: see [rememberMoveToIdCards]. */
 @Stable
-class MoveToIdCards internal constructor(private val start: (List<Media>, Boolean) -> Unit) {
-    /** [ask]: confirm first with the photos (For you's suggestion, where a false positive mustn't leave on one tap). */
-    operator fun invoke(items: List<Media>, ask: Boolean = false) = start(items, ask)
+class MoveToIdCards internal constructor(private val start: (List<Media>) -> Unit) {
+    operator fun invoke(items: List<Media>) = start(items)
 }
 
 /**
@@ -78,7 +77,6 @@ fun rememberMoveToIdCards(snackbar: SnackbarHostState, onStart: () -> Unit = {})
     val haptics = rememberHaptics()
     val scope = rememberCoroutineScope()
     val started by rememberUpdatedState(onStart)
-    var confirming by remember { mutableStateOf<List<Media>?>(null) }
     var pinFor by remember { mutableStateOf<Pair<List<Media>, IdGate>?>(null) }
 
     fun title(items: List<Media>) = "Move ${itemCount(items.size)} to ID cards"
@@ -107,21 +105,6 @@ fun rememberMoveToIdCards(snackbar: SnackbarHostState, onStart: () -> Unit = {})
         }
     }
 
-    confirming?.let { items ->
-        ConfirmBar(
-            title = "Move ${countOf(items.size, "photo")} to ID cards?",
-            body = idMoveNote(remember { Safe.hasScreenLock(context) }),
-            confirmLabel = "Move to ID cards",
-            onConfirm = {
-                confirming = null
-                unlock(items)
-            },
-            onCancel = { confirming = null },
-            icon = Sym.IdCard,
-            tone = ConfirmTone.Flash,
-            thumbs = items.take(3),
-        )
-    }
     pinFor?.let { (items, gate) ->
         PrivacySheet(title(items), onDone = {}, onDismiss = { pinFor = null }, resettable = false, onKey = { safeKey ->
             pinFor = null
@@ -129,7 +112,7 @@ fun rememberMoveToIdCards(snackbar: SnackbarHostState, onStart: () -> Unit = {})
         })
     }
     return remember {
-        MoveToIdCards { items, ask ->
+        MoveToIdCards { items ->
             when {
                 !context.canSend(items.size, MAX_REQUEST, "move") -> {}
                 // Without it Android hands over photos with their GPS blanked, and deleting the original would lose the place
@@ -137,7 +120,6 @@ fun rememberMoveToIdCards(snackbar: SnackbarHostState, onStart: () -> Unit = {})
                     haptics.reject()
                     scope.launch { snackbar.showSnackbar(SAFE_NEEDS_LOCATION) }
                 }
-                ask -> confirming = items
                 else -> unlock(items) // Android's prompt, named after the move, is the one deliberate step
             }
         }
@@ -310,7 +292,10 @@ private fun OpenIdCards(key: ByteArray, onBack: () -> Unit) {
                     Sym.IdCard, "No ID cards yet",
                     "Aadhaar, PAN, passport or licence photos you move here leave the Library and search, and open only with your screen lock.",
                 )
-                else -> SafeGrid(list, key, chosen.mapTo(HashSet()) { it.id }, { selected = it }, { viewing = it }, bottom + if (selecting) SelectionClearance else Space.s8)
+                else -> {
+                    OnlyCopyNote(Modifier.padding(start = Space.s4, end = Space.s4, top = Space.s3, bottom = Space.s2))
+                    SafeGrid(list, key, chosen.mapTo(HashSet()) { it.id }, { selected = it }, { viewing = it }, bottom + if (selecting) SelectionClearance else Space.s8)
+                }
             }
         }
         AnimatedVisibility(

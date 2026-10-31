@@ -272,8 +272,8 @@ private fun albumsWord(n: Int) = counted(n, "album", "albums")
  */
 @Composable
 fun GroupMoveRows(group: String?, onMove: () -> Unit, onTakeOut: () -> Unit) {
-    MenuRow(Sym.DriveFileMove, if (group == null) "Move to a group" else "Move to another group", onMove, sub = group?.let { "Now in $it" })
-    if (group != null) MenuRow(Sym.FolderCopy, "Take out of the group", onTakeOut, trailing = null)
+    MenuRow(Sym.DriveFileMove, if (group == null) "Move to a group" else "Move to another group", onMove, sub = group?.let { "Now in $it" } ?: "Keep it with albums like it, in Collections")
+    if (group != null) MenuRow(Sym.FolderCopy, "Take out of the group", onTakeOut, sub = "It goes back among your albums", trailing = null)
 }
 
 /** Picks the group album [entry] moves to: one of the groups (its own is checked), or a new one named here. Undo puts it back. */
@@ -303,7 +303,7 @@ fun GroupPicker(entry: AlbumEntry, view: AlbumsView, onDismiss: () -> Unit) {
                     trailing = if (here) Sym.Check else null,
                 )
             }
-            item(key = "new") { MenuRow(Sym.Add, "New group", { naming = true }) }
+            item(key = "new") { MenuRow(Sym.Add, "New group", { naming = true }, sub = "Name a group and move it there") }
         }
     }
 }
@@ -363,9 +363,9 @@ fun GroupSheet(entry: AlbumEntry, view: AlbumsView, media: List<Media>, actions:
                 CrashLog.note(if (pinned) "unpin group" else "pin group")
                 AlbumPrefs.setPinned(entry.key, !pinned)
                 onDismiss()
-            }, trailing = null)
-            MenuRow(Sym.Add, "Add albums", { step = GroupStep.Add })
-            MenuRow(Sym.Edit, "Rename group", { step = GroupStep.Rename })
+            }, sub = pinSub(pinned), trailing = null)
+            MenuRow(Sym.Add, "Add albums", { step = GroupStep.Add }, sub = "Pick albums to put in this group")
+            MenuRow(Sym.Edit, "Rename group", { step = GroupStep.Rename }, sub = "Only the group's name changes")
             MenuRow(Sym.Share, "Share as ZIP", {
                 onDismiss()
                 actions.shareZipParts(g.name, g.albums.map { ZipPart(it.name, it.itemsIn(media)) })

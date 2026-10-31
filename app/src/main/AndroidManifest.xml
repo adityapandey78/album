@@ -50,10 +50,14 @@
         <package android:name="com.facebook.katana" />
     </queries>
 
+    <!-- hasFragileUserData: Android's uninstall dialog offers "Keep app data", since Private safe and ID cards are the only
+         copy of what's in them. manageSpaceActivity: app settings show Manage space (ManageSpace.kt) instead of Clear storage. -->
     <application
         android:name=".AlbumApp"
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
+        android:hasFragileUserData="true"
+        android:manageSpaceActivity=".ManageSpaceActivity"
         android:icon="@mipmap/ic_launcher_lime"
         android:label="@string/app_name"
         android:theme="@style/Theme.Album">
@@ -340,6 +344,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity-alias>
+
+        <!-- Manage space, opened by Android's app settings (another app), so exported. Shows counts only and asks before erasing.
+             Its own task, so it never brings Album's screens along or stays in Recents. -->
+        <activity
+            android:name=".ManageSpaceActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:taskAffinity="" />
 
         <!-- "Open with Album" for photos and videos from other apps. Shows just that file, with Share and Details. -->
         <activity

@@ -200,7 +200,10 @@ fun SettingsSectionScreen(
         SettingsSection.Privacy -> PrivacyPage(onOpenSafe, onHiddenItems, onDisguise, onIdCards)
         SettingsSection.Deleting -> Group(note = "Deleted photos and videos stay in ${Special.Trash.title} for 30 days, then Android erases them.") {
             MediaManagementRow()
-            GroupRow(Special.Trash.title, onOpenTrash, icon = Sym.RestoreFromTrash, value = rememberTrash().value?.size?.toString())
+            GroupRow(
+                Special.Trash.title, onOpenTrash, icon = Sym.RestoreFromTrash, sub = "Restore deleted items, or delete them for good",
+                value = rememberTrash().value?.size?.toString(),
+            )
         }
         SettingsSection.Smart -> {
             val context = LocalContext.current
@@ -255,7 +258,7 @@ fun AppearanceScreen(onBack: () -> Unit) = SettingsPage("Appearance", onBack) {
         Padded { AccentPicker(a.accent) { v -> AppearancePrefs.update { it.copy(accent = v) } } }
     }
     Group(title = "Text") {
-        ChipRow("Font", AppFont.entries.map { it to it.label }, a.font, { v -> AppearancePrefs.update { it.copy(font = v) } })
+        ChipRow("Font", AppFont.entries.map { it to it.label }, a.font, { v -> AppearancePrefs.update { it.copy(font = v) } }, sub = "For all text in Album")
     }
     Group(title = "Look") {
         Padded {
@@ -268,7 +271,7 @@ fun AppearanceScreen(onBack: () -> Unit) = SettingsPage("Appearance", onBack) {
 
 /**
  * Settings > Library and grid: gallery style and columns, the bottom bar's style and what it does while scrolling, then
- * what the Library leaves out.
+ * whether the Library shows screenshots. Folders hidden from the Library are listed in Hidden items.
  */
 @Composable
 private fun LibraryPage(columns: MutableIntState) {
@@ -280,19 +283,21 @@ private fun LibraryPage(columns: MutableIntState) {
                 AppearancePrefs.update { it.copy(gallery = v) }
             }
         }
-        ChipRow("Columns", Columns.map { it to "$it" }, columns.intValue, { columns.intValue = it }, sub = "Or pinch the grid")
+        ChipRow("Columns", Columns.map { it to "$it" }, columns.intValue, { columns.intValue = it }, sub = "Photos across each row. Or pinch the grid.")
     }
     Group(title = "Bottom bar") {
-        ChipRow("Style", BarStyle.entries.map { it to it.label }, a.bar, { v -> AppearancePrefs.update { it.copy(bar = v) } })
-        ChipRow("While scrolling", BarScroll.entries.map { it to it.label }, a.barScroll, { v -> AppearancePrefs.update { it.copy(barScroll = v) } })
+        ChipRow("Style", BarStyle.entries.map { it to it.label }, a.bar, { v -> AppearancePrefs.update { it.copy(bar = v) } }, sub = "How the tabs at the bottom look")
+        ChipRow(
+            "While scrolling", BarScroll.entries.map { it to it.label }, a.barScroll, { v -> AppearancePrefs.update { it.copy(barScroll = v) } },
+            sub = "What the bar does as you scroll",
+        )
     }
-    Group(title = "What the Library shows") {
+    Group(title = "What the Library shows", note = "Folders you hide from the Library are listed in Hidden items, where you can show them again.") {
         // The same as hiding Android's screenshot folders from their menu in Collections
         GroupSwitch(
             "Screenshots in the Library", "Off: they stay in Collections only.", screenshotsShown(hidden),
             { on -> ScreenshotFolders.forEach { AlbumPrefs.setHidden(it, !on) } }, icon = Sym.ScreenshotMonitor,
         )
-        HiddenFoldersRow(hidden)
     }
 }
 
@@ -302,41 +307,11 @@ internal val ScreenshotFolders = setOf("dcim/screenshots/", "pictures/screenshot
 /** Whether the Library shows screenshots: neither screenshot folder is hidden from it. */
 internal fun screenshotsShown(hidden: Set<String>) = ScreenshotFolders.none { it in hidden }
 
-/** The folders "Hidden folders" lists: hidden from the Library, less the screenshots (their own switch) and Hidden items. */
-internal fun listedHidden(hidden: Set<String>, locked: Set<String>) = hidden - ScreenshotFolders - locked
-
 /**
- * How many folders are hidden from the Library (from a folder's menu in Collections). Tapping lists them, and tapping one
- * there shows it in the Library again.
+ * The folders Hidden items lists as hidden from the Library: [hidden] less the screenshots (their own switch in Settings)
+ * and the folders [locked] behind the PIN (Hidden items' own albums).
  */
-@Composable
-private fun HiddenFoldersRow(hidden: Set<String>) {
-    val media by Gallery.media.collectAsState()
-    val locked by AlbumPrefs.locked.collectAsState()
-    val folders = remember(media, hidden, locked) {
-        val keys = listedHidden(hidden, locked)
-        media?.let { m -> albumsOf(m).filter { it.key in keys } }
-    }
-    var open by remember { mutableStateOf(false) }
-    GroupRow(
-        "Hidden folders", folders?.takeIf { it.isNotEmpty() }?.let { { open = true } }, icon = Sym.VisibilityOff,
-        value = folders?.size?.toString(),
-    )
-    if (!open || folders.isNullOrEmpty()) return
-    Sheet({ open = false }, "Hidden folders") {
-        Text(
-            "They stay in Collections. Tap one to show it in the Library again.",
-            Modifier.padding(bottom = Space.s2), style = AlbumTheme.type.caption, color = AlbumTheme.colors.inkMuted,
-        )
-        folders.forEach { album ->
-            MenuRow(Sym.Folder, album.name, {
-                CrashLog.note("show folder in library")
-                AlbumPrefs.setHidden(album.key, false)
-                if (folders.size == 1) open = false
-            }, sub = itemCount(album.count), trailing = Sym.Visibility)
-        }
-    }
-}
+internal fun listedHidden(hidden: Set<String>, locked: Set<String>) = hidden - ScreenshotFolders - locked
 
 /** Settings > Photos and videos: how videos and motion photos play, then where Album saves and Backup. */
 @Composable
@@ -397,6 +372,12 @@ private fun PrefSwitch(pref: SwitchPref, label: String, description: String, ico
     }, icon = icon)
 }
 
+/** What Settings holds, for the rows in tab menus that open it. */
+internal const val SETTINGS_SUB = "Library, privacy, deleting, updates and more"
+
+/** What the Private safe is, where a row opens it or moves photos into it. */
+internal const val PRIVATE_SAFE_SUB = "Encrypted on this phone, opens with your PIN or fingerprint"
+
 /**
  * Settings > Privacy and safe: Private safe (with its count), ID cards and Hidden items; the privacy PIN, fingerprint
  * unlock and Disguise; then whether Collections shows Recently deleted.
@@ -420,12 +401,12 @@ private fun PrivacyPage(onOpenSafe: () -> Unit, onHiddenItems: () -> Unit, onDis
     val a = AlbumTheme.spec.appearance
     val inSafe = Safe.items.collectAsState(null).value?.size
 
-    Group {
-        GroupRow("Private safe", onOpenSafe, icon = Sym.Lock, sub = "Encrypted on this phone", value = inSafe?.toString())
-        GroupRow("ID cards", onIdCards, icon = Sym.IdCard, sub = "Aadhaar, PAN and passport photos that open with your screen lock")
-        GroupRow("Hidden items", onHiddenItems, icon = Sym.VisibilityOff, sub = "People and albums you hid")
+    Group(note = ONLY_COPY_SETTINGS) {
+        GroupRow("Private safe", onOpenSafe, icon = Sym.Lock, sub = PRIVATE_SAFE_SUB, value = inSafe?.toString())
+        GroupRow("ID cards", onIdCards, icon = Sym.IdCard, sub = "Aadhaar, PAN and passport photos, encrypted, open with your screen lock")
+        GroupRow("Hidden items", onHiddenItems, icon = Sym.VisibilityOff, sub = "People and albums behind your PIN, and folders hidden from the Library")
     }
-    Group(title = "Lock", note = "Private safe and ID cards lock as soon as you leave them, Hidden items 2 minutes after, and all of them whenever Album leaves the screen.") {
+    Group(title = "Lock", note = "Private safe, Hidden items and ID cards: each locks when you leave it, and all lock when Album leaves the screen.") {
         GroupRow(
             "Privacy PIN",
             {
@@ -433,7 +414,7 @@ private fun PrivacyPage(onOpenSafe: () -> Unit, onHiddenItems: () -> Unit, onDis
                 sheet = if (setUp) PrivacyPurpose.Change else PrivacyPurpose.Unlock
             },
             icon = Sym.Pin,
-            sub = if (setUp) "Change your PIN" else "Not set yet. Set one to lock the safe.",
+            sub = if (setUp) "Locks the Private safe and Hidden items. Tap to change it." else "Not set yet. Set one to lock the Private safe and Hidden items.",
             value = if (setUp) "On" else "Off",
         )
         if (setUp && hasFingerprint && !rearm) {
@@ -485,14 +466,17 @@ private fun MotionPage() {
             { v -> AppearancePrefs.update { it.copy(still = v) } },
             icon = Sym.MotionPhotosOn,
         )
-        if (a.still != null) GroupRow("Follow the phone again", { AppearancePrefs.update { it.copy(still = null) } }, icon = Sym.Undo, trailing = null)
+        if (a.still != null) GroupRow(
+            "Follow the phone again", { AppearancePrefs.update { it.copy(still = null) } }, icon = Sym.Undo,
+            sub = "Use your phone's Remove animations setting", trailing = null,
+        )
         GroupSwitch(
             "Haptic feedback", "Ticks on select, pinch and swipe.", a.haptics,
             { v -> AppearancePrefs.update { it.copy(haptics = v) } }, icon = Sym.Vibration,
         )
     }
     Group(title = "Tab transition") {
-        ChipRow("Style", TabMotion.entries.map { it to it.label }, a.tabMotion, { v -> AppearancePrefs.update { it.copy(tabMotion = v) } })
+        ChipRow("Style", TabMotion.entries.map { it to it.label }, a.tabMotion, { v -> AppearancePrefs.update { it.copy(tabMotion = v) } }, sub = "How one tab gives way to the next")
     }
     Group(title = "Messages", note = "Messages after an action, like \"Moved 3 items to Trash\". Undo goes when the message does.") {
         MessageTimeRow(a.messageSeconds)
@@ -512,8 +496,8 @@ private fun LabPage(snackbar: SnackbarHostState) {
     Text("Switch between the design options; changes apply to the whole app at once.", style = AlbumTheme.type.body, color = AlbumTheme.colors.inkMuted)
     Group(title = "Bottom bar", note = "Shrink keeps the bar in reach while you scroll: only the current tab and search stay.") {
         BarPreview(a.bar, a.barScroll)
-        ChipRow("Style", BarStyle.entries.map { it to it.label }, a.bar, { v -> save { it.copy(bar = v) } })
-        ChipRow("While scrolling", BarScroll.entries.map { it to it.label }, a.barScroll, { v -> save { it.copy(barScroll = v) } })
+        ChipRow("Style", BarStyle.entries.map { it to it.label }, a.bar, { v -> save { it.copy(bar = v) } }, sub = "How the tabs at the bottom look")
+        ChipRow("While scrolling", BarScroll.entries.map { it to it.label }, a.barScroll, { v -> save { it.copy(barScroll = v) } }, sub = "What the bar does as you scroll")
     }
     Group(title = "For you") {
         Padded {
@@ -541,18 +525,18 @@ private fun LabPage(snackbar: SnackbarHostState) {
                     snackbar.showSnackbar("Restored 3 items", Sym.RestoreFromTrash)
                 }
             }
-        }, icon = Sym.Undo, trailing = null)
+        }, icon = Sym.Undo, sub = "Only a sample: nothing moves to Trash", trailing = null)
     }
     Group(title = "Motion") {
         Padded { TabMotionPreview() }
-        ChipRow("Tab transition", TabMotion.entries.map { it to it.label }, a.tabMotion, { v -> save { it.copy(tabMotion = v) } })
-        ChipRow("Speed", listOf(false to "Normal", true to "Slow motion 4×"), AlbumMotion.slow, { AlbumMotion.slow = it })
+        ChipRow("Tab transition", TabMotion.entries.map { it to it.label }, a.tabMotion, { v -> save { it.copy(tabMotion = v) } }, sub = "How one tab gives way to the next")
+        ChipRow("Speed", listOf(false to "Normal", true to "Slow motion 4×"), AlbumMotion.slow, { AlbumMotion.slow = it }, sub = "Slows every animation, to watch it closely")
     }
     Group {
         GroupRow("Reset to defaults", {
             save(::labDefaults)
             AlbumMotion.slow = false
-        }, icon = Sym.Undo, trailing = null)
+        }, icon = Sym.Undo, sub = "Puts back only the options on this page", trailing = null)
     }
 }
 
@@ -1093,7 +1077,7 @@ private fun EditorRow() {
             }
         },
         icon = Sym.Tune,
-        sub = app?.let { "Tap to ask every time" },
+        sub = if (app != null) "Edit opens it straight away. Tap to ask every time." else "Edit asks which app to use",
         value = app ?: "Ask every time",
     )
 }
@@ -1224,9 +1208,9 @@ fun AboutScreen(onBack: () -> Unit, onUpdates: () -> Unit, onDiagnostics: () -> 
             )
         }
         Group {
-            GroupRow("Updates", onUpdates, icon = Sym.SystemUpdate, value = version)
+            GroupRow("Updates", onUpdates, icon = Sym.SystemUpdate, sub = "Check for a newer version of Album", value = version)
             GroupRow("Diagnostics", onDiagnostics, icon = Sym.BugReport, sub = "Crash logs stay on this phone")
-            GroupRow("Open-source licences", onLicences, icon = Sym.Info)
+            GroupRow("Open-source licences", onLicences, icon = Sym.Info, sub = "The fonts, icons and models Album uses")
         }
     }
 }

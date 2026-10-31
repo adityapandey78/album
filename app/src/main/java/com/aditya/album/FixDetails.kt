@@ -40,6 +40,18 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.key
+import androidx.compose.runtime.produceState
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
 import androidx.exifinterface.media.ExifInterface
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.first
@@ -303,17 +315,45 @@ fun albumOnly(n: Int, of: Int): String? = when {
     else -> "${"%,d".format(n)} of their files can't hold it, so Album keeps it"
 }
 
-/** The date and place fixes, run as album jobs: one Android pop-up for the batch, a progress card, Stop, and Undo. */
+/**
+ * A change of place: to [place], at a spot Album finds in it; to [custom], a place the user pinned and named, at its pin;
+ * or, with neither, the place taken away.
+ */
+class PlaceFix(val place: Place?, val custom: CustomPlace? = null)
+
+/** One part of an edit, done: the items it changed, what to say, and its Undo (which returns what to say then). */
+private class Fixed(val done: List<Media>, val text: String, val undo: suspend () -> String)
+
+/** The date and place fixes, run as one album job: one Android pop-up for the batch, a progress card, Stop, and Undo. */
 object FixDetails {
     /**
-     * Moves [items] by [shift] millis: their own Exif dates where it can be overwritten, MediaStore's date for every one,
-     * and Album's own record of it (see [MediaFix]). Call with at most [MAX_REQUEST] items.
+     * Edit details for [items] (at most [MAX_REQUEST]): moves their dates by [shift] millis (0 leaves them), then sets their
+     * place to [place] (null leaves it). One job, so one pop-up covers both, and one Undo puts both back.
      */
-    fun dates(context: Context, items: List<Media>, shift: Long) = AlbumOps.runJob {
+    fun edit(context: Context, items: List<Media>, shift: Long, place: PlaceFix?) = AlbumOps.runJob {
+        val dated = if (shift != 0L) dates(context, items, shift) ?: return@runJob null else null
+        // Stopped part-way through the dates: the place is left for another go rather than set on only some
+        val placed = if (place == null || (dated != null && AlbumOps.stopped)) null else {
+            // The date's pop-up covered every file, and Android's grant lasts while Album runs
+            places(context, dated?.done?.map { it.copy(taken = it.taken + shift) } ?: items, place, asked = dated != null)
+        }
+        val fixes = listOfNotNull(dated, placed)
+        if (fixes.isEmpty()) return@runJob if (AlbumOps.stopped) AlbumOps.Message("Stopped. Nothing was changed.") else null
+        AlbumOps.Message(fixes.joinToString(". ") { it.text }) {
+            // The place goes back first: it was written last, over the file as the date left it
+            AlbumOps.runJob { AlbumOps.Message(fixes.reversed().map { it.undo() }.joinToString(". ")) }
+        }
+    }
+
+    /**
+     * Moves [items] by [shift] millis: their own Exif dates where it can be overwritten, MediaStore's date for every one,
+     * and Album's own record of it (see [MediaFix]). Null when Android's pop-up was turned down, or Stop came first.
+     */
+    private suspend fun dates(context: Context, items: List<Media>, shift: Long): Fixed? {
         val resolver = context.contentResolver
         CrashLog.note("fix dates ${items.size}")
         // DATE_TAKEN needs write access as much as the files do, so every item is in the one request
-        if (!AlbumOps.ask(MediaStore.createWriteRequest(resolver, items.map { it.uri }))) return@runJob null
+        if (!AlbumOps.ask(MediaStore.createWriteRequest(resolver, items.map { it.uri }))) return null
         val ids = items.map { it.id }
         val before = Collections.fixesOf(ids).associateBy { it.mediaId }
         val written = ArrayList<Written>()
@@ -336,33 +376,36 @@ object FixDetails {
             }
             done += m
         }
-        if (done.isEmpty()) return@runJob null
+        if (done.isEmpty()) return null
         awaitRescans(resolver, generations)
         modified.putAll(modifiedOf(resolver, done.filter { it.id !in modified }.map { it.id }))
         setTaken(resolver, done.associateWith { it.taken + shift })
         Collections.putFixes(done.map { m -> (before[m.id] ?: MediaFix(m.id, 0)).copy(modified = modified[m.id] ?: 0, taken = m.taken + shift) })
         val what = if (done.size < items.size) "${done.size} of ${itemCount(items.size)}" else itemCount(done.size)
         val text = listOfNotNull("Changed the date of $what", albumOnly(done.size - written.size, done.size)).joinToString(". ")
-        AlbumOps.Message(text) { undo(context, "date", done, written, before) { setTaken(resolver, done.associateWith { it.taken }) } }
+        return Fixed(done, text) { undo(context, "date", done, written, before) { setTaken(resolver, done.associateWith { it.taken }) } }
     }
 
     /**
-     * Sets the place of [items] to [to], or takes it away when null. In the files it's a spot in that place where Album
+     * Sets the place of [items] as [fix] says. In the files it's the custom place's pin, or a spot in the place where Album
      * knows one (from photos taken there, see [middleOf]). Files with GPS to overwrite (JPEG and WebP) change in place,
-     * after one Android pop-up for just those; the rest keep the fix in Album. The smart index takes it at once, so Places
-     * and search update.
+     * after one Android pop-up for just those (none when [asked] already covered them); the rest keep the fix in Album.
+     * The smart index takes it at once, so Places and search update. Null when nothing changed.
      */
-    fun places(context: Context, items: List<Media>, to: Place?) = AlbumOps.runJob {
+    private suspend fun places(context: Context, items: List<Media>, fix: PlaceFix, asked: Boolean): Fixed? {
         val resolver = context.contentResolver
-        CrashLog.note(if (to == null) "remove place ${items.size}" else "fix place ${items.size}") // never which place
-        val point = to?.let { SmartIndex.spotIn(it) }
+        val custom = fix.custom
+        CrashLog.note(if (custom == null && fix.place == null) "remove place ${items.size}" else "fix place ${items.size}") // never which place
+        // A pinned place is named by GeoNames' state and country around its pin
+        val to = custom?.let { namedPlace(geoPlaceAt(context, it.lat, it.lng), it) } ?: fix.place
+        val point = custom?.let { doubleArrayOf(it.lat, it.lng) } ?: to?.let { SmartIndex.spotIn(it) }
         val canLocate = context.checkSelfPermission(ACCESS_MEDIA_LOCATION) == PackageManager.PERMISSION_GRANTED
         // Which files can take it is known before asking, so the pop-up never comes up for files Album then leaves alone
         val plans = HashMap<Long, List<Patch>>()
         var located = 0 // files that have a location of their own, to say when one stays in a file Album can't change
         if (canLocate && (to == null || point != null)) {
             for ((i, m) in items.withIndex()) {
-                if (AlbumOps.stopped) return@runJob AlbumOps.Message("Stopped. Nothing was changed.")
+                if (AlbumOps.stopped) return null
                 AlbumOps.progress.value = AlbumOps.Progress("Checking", i + 1, items.size, "Nothing has changed yet.")
                 if (m.isVideo) continue
                 runCatching {
@@ -375,7 +418,7 @@ object FixDetails {
             }
         }
         val inFile = items.filter { it.id in plans }
-        if (inFile.isNotEmpty() && !AlbumOps.ask(MediaStore.createWriteRequest(resolver, inFile.map { it.uri }))) return@runJob null
+        if (inFile.isNotEmpty() && !asked && !AlbumOps.ask(MediaStore.createWriteRequest(resolver, inFile.map { it.uri }))) return null
         val ids = items.map { it.id }
         val before = Collections.fixesOf(ids).associateBy { it.mediaId }
         val spots = SmartIndex.spotsOf(ids)
@@ -396,7 +439,7 @@ object FixDetails {
         }
         // A file Stop left out keeps its place; one whose patch failed gets the fix in Album like any other
         val done = if (AlbumOps.stopped) items.filter { it.id !in plans || it.id in modified } else items
-        if (done.isEmpty()) return@runJob AlbumOps.Message("Stopped. Nothing was changed.")
+        if (done.isEmpty()) return null
         // The rescan after a write works the date out again from the file; put back the one Album shows
         awaitRescans(resolver, generations.filterKeys { uri -> written.any { it.m.uri == uri } })
         setTaken(resolver, written.associate { it.m to it.m.taken })
@@ -416,13 +459,17 @@ object FixDetails {
         } else {
             listOfNotNull("Set the place of $what to ${to.city}", albumOnly(done.size - written.size, done.size)).joinToString(". ")
         }
-        AlbumOps.Message(text) {
+        return Fixed(done, text) {
             undo(context, "place", done, written, before) {
                 SmartIndex.restoreSpots(spots)
                 setTaken(resolver, written.associate { it.m to it.m.taken })
             }
         }
     }
+
+    /** GeoNames' place at a point, from the 236k places in assets (a moment to read, so only for a pinned place). */
+    private fun geoPlaceAt(context: Context, lat: Double, lng: Double): Place? =
+        context.assets.open("geonames/places.tsv").bufferedReader().useLines { Places.parse(it) }.at(lat, lng)
 
     /** MediaStore's date for each item. Best effort per item: Album's own record already has the fix. */
     private fun setTaken(resolver: ContentResolver, taken: Map<Media, Long>) = taken.forEach { (m, t) ->
@@ -434,49 +481,54 @@ object FixDetails {
      * Undo for a fix: the files' old bytes go back (Android's grant from the fix lasts while Album runs, so no pop-up),
      * then [also] (MediaStore's dates, or the index's places), then Album's records as they were before.
      */
-    private fun undo(context: Context, what: String, done: List<Media>, written: List<Written>, before: Map<Long, MediaFix>, also: suspend () -> Unit) =
-        AlbumOps.runJob {
-            val resolver = context.contentResolver
-            CrashLog.note("undo $what ${done.size}")
-            val generations = written.associate { it.m.uri to generationOf(resolver, it.m.uri) }
-            val modified = HashMap<Long, Long>()
-            var failed = 0
-            for ((i, w) in written.withIndex()) {
-                AlbumOps.progress.value = AlbumOps.Progress("Putting back", i + 1, written.size)
-                val old = w.patches.first().old
-                runCatching {
-                    modified[w.m.id] = writePatches(resolver, w.uri, w.patches.map { it.reversed() }.reversed()) { exif ->
-                        // The first patch is the date taken (dates) or the latitude (places): it must read as before
-                        exif.getAttributeBytes(if (what == "date") ExifInterface.TAG_DATETIME_ORIGINAL else ExifInterface.TAG_GPS_LATITUDE)?.contentEquals(old) == true
-                    }
-                }.onFailure {
-                    CrashLog.note("undo patch failed: $it")
-                    failed++
+    private suspend fun undo(context: Context, what: String, done: List<Media>, written: List<Written>, before: Map<Long, MediaFix>, also: suspend () -> Unit): String {
+        val resolver = context.contentResolver
+        CrashLog.note("undo $what ${done.size}")
+        val generations = written.associate { it.m.uri to generationOf(resolver, it.m.uri) }
+        val modified = HashMap<Long, Long>()
+        var failed = 0
+        for ((i, w) in written.withIndex()) {
+            AlbumOps.progress.value = AlbumOps.Progress("Putting back", i + 1, written.size)
+            val old = w.patches.first().old
+            runCatching {
+                modified[w.m.id] = writePatches(resolver, w.uri, w.patches.map { it.reversed() }.reversed()) { exif ->
+                    // The first patch is the date taken (dates) or the latitude (places): it must read as before
+                    exif.getAttributeBytes(if (what == "date") ExifInterface.TAG_DATETIME_ORIGINAL else ExifInterface.TAG_GPS_LATITUDE)?.contentEquals(old) == true
                 }
+            }.onFailure {
+                CrashLog.note("undo patch failed: $it")
+                failed++
             }
-            awaitRescans(resolver, generations.filterKeys { uri -> written.any { it.m.uri == uri && it.m.id in modified } })
-            also()
-            // A row kept from before stays tied to the file as it is now, which is as it was then
-            Collections.restoreFixes(done.map { it.id }, before.values.map { f -> modified[f.mediaId]?.let { f.copy(modified = it) } ?: f })
-            val text = "Put back the ${what}s of ${itemCount(done.size)}"
-            AlbumOps.Message(if (failed > 0) "$text. $failed of their files couldn't be put back." else text)
         }
+        awaitRescans(resolver, generations.filterKeys { uri -> written.any { it.m.uri == uri && it.m.id in modified } })
+        also()
+        // A row kept from before stays tied to the file as it is now, which is as it was then
+        Collections.restoreFixes(done.map { it.id }, before.values.map { f -> modified[f.mediaId]?.let { f.copy(modified = it) } ?: f })
+        val text = "Put back the ${what}s of ${itemCount(done.size)}"
+        return if (failed > 0) "$text. $failed of their files couldn't be put back" else text
+    }
 }
 
 // ---------- Sheets ----------
 
 private enum class DateMode { Set, Shift }
 
-private enum class Picking { None, Date, Time }
+private enum class Picking { None, Date, Time, Place, Map, Name }
+
+/** The place chosen in Edit details, as a saveable key: [REMOVE], [CUSTOM] and a name, or a place's [placeKey]. */
+private const val REMOVE = "remove"
+private const val CUSTOM = "custom:"
 
 /**
- * Edit date and time for [items]: set the date and time of the first (the others keep their order and spacing after it),
- * or shift them all by days, hours and minutes, earlier or later. One item opens on Set, many on Shift. One item is the
- * design's "Fix date" (from Details, or More), with what it's for. [onApply] gets the shift in millis.
+ * Edit details for [items], one or many: their date and time, and their place, with one Save. The date is set for the
+ * first (the others keep their order and spacing after it), or all are shifted by days, hours and minutes, earlier or
+ * later; one item opens on Set, many on Shift, and with no change the dates stay. The place comes from Album's places,
+ * the ones the user named, or a new one pinned on the map. [onApply] gets the shift in millis (0 for none) and the place
+ * (null to leave it).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun EditDateSheet(items: List<Media>, onDismiss: () -> Unit, onApply: (Long) -> Unit) {
+fun EditDetailsSheet(items: List<Media>, onDismiss: () -> Unit, onApply: (Long, PlaceFix?) -> Unit) {
     val context = LocalContext.current
     val c = AlbumTheme.colors
     val zone = remember { ZoneId.systemDefault() }
@@ -495,6 +547,26 @@ fun EditDateSheet(items: List<Media>, onDismiss: () -> Unit, onApply: (Long) -> 
     var days by rememberSaveable { mutableStateOf("") }
     var hours by rememberSaveable { mutableStateOf("") }
     var minutes by rememberSaveable { mutableStateOf("") }
+    var chosen by rememberSaveable { mutableStateOf<String?>(null) } // null: the place stays
+    var query by rememberSaveable { mutableStateOf("") }
+    var pin by rememberSaveable { mutableStateOf<DoubleArray?>(null) }
+    var name by rememberSaveable(stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue()) }
+
+    val places = Explore.places.collectAsState().value.orEmpty()
+    val custom by remember(context) { CustomPlaces.load(context) }.collectAsState()
+    val placeFix: PlaceFix? = chosen?.let { key ->
+        when {
+            key == REMOVE -> PlaceFix(null)
+            key.startsWith(CUSTOM) -> custom.find { it.name == key.removePrefix(CUSTOM) }?.let { PlaceFix(null, it) }
+            else -> places.find { placeKey(it.key) == key }?.let { PlaceFix(it.key) }
+        }
+    }
+    val placeName = when {
+        chosen == REMOVE -> "Removed"
+        placeFix?.custom != null -> placeFix.custom.name
+        placeFix?.place != null -> placeNames(places.map { it.key }).getValue(placeFix.place)
+        else -> "Stays as it is"
+    }
 
     when (picking) {
         Picking.Date -> {
@@ -541,6 +613,53 @@ fun EditDateSheet(items: List<Media>, onDismiss: () -> Unit, onApply: (Long) -> 
             }
             return
         }
+        Picking.Place -> {
+            PlaceSearch(
+                items.size, places, custom, query, { query = it },
+                onDismiss = { picking = Picking.None },
+                onPick = { key ->
+                    chosen = key
+                    picking = Picking.None
+                },
+                onAdd = {
+                    name = customPlaceName(query).let { TextFieldValue(it, TextRange(it.length)) } // what they searched for is likely its name
+                    picking = Picking.Map
+                },
+            )
+            return
+        }
+        Picking.Map -> {
+            // The photos' own spot, when one has GPS: naming where they were taken is the usual case
+            val focus by produceState<MapFocus?>(null, items) {
+                value = SmartIndex.spotsOf(items.take(100).map { it.id }).firstNotNullOfOrNull { s ->
+                    if (s.lat != null && s.lng != null) MapFocus(s.id, s.lat, s.lng) else null
+                }
+            }
+            PinDialog(focus, onBack = { picking = Picking.Place }) { lat, lng ->
+                pin = doubleArrayOf(lat, lng)
+                picking = Picking.Name
+            }
+            return
+        }
+        Picking.Name -> {
+            val text = customPlaceName(name.text)
+            NameSheet(
+                "Name this place", name, { name = it }, "Save place", enabled = text.isNotEmpty(),
+                onDismiss = { picking = Picking.Map },
+                onConfirm = {
+                    val at = pin
+                    if (text.isNotEmpty() && at != null) {
+                        CustomPlaces.add(context, CustomPlace(text, at[0], at[1]))
+                        chosen = CUSTOM + text
+                        picking = Picking.None
+                    }
+                },
+                hint = "Saved on this phone. Photos taken here are called by this name.",
+                placeholder = "Nani's house",
+                capitalization = KeyboardCapitalization.Words,
+            )
+            return
+        }
         Picking.None -> {}
     }
 
@@ -550,17 +669,18 @@ fun EditDateSheet(items: List<Media>, onDismiss: () -> Unit, onApply: (Long) -> 
         DateMode.Shift -> shiftOf(number(days), number(hours), number(minutes), later)
     }.takeIf { abs(it) >= 1000 } ?: 0L // the picker works to the second: what's left is the photo's own milliseconds
     val many = items.size > 1
-    Sheet(onDismiss, if (many) "Edit date and time" else "Fix date") {
-        Column(verticalArrangement = Arrangement.spacedBy(Space.s3)) {
+    Sheet(onDismiss, "Edit details") {
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(Space.s3)) {
             if (many) {
                 Text("${itemCount(items.size)} · ${whenText(first)} to ${whenText(last)}", style = AlbumTheme.type.caption, color = c.inkMuted)
             } else {
                 // Its date and time show in the rows below
                 Text(
-                    "For photos saved with the wrong date, like WhatsApp downloads. The file is updated on the phone.",
+                    "For photos saved with the wrong date or place, like WhatsApp downloads. The file is updated on the phone.",
                     style = AlbumTheme.type.body, color = c.inkMuted,
                 )
             }
+            Text("Date and time", style = AlbumTheme.type.label, color = c.ink)
             Row(horizontalArrangement = Arrangement.spacedBy(Space.s2)) {
                 Chip("Set date and time", { mode = DateMode.Set }, selected = mode == DateMode.Set)
                 Chip("Shift", { mode = DateMode.Shift }, selected = mode == DateMode.Shift)
@@ -585,15 +705,17 @@ fun EditDateSheet(items: List<Media>, onDismiss: () -> Unit, onApply: (Long) -> 
                 }
             }
             Text(
-                if (shift == 0L) "Pick a new date or time" else "${if (many) "Moves them" else "Moves it"} ${shiftText(shift).replaceFirstChar { it.lowercase() }}",
-                style = AlbumTheme.type.body, color = c.ink,
+                if (shift == 0L) "The date stays as it is" else "${if (many) "Moves them" else "Moves it"} ${shiftText(shift).replaceFirstChar { it.lowercase() }}",
+                style = AlbumTheme.type.body, color = c.inkMuted,
             )
+            Text("Place", style = AlbumTheme.type.label, color = c.ink)
+            MenuRow(if (chosen == REMOVE) Sym.LocationOff else Sym.LocationOn, "Place", { picking = Picking.Place }, sub = placeName)
             Row(horizontalArrangement = Arrangement.spacedBy(Space.s2)) {
                 AlbumButton("Cancel", onDismiss, Modifier.weight(1f).heightIn(min = 56.dp))
                 AlbumButton(
-                    if (many) "Change ${"%,d".format(items.size)} dates" else "Change date",
-                    { if (shift != 0L) onApply(shift) },
-                    Modifier.weight(1.5f).heightIn(min = 56.dp), ButtonVariant.Primary, enabled = shift != 0L,
+                    "Save",
+                    { if (shift != 0L || placeFix != null) onApply(shift, placeFix) },
+                    Modifier.weight(1.5f).heightIn(min = 56.dp), ButtonVariant.Primary, enabled = shift != 0L || placeFix != null,
                 )
             }
         }
@@ -629,25 +751,36 @@ private fun NumberField(label: String, value: String, onValue: (String) -> Unit,
 private fun plain(text: String) = Normalizer.normalize(text, Normalizer.Form.NFD).replace(Regex("\\p{M}"), "").lowercase()
 
 /**
- * Edit place for [items]: Album's places (from photos it has located), searchable by town, state or country, biggest
- * first; or Remove place. [onPick] gets the place (null to remove it); Album finds a spot in it for the files.
+ * The place for [count] items: the ones the user named ([custom]) first, then Album's places (from photos it has located),
+ * searchable by name, town, state or country, biggest first; Remove place; and at the end Add a new place, which pins one
+ * on the map ([onAdd]). [onPick] gets the choice's key (see [REMOVE] and [CUSTOM]).
  */
 @Composable
-fun EditPlaceSheet(items: List<Media>, onDismiss: () -> Unit, onPick: (Place?) -> Unit) {
+private fun PlaceSearch(
+    count: Int,
+    places: List<Group<Place, Media>>,
+    custom: List<CustomPlace>,
+    query: String,
+    onQuery: (String) -> Unit,
+    onDismiss: () -> Unit,
+    onPick: (String) -> Unit,
+    onAdd: () -> Unit,
+) {
     val c = AlbumTheme.colors
-    val places = Explore.places.collectAsState().value.orEmpty()
     val names = remember(places) { placeNames(places.map { it.key }) }
-    var query by rememberSaveable { mutableStateOf("") }
     val q = plain(query.trim())
-    val shown = remember(places, q) {
-        if (q.isEmpty()) places else places.filter { p -> listOf(p.key.city, p.key.admin1, p.key.country).any { plain(it).contains(q) } }
+    val mine = remember(custom, q) { custom.filter { q.isEmpty() || plain(it.name).contains(q) }.sortedBy { plain(it.name) } }
+    val shown = remember(places, custom, q) {
+        // A named place's photos make a place of the same name: it's listed once, as the one they named
+        val named = custom.mapTo(HashSet()) { it.name }
+        places.filter { p -> p.key.city !in named && (q.isEmpty() || listOf(p.key.city, p.key.admin1, p.key.country).any { plain(it).contains(q) }) }
     }
-    Sheet(onDismiss, "Edit place") {
+    Sheet(onDismiss, "Place") {
         Column(verticalArrangement = Arrangement.spacedBy(Space.s2)) {
-            Text(itemCount(items.size), style = AlbumTheme.type.caption, color = c.inkMuted)
+            Text(itemCount(count), style = AlbumTheme.type.caption, color = c.inkMuted)
             OutlinedTextField(
                 query,
-                { query = it },
+                onQuery,
                 Modifier.fillMaxWidth(),
                 textStyle = AlbumTheme.type.body,
                 placeholder = { Text("Search your places") },
@@ -660,22 +793,46 @@ fun EditPlaceSheet(items: List<Media>, onDismiss: () -> Unit, onPick: (Place?) -
             LazyColumn {
                 if (q.isEmpty()) {
                     item(key = "remove") {
-                        MenuRow(Sym.LocationOff, "Remove place", { onPick(null) }, sub = "Album stops showing where they were taken", trailing = null)
+                        MenuRow(Sym.LocationOff, "Remove place", { onPick(REMOVE) }, sub = "Album stops showing where they were taken", trailing = null)
                     }
+                }
+                items(mine, key = { CUSTOM + it.name }) { p ->
+                    MenuRow(Sym.Home, p.name, { onPick(CUSTOM + p.name) }, sub = "Named by you", trailing = null)
                 }
                 items(shown, key = { placeKey(it.key) }) { p ->
                     val where = listOf(p.key.admin1, p.key.country).filter { it.isNotEmpty() && it != p.key.city }.distinct().joinToString(", ")
-                    MenuRow(Sym.LocationOn, names.getValue(p.key), { onPick(p.key) }, sub = listOf(where, itemCount(p.items.size)).filter { it.isNotEmpty() }.joinToString(" · "), trailing = null)
+                    MenuRow(Sym.LocationOn, names.getValue(p.key), { onPick(placeKey(p.key)) }, sub = listOf(where, itemCount(p.items.size)).filter { it.isNotEmpty() }.joinToString(" · "), trailing = null)
                 }
-                if (shown.isEmpty()) {
+                if (shown.isEmpty() && mine.isEmpty()) {
                     item(key = "none") {
                         Text(
-                            if (places.isEmpty()) "Places show up here once Album has found photos with a location." else "No place called $query in your photos.",
+                            if (places.isEmpty() && custom.isEmpty()) "Places show up here once Album has found photos with a location." else "No place called $query in your photos.",
                             Modifier.padding(vertical = Space.s4), style = AlbumTheme.type.caption, color = c.inkMuted,
                         )
                     }
                 }
+                item(key = "add") {
+                    MenuRow(Sym.Add, "Add a new place", onAdd, sub = "Drop a pin on the map and name it")
+                }
             }
         }
+    }
+}
+
+/**
+ * The offline map in its own window over everything (the viewer included), to drop a pin for a new place. Opens on
+ * [focus] when the photos have a spot, else on all the photos. [onPick] gets the pin's latitude and longitude.
+ */
+@Composable
+private fun PinDialog(focus: MapFocus?, onBack: () -> Unit, onPick: (Double, Double) -> Unit) {
+    Dialog(onBack, DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
+        // The map draws its own background; the window adds no dim or motion
+        (LocalView.current.parent as? DialogWindowProvider)?.window?.let { w ->
+            SideEffect {
+                w.setDimAmount(0f)
+                w.setWindowAnimations(0)
+            }
+        }
+        key(focus) { MapScreen(onBack, onOpen = {}, focus = focus, onPick = onPick) } // opens again on the spot once it's found
     }
 }

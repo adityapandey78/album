@@ -1,5 +1,11 @@
 package com.aditya.album
 
+import android.content.Context
+import android.content.SharedPreferences
+import androidx.core.content.edit
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlin.math.abs
 import kotlin.math.asin
 import kotlin.math.cos
@@ -175,4 +181,66 @@ class Places private constructor(private val spots: List<Spot>, private val cell
             return 2 * EARTH_RADIUS_KM * asin(sqrt(min(h, 1.0)))
         }
     }
+}
+
+// ---------- Places the user named ----------
+
+/** A place the user pinned on the map and named ("Nani's house"), for the photos taken there. */
+data class CustomPlace(val name: String, val lat: Double, val lng: Double)
+
+/** Within this of a custom place a photo was taken there: a house and its garden, with a phone's GPS drifting a little. */
+const val CUSTOM_PLACE_KM = 0.15
+
+/** The custom place a GPS point is at: the nearest one within [CUSTOM_PLACE_KM], or null. */
+fun customPlaceAt(lat: Double, lng: Double, custom: List<CustomPlace>): CustomPlace? =
+    custom.map { it to Places.distanceKm(lat, lng, it.lat, it.lng) }.filter { it.second <= CUSTOM_PLACE_KM }.minByOrNull { it.second }?.first
+
+/**
+ * GeoNames' place for a point ([geo], null at sea or far from towns) as a custom place: called by its name at the city
+ * and locality levels, so Places, search and the details show it, and kept in GeoNames' district, state and country.
+ */
+fun namedPlace(geo: Place?, custom: CustomPlace): Place = (geo ?: Place("", "", "", "")).copy(city = custom.name, locality = custom.name)
+
+/** A name as it's kept: on one line, with spaces in place of tabs and line breaks, at most 60 letters. */
+fun customPlaceName(text: String) = text.replace(Regex("\\s+"), " ").trim().take(60)
+
+/** Custom places as one line each, "lat, tab, lng, tab, name", for preferences. */
+fun encodeCustomPlaces(places: List<CustomPlace>) = places.joinToString("\n") { "${it.lat}\t${it.lng}\t${customPlaceName(it.name)}" }
+
+fun decodeCustomPlaces(text: String?): List<CustomPlace> = text.orEmpty().lines().mapNotNull { line ->
+    val f = line.split('\t', limit = 3)
+    val lat = f.getOrNull(0)?.toDoubleOrNull() ?: return@mapNotNull null
+    val lng = f.getOrNull(1)?.toDoubleOrNull() ?: return@mapNotNull null
+    f.getOrNull(2)?.takeIf { it.isNotBlank() }?.let { CustomPlace(it, lat, lng) }
+}
+
+/** [custom] with [place] added; one already called the same (whatever the case) is replaced, so pinning a name again moves it. */
+fun withCustomPlace(custom: List<CustomPlace>, place: CustomPlace) = custom.filterNot { it.name.equals(place.name, ignoreCase = true) } + place
+
+/** The places the user named, kept in their own small preferences file. Nothing leaves the phone. */
+object CustomPlaces {
+    private var prefs: SharedPreferences? = null
+    private val all = MutableStateFlow<List<CustomPlace>>(emptyList())
+
+    /** Every custom place, oldest first. Loads them the first time. */
+    @Synchronized
+    fun load(context: Context): StateFlow<List<CustomPlace>> {
+        if (prefs == null) {
+            prefs = context.applicationContext.getSharedPreferences("custom-places", Context.MODE_PRIVATE).also {
+                all.value = decodeCustomPlaces(it.getString(KEY, null))
+            }
+        }
+        return all.asStateFlow()
+    }
+
+    /** Saves [place], and has the smart index name the photos taken there after it on its next pass. */
+    @Synchronized
+    fun add(context: Context, place: CustomPlace) {
+        load(context)
+        all.value = withCustomPlace(all.value, place)
+        prefs!!.edit(commit = true) { putString(KEY, encodeCustomPlaces(all.value)) }
+        SmartIndex.renamePlaces()
+    }
+
+    private const val KEY = "places"
 }

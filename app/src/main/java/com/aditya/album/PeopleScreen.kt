@@ -223,11 +223,12 @@ fun FaceImage(crop: FaceCrop, modifier: Modifier) {
  * The top of a person page, styled like LargeTopBar: back, rename and more on a row, then the name in title-xl (or
  * "Add a name"; tap it to name them) and the photo count. More offers a new cover photo, merging with another person,
  * hiding from People, and Hide person (into Hidden items, after the privacy PIN); for someone in Hidden items, a new
- * cover and Unhide. A pet's page offers the same, in a pet's words. [onOpenPerson] gets the page to show next, as an album
- * id: naming or merging an automatic group makes it a person with a new id.
+ * cover and Unhide. A pet's page offers the same, in a pet's words. Everyone's offers Move to Private safe, all their
+ * photos through [moveToSafe]. [onOpenPerson] gets the page to show next, as an album id: naming or merging an automatic
+ * group makes it a person with a new id.
  */
 @Composable
-fun PersonHeader(person: PersonAlbum, onBack: () -> Unit, onOpenPerson: (albumId: Long) -> Unit) {
+fun PersonHeader(person: PersonAlbum, onBack: () -> Unit, onOpenPerson: (albumId: Long) -> Unit, moveToSafe: MoveToSafe) {
     val context = LocalContext.current
     val c = AlbumTheme.colors
     val scope = rememberCoroutineScope()
@@ -287,7 +288,7 @@ fun PersonHeader(person: PersonAlbum, onBack: () -> Unit, onOpenPerson: (albumId
                         // Like hiding a folder: they leave the list, so the page closes too
                         change(if (hide) "hide person" else "show person", { People.setHidden(person.cluster, hide) }) { if (hide) onBack() }
                     },
-                    sub = "Their photos stay in the Library".takeIf { !person.hidden },
+                    sub = if (person.hidden) "They show in People again" else "Their photos stay in the Library",
                     trailing = null,
                 )
                 MenuRow(Sym.Lock, if (pet) "Hide pet" else "Hide person", {
@@ -297,8 +298,14 @@ fun PersonHeader(person: PersonAlbum, onBack: () -> Unit, onOpenPerson: (albumId
                         Hidden.hide(context, listOf(person), emptyList())
                         onBack()
                     }
-                }, sub = "They and their photos show only in Hidden items", trailing = null)
+                }, sub = "Their photos show only in Album's Hidden items. Other apps still show them.", trailing = null)
             }
+            MenuRow(Sym.Lock, "Move to Private safe", {
+                more = false
+                // Every photo they're in goes, so the ConfirmBar says how many also show someone else
+                val pick = photosOfPeople(listOf(person.items), othersThan(all, setOf(person.cluster)), Media::id)
+                moveToSafe(pick.items, note = sharedNote(pick.shared))
+            }, sub = "Their photos are encrypted on this phone and leave the Library", trailing = null)
         }
     }
     if (covering) {

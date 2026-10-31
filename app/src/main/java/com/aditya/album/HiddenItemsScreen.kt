@@ -64,15 +64,15 @@ import androidx.compose.ui.unit.dp
 
 /** What Hidden items says about what hiding does, and where hidden photos really are, so nobody mistakes it for the safe. */
 private const val WHAT_HIDING_DOES =
-    "Hidden people and albums, and their photos, don't show in the Library, Collections, search or memories. Their files " +
-        "stay where they are, so other apps still show them."
+    "Other apps, photo pickers, cloud backup and a computer can still see these. For full privacy, move them to the Private safe."
 
 /**
  * Hidden items, pushed from Settings > Privacy and safe: the people and folder albums behind the privacy PIN. Locked: the
  * PIN pad. Open: People and Albums as cards, each with its check; tap the check (or long-press) to pick, then Unhide, or
  * tap the card to open it ([onOpen] gets its album id); Hide more (top bar) opens a sheet of people and albums to hide.
- * Screenshots are blocked while it's on screen, and privacy stays unlocked while it is. Draws its own background, insets
- * and Back.
+ * Below them, the folders hidden only from the Library (Hide from Library), each a row that shows it there again.
+ * Screenshots are blocked while it's on screen, privacy stays unlocked while it is (and while a hidden album or person
+ * opened from it is), and leaving it locks privacy. Draws its own background, insets and Back.
  */
 @Composable
 fun HiddenItemsScreen(onBack: () -> Unit, onOpen: (albumId: Long) -> Unit) {
@@ -98,6 +98,8 @@ private fun HiddenItems(onBack: () -> Unit, onOpen: (albumId: Long) -> Unit) {
     val locked by AlbumPrefs.locked.collectAsState()
     val folders = remember(media) { albumsOf(media) }
     val albums = remember(folders, locked) { folders.filter { it.key in locked } }
+    val offLibrary by AlbumPrefs.hidden.collectAsState()
+    val libraryHidden = remember(folders, offLibrary, locked) { listedHidden(offLibrary, locked).let { keys -> folders.filter { it.key in keys } } }
     var selected by remember { mutableStateOf(emptySet<Long>()) } // album ids: a person's (personAlbumId) or a folder's
     var adding by remember { mutableStateOf(false) }
     // People and albums that left meanwhile (unhidden elsewhere, deleted) leave the selection too
@@ -112,7 +114,7 @@ private fun HiddenItems(onBack: () -> Unit, onOpen: (albumId: Long) -> Unit) {
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
             Box(Modifier.statusBarsPadding()) {
-                CollapsedTopBar("Hidden items", subtitle = "Locks 2 min after you leave", onBack = onBack) {
+                CollapsedTopBar("Hidden items", subtitle = "Locks when you leave", onBack = onBack) {
                     if (selecting && chosen < people.size + albums.size) {
                         AlbumIconButton(Sym.SelectAll, "Select all", { selected = (people.map { it.albumId } + albums.map { it.id }).toSet() })
                     } else {
@@ -134,10 +136,9 @@ private fun HiddenItems(onBack: () -> Unit, onOpen: (albumId: Long) -> Unit) {
                 horizontalArrangement = Arrangement.spacedBy(Space.s3),
             ) {
                 fullRow("note") {
-                    Text(
-                        WHAT_HIDING_DOES, Modifier.fillMaxWidth().padding(start = Space.s4, end = Space.s4, bottom = Space.s3),
-                        style = AlbumTheme.type.body, color = AlbumTheme.colors.inkMuted,
-                    )
+                    Group(Modifier.padding(bottom = Space.s3)) {
+                        GroupRow("Hidden only in Album", null, icon = Sym.Info, sub = WHAT_HIDING_DOES)
+                    }
                 }
                 fullRow("people head") { SectionHead("People") }
                 if (people.isEmpty()) fullRow("people none") { Note("No hidden people.") }
@@ -152,6 +153,10 @@ private fun HiddenItems(onBack: () -> Unit, onOpen: (albumId: Long) -> Unit) {
                     HiddenCard(a.name, "%,d".format(a.count), "${a.name}, ${itemCount(a.count)}") { Thumbnail(a.cover, Modifier.matchParentSize()) }
                 }
                 fullRow("how") { Note("Tap a circle to select, then Unhide. Tap a card to open it.") }
+                if (libraryHidden.isNotEmpty()) {
+                    fullRow("library head") { SectionHead("Hidden from the Library") }
+                    fullRow("library") { LibraryHiddenGroup(libraryHidden) }
+                }
             }
         }
         // The design's page dock: one big Unhide where the thumb is
@@ -174,9 +179,25 @@ private fun HiddenItems(onBack: () -> Unit, onOpen: (albumId: Long) -> Unit) {
     if (adding) {
         HideMoreSheet(hideablePeople(everyone), folders.filter { it.key !in locked }, onDismiss = { adding = false }) { p, a ->
             adding = false
-            PrivacyLock.touch()
             Hidden.hide(context, p, a, counted = true)
         }
+    }
+}
+
+/**
+ * Folders hidden only from the Library (Hide from Library on a folder's sheet): not behind the PIN, still in Collections.
+ * Tapping one shows it in the Library again.
+ */
+@Composable
+private fun LibraryHiddenGroup(folders: List<Album>) = Group(
+    Modifier.padding(start = Space.s4, end = Space.s4, bottom = Space.s3),
+    note = "They stay in Collections. Tap one to show it in the Library again.",
+) {
+    folders.forEach { album ->
+        GroupRow(album.name, {
+            CrashLog.note("show folder in library")
+            AlbumPrefs.setHidden(album.key, false)
+        }, icon = Sym.Folder, sub = "${itemCount(album.count)} · tap to show in the Library", trailing = Sym.Visibility)
     }
 }
 
@@ -252,6 +273,10 @@ private fun HideMoreSheet(people: List<PersonAlbum>, albums: List<Album>, onDism
     val chosenAlbums = albums.filter { it.id in picked }
     val chosen = chosenPeople.size + chosenAlbums.size
     Sheet(onDismiss, "Hide people or albums") {
+        Text(
+            "They leave Album's Library, search and memories. Other apps still show their photos.",
+            Modifier.padding(bottom = Space.s3), style = AlbumTheme.type.caption, color = AlbumTheme.colors.inkMuted,
+        )
         Segmented(listOf(HideTab.People to "People", HideTab.Albums to "Albums"), tab) { tab = it }
         // At most about half the screen, as in the design, so Cancel and Hide stay in reach
         LazyColumn(Modifier.fillMaxWidth().heightIn(max = (LocalConfiguration.current.screenHeightDp * 0.46f).dp).padding(vertical = Space.s2)) {
@@ -294,7 +319,7 @@ private fun SheetEmpty(text: String) = Text(text, Modifier.padding(vertical = Sp
  * surface. Each segment takes touches a little past the track, so it's still a 48dp target.
  */
 @Composable
-private fun <T> Segmented(options: List<Pair<T, String>>, value: T, onChange: (T) -> Unit) {
+internal fun <T> Segmented(options: List<Pair<T, String>>, value: T, onChange: (T) -> Unit) {
     val c = AlbumTheme.colors
     Row(
         // The track is drawn 3dp inside the 48dp row, which keeps its 8dp margin above and below
@@ -324,7 +349,7 @@ private fun <T> Segmented(options: List<Pair<T, String>>, value: T, onChange: (T
 
 /** A picker row: the cover (round for a face), name and count, and the check; the whole row toggles. */
 @Composable
-private fun PickRow(label: String, sub: String, checked: Boolean, onToggle: () -> Unit, round: Boolean = false, cover: @Composable BoxScope.() -> Unit) {
+internal fun PickRow(label: String, sub: String, checked: Boolean, onToggle: () -> Unit, round: Boolean = false, cover: @Composable BoxScope.() -> Unit) {
     val c = AlbumTheme.colors
     Row(
         Modifier.fillMaxWidth().heightIn(min = 60.dp).clip(RoundedCornerShape(Space.radiusMd))

@@ -36,6 +36,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
@@ -45,6 +46,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHostState
@@ -112,17 +114,25 @@ fun <T> previewOf(section: CleanupSection<T>): CleanupSection<T> =
     CleanupSection(section.kind, section.runs.take(1).map { if (section.kind.grouped) it else it.take(CLEAN_COLUMNS) })
 
 /**
- * Every tile of [sections] once, in screen order: what the viewer swipes through from a photo opened here. An original
- * that's also one of several similar shots shows in both sections; the viewer has it at its first place.
+ * Every tile of [sections] once, in screen order. An original that's also one of several similar shots shows in both
+ * sections; this has it at its first place.
  */
 fun <T> tilesOf(sections: List<CleanupSection<T>>, idOf: (T) -> Long): List<T> = sections.flatMap { it.runs.flatten() }.distinctBy(idOf)
+
+/**
+ * What the viewer swipes through from [opened], a tile here: the suggested ones among [tiles] ([offered] ids), in grid
+ * order. A tile that stays (an original, a best shot) opens on its own.
+ */
+fun <T> viewerTiles(tiles: List<T>, offered: Set<Long>, opened: T, idOf: (T) -> Long): List<T> =
+    if (idOf(opened) in offered) tiles.filter { idOf(it) in offered } else listOf(opened)
 
 /**
  * Clean up, pushed over the tabs: chips with counts across the top (All, then a chip per category), and under them either
  * All (how much the suggestions free and a preview of each category, "See all" opening it) or one category: a line on
  * why it's suggested, then its photos in a 4-column grid, copies and similar shots in sets around the one that stays
- * (badged Original or Best shot, never suggested). Selecting is how you clean: a tap selects, a press and hold opens the
- * photo, and the viewer swipes through only this view's tiles ([report] gets them, as album pages report theirs). A chip
+ * (badged Original or Best shot, never suggested). A tap opens the photo, and the viewer swipes through only this view's
+ * suggested tiles ([report] gets them, as album pages report theirs); the check in a tile's corner, or a press and hold,
+ * selects it, and once something is selected a tap selects too. A chip
  * only filters: nothing starts selected, and the dock's Select all suggested picks what this view suggests; WhatsApp and
  * Big videos suggest nothing, so the user picks. The SelectionBar keeps the picked photos (Clean up stops suggesting
  * them, with Undo) or, after a confirmation saying what it frees, moves them to Trash in one request, with Undo; a
@@ -163,11 +173,14 @@ fun CleanupScreen(
     // What's on screen, which the viewer swipes through, and what Select all and the dock offer here
     val sections = remember(every, kind) { if (kind == null) every.map(::previewOf) else every.filter { it.kind == kind } }
     val tiles = remember(sections) { tilesOf(sections) { it.id } }
-    DisposableEffect(tiles) {
-        report(tiles)
+    val offered = if (kind == null) suggested else removable[kind].orEmpty()
+    val offeredIds = remember(offered) { offered.mapTo(HashSet()) { it.id } }
+    // The viewer pages through this view's suggestions. Reported again on a tap, before the viewer opens, so a tile that
+    // stays (an original) opens on its own.
+    DisposableEffect(tiles, offeredIds) {
+        report(tiles.filter { it.id in offeredIds })
         onDispose {}
     }
-    val offered = if (kind == null) suggested else removable[kind].orEmpty()
     val suggestedHere = if (kind == null || kind.suggested) offered else emptyList()
 
     // Picking. Ids, so it survives the activity being recreated. Only what this view shows or offers counts: photos gone
@@ -282,8 +295,16 @@ fun CleanupScreen(
                     },
                     onToggle = { m -> pick(listOf(m), m.id !in pickedIds) },
                     onOpen = { m ->
+                        if (selecting) {
+                            pick(listOf(m), m.id !in pickedIds) // once something is picked, a tap picks, as everywhere in Album
+                        } else {
+                            report(viewerTiles(tiles, offeredIds, m) { it.id })
+                            onOpen(m)
+                        }
+                    },
+                    onHold = { m ->
                         haptics.longPress()
-                        onOpen(m)
+                        pick(listOf(m), m.id !in pickedIds)
                     },
                     bottomPadding = bottom + when {
                         selecting -> SelectionClearance
@@ -406,6 +427,7 @@ private fun CleanupList(
     onChip: (String) -> Unit,
     onToggle: (Media) -> Unit,
     onOpen: (Media) -> Unit,
+    onHold: (Media) -> Unit,
     bottomPadding: Dp,
     size: (Long) -> String,
 ) {
@@ -413,7 +435,7 @@ private fun CleanupList(
     val type = AlbumTheme.type
     // Chips for categories with something in them, and the chosen one, so it never vanishes from under the finger
     val chips = CleanupKind.entries.filter { removable[it].orEmpty().isNotEmpty() || it == kind }
-    val tile = TileActions(result, picked, onToggle, onOpen, size)
+    val tile = TileActions(result, picked, onToggle, onOpen, onHold, size)
     LazyColumn(Modifier.fillMaxSize(), state, contentPadding = PaddingValues(bottom = bottomPadding)) {
         item(key = "chips") {
             // 20dp from the bar's hairline to the chips and 12dp under them, counting the 6dp of touch area each side
@@ -472,7 +494,7 @@ private fun CleanupList(
         if (sections.isNotEmpty()) {
             item(key = "hint") {
                 Text(
-                    "Tap a photo to select it. Press and hold to look closer.",
+                    "Tap a photo to look closer. Tap its check, or press and hold, to select it.",
                     Modifier.padding(start = Space.s4, end = Space.s4, bottom = Space.s3),
                     style = type.caption, color = c.inkMuted,
                 )
@@ -481,12 +503,13 @@ private fun CleanupList(
     }
 }
 
-/** What every tile needs: the result (for its badge), what's picked, and what a tap and a press and hold do. */
+/** What every tile needs: the result (for its badge), what's picked, and what its check, a tap and a press and hold do. */
 private class TileActions(
     val result: CleanupResult,
     val picked: Set<Long>,
     val onToggle: (Media) -> Unit,
     val onOpen: (Media) -> Unit,
+    val onHold: (Media) -> Unit,
     val size: (Long) -> String,
 )
 
@@ -533,7 +556,7 @@ private fun LazyListScope.sectionTiles(section: CleanupSection<Media>, removable
                     m.isVideo -> tile.size(m.size)
                     else -> traitBadge(m)
                 }
-                CleanTile(m, m.id in tile.picked, trait, stays, { tile.onToggle(m) }, { tile.onOpen(m) })
+                CleanTile(m, m.id in tile.picked, trait, stays, { tile.onToggle(m) }, { tile.onOpen(m) }, { tile.onHold(m) })
             }
         }
         if (kind.grouped) item(key = "end:$kind:${run.first().id}") { Spacer(Modifier.height(Space.s4)) }
@@ -554,22 +577,28 @@ fun CleanGridRow(row: List<Media>, tile: @Composable (Media) -> Unit) {
 }
 
 /**
- * One photo in Clean up, always showing its check: a tap selects it, a press and hold opens it. [trait] is a badge at the
- * top ("Too dark", a video's size); [stays] marks the one that stays in its set ("Original", "Best shot") at the bottom.
+ * One photo in Clean up, always showing its check: a tap ([onClick]) opens it, or selects it while selecting; the check
+ * (a 48dp target in its corner, [onToggle]) and a press and hold ([onHold]) select it. [trait] is a badge at the top
+ * ("Too dark", a video's size); [stays] marks the one that stays in its set ("Original", "Best shot") at the bottom.
  */
 @Composable
-private fun CleanTile(m: Media, selected: Boolean, trait: String?, stays: String?, onToggle: () -> Unit, onOpen: () -> Unit) {
+private fun CleanTile(m: Media, selected: Boolean, trait: String?, stays: String?, onToggle: () -> Unit, onClick: () -> Unit, onHold: () -> Unit) {
     Box(
         Modifier.aspectRatio(1f).combinedClickable(
-            onClickLabel = if (selected) "Unselect" else "Select",
-            onLongClickLabel = "Open",
-            onLongClick = onOpen,
+            onClickLabel = "Open",
+            onLongClickLabel = if (selected) "Unselect" else "Select",
+            onLongClick = onHold,
             hapticFeedbackEnabled = false, // Haptics follows Album's own haptics switch
-            onClick = onToggle,
+            onClick = onClick,
         ),
     ) {
         MediaTile(m, selecting = true, selected, Modifier.fillMaxSize(), badge = trait, checkSize = checkSizeFor(CLEAN_COLUMNS))
         stays?.let { Badge(it, Modifier.align(Alignment.BottomStart).padding(Space.s1), BadgeTone.Photo) }
+        // Over the check: selects without opening
+        Box(
+            Modifier.align(Alignment.TopStart).size(Space.target)
+                .toggleable(selected, role = Role.Checkbox, onValueChange = { onToggle() }),
+        )
     }
 }
 

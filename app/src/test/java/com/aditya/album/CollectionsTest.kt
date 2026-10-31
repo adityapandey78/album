@@ -63,13 +63,6 @@ class CollectionsTest {
         assertTrue(collectionKey(1) != collectionKey(11))
     }
 
-    @Test fun systemFoldersShowWhereTheyLive() {
-        assertEquals("DCIM/Camera", systemPath("Camera", "DCIM/Camera/"))
-        assertEquals("Pictures/Screenshots", systemPath("Screenshots", "Pictures/Screenshots/"))
-        assertEquals("Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images", systemPath("WhatsApp Images", "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/"))
-        assertNull(systemPath("Family", "Pictures/Family/")) // a folder the user made shows its count
-    }
-
     @Test fun subtitleCountsTheCards() {
         assertEquals("1,204 albums and groups", albumsSubtitle(1_204))
         assertEquals("1 album", albumsSubtitle(1)) // Favourites alone

@@ -280,6 +280,11 @@ object SmartIndex {
         dao.setSpots(wanted.filter { w -> now[w.id]?.let { it != w } == true }) // an item not indexed yet gets it at the end of its pass
     }
 
+    /** Names every saved GPS point again on the next pass: a custom place was added, so photos taken there take its name. */
+    fun renamePlaces() {
+        if (::app.isInitialized) marks.edit(commit = true) { putInt(PLACES, 0) }
+    }
+
     /** Text read from photo [mediaId], or null when it has none (or isn't indexed yet). Blocking: call off the main thread. */
     fun textOf(mediaId: Long): String? = dao.text(mediaId)
 
@@ -299,7 +304,10 @@ object SmartIndex {
         // With "Select photos" access MediaStore lists only the picked ones: never treat the rest as deleted
         val partial = !has(READ_MEDIA_IMAGES) && !has(READ_MEDIA_VIDEO)
         // 236k places: parsed only if some photo in this pass has GPS, and dropped when the pass ends.
-        val places = lazy { app.assets.open("geonames/places.tsv").bufferedReader().useLines { Places.parse(it) } }
+        val geo = lazy { app.assets.open("geonames/places.tsv").bufferedReader().useLines { Places.parse(it) } }
+        // A place the user named wins within a few steps of it (see customPlaceAt)
+        val custom = CustomPlaces.load(app).value
+        val places = lazy { { lat: Double, lng: Double -> geo.value.at(lat, lng).let { p -> customPlaceAt(lat, lng, custom)?.let { namedPlace(p, it) } ?: p } } }
         var analysed = 0
         var failed = 0
         val text = TextStats()
@@ -315,7 +323,7 @@ object SmartIndex {
                 found = query()?.takeIf { it.isNotEmpty() } ?: return@withContext
                 if (marks.getInt(PLACES, 1) < PLACES_VERSION) {
                     // Places are named differently now: name every saved GPS point again, from the GPS kept in the index
-                    dao.located().chunked(500).forEach { batch -> dao.setPlaces(batch.associate { it.id to places.value.at(it.lat, it.lng) }) }
+                    dao.located().chunked(500).forEach { batch -> dao.setPlaces(batch.associate { it.id to places.value(it.lat, it.lng) }) }
                     marks.edit(commit = true) { putInt(PLACES, PLACES_VERSION) }
                 }
                 val plan = planIndex(found, dao.stamps(), INDEX_VERSION, canLocate)
@@ -420,7 +428,7 @@ object SmartIndex {
         labeler: ImageLabeler,
         reader: TextRecognizer,
         canLocate: Boolean,
-        places: Lazy<Places>,
+        places: Lazy<(Double, Double) -> Place?>,
         readText: Boolean,
         stats: TextStats,
     ): Analysis {
@@ -461,7 +469,7 @@ object SmartIndex {
             lat = gps?.get(0),
             lng = gps?.get(1),
             located = canLocate,
-            place = gps?.let { places.value.at(it[0], it[1]) },
+            place = gps?.let { places.value(it[0], it[1]) },
         )
         return Analysis(
             row,

@@ -26,7 +26,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -195,14 +197,16 @@ private val CameraSaver = listSaver<MapCamera?, Double>(
 // A city: fitting one photo, or a street's worth, stops here rather than filling the screen with land
 private const val FIT_MAX_ZOOM = 12.0
 private const val FOCUS_ZOOM = 13.0
+private const val PICK_PIN_DP = 40
 
 /**
  * Where your photos were taken, on a simple offline map (land, country and state borders; no streets). Pinch to zoom,
  * drag to pan, double-tap to zoom in. Photos gather into pins with their newest photo and a count; a pin opens its
- * photos as an album through [onOpen]. Opens fitted to all your photos, or on [focus].
+ * photos as an album through [onOpen]. Opens fitted to all your photos, or on [focus]. With [onPick] it drops a pin for a
+ * new place instead: no photo pins, a pin held in the middle that the map moves under, and Use this spot.
  */
 @Composable
-fun MapScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, focus: MapFocus? = null) {
+fun MapScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, focus: MapFocus? = null, onPick: ((lat: Double, lng: Double) -> Unit)? = null) {
     val context = LocalContext.current
     val c = AlbumTheme.colors
     val still = AlbumTheme.spec.still
@@ -285,7 +289,8 @@ fun MapScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, focus: MapFocus? = nul
 
     Column(Modifier.fillMaxSize().background(c.canvas)) {
         Box(Modifier.background(c.canvas).statusBarsPadding()) {
-            CollapsedTopBar("Map", subtitle = map?.let { countOf(it.photos.size, "item") }, onBack = onBack)
+            if (onPick != null) CollapsedTopBar("Drop a pin", subtitle = "Move the map to put the pin on the place", onBack = onBack)
+            else CollapsedTopBar("Map", subtitle = map?.let { countOf(it.photos.size, "item") }, onBack = onBack)
         }
         Box(
             Modifier.fillMaxWidth().weight(1f).clipToBounds()
@@ -321,7 +326,7 @@ fun MapScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, focus: MapFocus? = nul
                         },
                     )
                 }
-                .semantics { contentDescription = "Map of your photos" },
+                .semantics { contentDescription = if (onPick != null) "Map, with a pin in the middle" else "Map of your photos" },
         ) {
             val sea = if (c.dark) c.canvas else c.surfaceHigh // water is the darker of the two, in every theme
             val land = if (c.dark) c.surfaceHigh else c.surface
@@ -344,7 +349,7 @@ fun MapScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, focus: MapFocus? = nul
             )
             // The focus photo isn't in any pin (its folder is hidden from the Library, or it's still being indexed): a dot
             // marks where it was taken instead
-            if (focus != null && map != null && focusIndex < 0) {
+            if (focus != null && map != null && focusIndex < 0 && onPick == null) {
                 Layout({ Box(Modifier.size(14.dp).background(c.surface, CircleShape).padding(2.dp).background(c.flash, CircleShape)) }) { m, _ ->
                     val p = m.first().measure(Constraints())
                     layout(size.width, size.height) {
@@ -357,7 +362,7 @@ fun MapScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, focus: MapFocus? = nul
                     }
                 }
             }
-            val shown = visible // read once, so each pin is placed by its own entry
+            val shown = if (onPick != null) emptyList() else visible // read once, so each pin is placed by its own entry
             Layout({
                 shown.forEach { pin ->
                     key(pin.id) {
@@ -388,7 +393,7 @@ fun MapScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, focus: MapFocus? = nul
                     }
                 }
             }
-            if (map != null && map.photos.isEmpty()) {
+            if (map != null && map.photos.isEmpty() && onPick == null) {
                 val indexing = SmartIndex.progress.collectAsState().value.let { it.done < it.total }
                 EmptyState(
                     Sym.LocationOff,
@@ -397,9 +402,21 @@ fun MapScreen(onBack: () -> Unit, onOpen: (Long) -> Unit, focus: MapFocus? = nul
                     Modifier.align(Alignment.Center).padding(Space.s4).background(c.surface, RoundedCornerShape(Space.radiusLg)),
                 )
             }
-            ShowAllButton(moved && map?.box != null, Modifier.align(Alignment.BottomEnd)) {
-                fitted()?.let(::moveTo)
-                moved = false
+            if (onPick != null) {
+                // The pin's point is the middle of the map: the glyph's tip sits on it
+                Icon(Sym.LocationOn, null, Modifier.align(Alignment.Center).offset(y = -PICK_PIN_DP.dp / 2), filled = true, size = PICK_PIN_DP.dp, tint = c.flashInk)
+                AlbumButton(
+                    "Use this spot",
+                    { camera?.let { onPick(latOf(it.y), lngOf(it.x)) } },
+                    Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(Space.s4).fillMaxWidth().heightIn(min = 56.dp),
+                    ButtonVariant.Primary,
+                    Sym.Check,
+                )
+            } else {
+                ShowAllButton(moved && map?.box != null, Modifier.align(Alignment.BottomEnd)) {
+                    fitted()?.let(::moveTo)
+                    moved = false
+                }
             }
         }
     }

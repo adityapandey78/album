@@ -62,4 +62,8 @@ class ScreensTest {
         s.match(emptyList())
         assertTrue(s.layers.isEmpty())
     }
+
+    @Test fun reviewRoutesComeBackFromTheirKeys() {
+        listOf(Route.Protect(SafeItem.ID_CARDS, null), Route.Protect(SafeItem.SAFE, listOf(3L, 1L))).forEach { assertEquals(it, Route.of(it.key)) }
+    }
 }

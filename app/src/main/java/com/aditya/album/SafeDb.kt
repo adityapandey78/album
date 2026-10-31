@@ -5,6 +5,7 @@ import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.Insert
 import androidx.room.PrimaryKey
 import androidx.room.Query
@@ -16,7 +17,8 @@ import kotlinx.coroutines.flow.Flow
  * (thumbnail: <id>.thumb), or filesDir/safe/id/ for ID cards; this row keeps what's needed to show it and to put it back
  * where it came from, as it was.
  */
-@Entity(tableName = "items")
+// The index serves the list (bucket, newest first) without sorting every row; see [all] for why it's read in pages
+@Entity(tableName = "items", indices = [Index("bucket", "taken")])
 data class SafeItem(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val name: String, // DISPLAY_NAME
@@ -38,6 +40,11 @@ data class SafeItem(
     val added: Long, // epoch millis
     /** [SAFE] or [ID_CARDS]: which key encrypts it, and which page lists it. */
     @ColumnInfo(defaultValue = "0") val bucket: Int = SAFE,
+    /**
+     * A move in made while privacy was locked: the item's own key, which its files are encrypted with, sealed to the safe's
+     * public key (base64, see Safe). Only the safe key opens it. Null: the safe key encrypts its files itself.
+     */
+    val sealedKey: String? = null,
 ) {
     companion object {
         const val SAFE = 0
@@ -49,6 +56,13 @@ data class SafeItem(
 interface SafeDao {
     @Query("SELECT * FROM items WHERE original IS NULL AND bucket = :bucket ORDER BY taken DESC")
     fun items(bucket: Int): Flow<List<SafeItem>>
+
+    /** The [limit] items of [bucket] after ([taken], [id]) in the list's order. The index finds the first, so a page costs only its rows. */
+    @Query(
+        "SELECT * FROM items WHERE original IS NULL AND bucket = :bucket AND taken <= :taken AND (taken < :taken OR id < :id) " +
+            "ORDER BY taken DESC, id DESC LIMIT :limit",
+    )
+    suspend fun page(bucket: Int, taken: Long, id: Long, limit: Int): List<SafeItem>
 
     @Query("SELECT * FROM items WHERE original IS NOT NULL")
     suspend fun waiting(): List<SafeItem>
@@ -74,12 +88,32 @@ interface SafeDao {
 }
 
 /**
+ * Everything in [bucket], newest first, [size] rows a query. One query for all of it would be read by Android in 2 MB
+ * windows (about 3,500 rows), running the query again from the first row for each: quadratic in the safe's size, over half
+ * a second at 20,000 items. A page fits in one window, and each starts where the last ended.
+ */
+suspend fun SafeDao.all(bucket: Int, size: Int = 2000): List<SafeItem> {
+    val out = ArrayList<SafeItem>()
+    while (true) {
+        val last = out.lastOrNull()
+        val page = page(bucket, last?.taken ?: Long.MAX_VALUE, last?.id ?: Long.MAX_VALUE, size)
+        out += page
+        if (page.size < size) return out
+    }
+}
+
+/**
  * The safe's list is user data, and the only map from files to photos: never add fallbackToDestructiveMigration. Without
  * a migration Room refuses to open a newer version (a crash on launch) rather than silently forgetting the safe.
  * To change the schema: bump the version, keep the exported app/schemas/com.aditya.album.SafeDb/N.json files in git, and
  * add `autoMigrations = [AutoMigration(from = N, to = N + 1)]` (or a hand-written Migration for renames and splits).
  */
-@Database(entities = [SafeItem::class], version = 2, autoMigrations = [AutoMigration(from = 1, to = 2)]) // 2: ID cards' bucket
+// 2: ID cards' bucket. 3: sealed move-ins' keys. 4: the list's index
+@Database(
+    entities = [SafeItem::class],
+    version = 4,
+    autoMigrations = [AutoMigration(from = 1, to = 2), AutoMigration(from = 2, to = 3), AutoMigration(from = 3, to = 4)],
+)
 abstract class SafeDb : RoomDatabase() {
     abstract fun dao(): SafeDao
 }

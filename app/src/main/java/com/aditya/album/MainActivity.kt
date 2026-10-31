@@ -86,7 +86,9 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -199,6 +201,9 @@ internal sealed class Route(val key: String) {
     data object Storage : Route("storage")
     data object PrivateSafe : Route("safe") // not "Safe": that's the object in Safe.kt
     data object IdCardsPage : Route("idcards") // not "IdCards": that's the object in IdCards.kt
+
+    /** The look before photos move to ID cards or Private safe ([bucket]): these [ids], or For you's ID photos when null. */
+    data class Protect(val bucket: Int, val ids: List<Long>?) : Route("protect:$bucket:${ids?.joinToString(",") ?: "suggested"}")
     data object HiddenItems : Route("hidden") // not "Hidden": that's the object in Hidden.kt
     data object DriveBackup : Route("backup") // not "Backup": that's the object in Backup.kt
 
@@ -224,6 +229,8 @@ internal sealed class Route(val key: String) {
         fun of(key: String): Route? = key.removePrefix("open:").toLongOrNull()?.takeIf { key.startsWith("open:") }?.let(::Open)
             ?: key.removePrefix("group:").toLongOrNull()?.takeIf { key.startsWith("group:") }?.let(::Group)
             ?: key.removePrefix("cleanup:").takeIf { key.startsWith("cleanup:") }?.let { Clean(it.ifEmpty { null }) }
+            ?: key.removePrefix("protect:").takeIf { key.startsWith("protect:") }?.split(':')?.takeIf { it.size == 2 }
+                ?.let { (b, ids) -> b.toIntOrNull()?.let { Protect(it, if (ids == "suggested") null else ids.split(',').mapNotNull(String::toLongOrNull)) } }
             ?: SettingsSection.entries.find { "settings:${it.name}" == key }?.let(::SettingsSub)
             ?: key.takeIf { it == "map" }?.let { Map() }
             ?: key.removePrefix("map:").takeIf { key.startsWith("map:") }?.split(',')?.takeIf { it.size == 3 }
@@ -374,7 +381,7 @@ private fun AlbumShell(link: MutableStateFlow<AlbumLink?>) {
     var page by remember { mutableStateOf<PageInfo?>(null) }
     var searchState by remember { mutableStateOf<SearchState?>(null) }
     val shown = when (top) {
-        is Route.Open, is Route.Clean, Route.Storage -> page?.takeIf { it.key == top.key }?.items.orEmpty()
+        is Route.Open, is Route.Clean, is Route.Protect, Route.Storage -> page?.takeIf { it.key == top.key }?.items.orEmpty()
         Route.DriveBackup -> media // the not-backed-up grid opens photos from the whole Library
         Route.Search -> searchState?.items.orEmpty()
         null -> if (tab == Tab.Library) photos else emptyList()
@@ -407,10 +414,15 @@ private fun AlbumShell(link: MutableStateFlow<AlbumLink?>) {
     val trashWithUndo = rememberTrashWithUndo(snackbar) { clearSelection() }
     // Always composed: it also finishes a move into the safe that the app was closed in the middle of.
     // The selection clears only once the fingerprint is given, so a cancelled prompt leaves it as it was.
-    val moveToSafe = rememberMoveToSafe(snackbar) { clearSelection() }
-    val moveToIdCards = rememberMoveToIdCards(snackbar) { clearSelection() }
+    // A move started from its review page closes it
+    val moveStarted = {
+        clearSelection()
+        if (stack.lastOrNull() is Route.Protect) pop()
+    }
+    val moveToSafe = rememberMoveToSafe(snackbar, moveStarted)
+    val moveToIdCards = rememberMoveToIdCards(snackbar, moveStarted)
     PrivacyHost(snackbar) // hide and unhide results with Undo, and the privacy lock itself
-    // Locking privacy (leaving Album, Lock now, 2 minutes after the last private thing) closes what Hidden items opened
+    // Locking privacy (leaving Album or Hidden items, Lock now) closes what Hidden items opened
     LaunchedEffect(privacyOpen, hiddenItems) {
         if (!privacyOpen) stack.removeAll { it is Route.Open && hiddenItems?.isHiddenAlbum(it.id, everything) == true }
     }
@@ -564,8 +576,8 @@ private fun AlbumShell(link: MutableStateFlow<AlbumLink?>) {
                         },
                         onCleanup = { push(Route.Clean(null)) },
                         onStorage = { push(Route.Storage) },
-                        // A false positive must not leave the Library on one tap: confirm with what will move
-                        onProtect = { items -> moveToIdCards(items, ask = true) },
+                        // A false positive must not leave the Library on one tap: look them over first
+                        onProtect = { push(Route.Protect(SafeItem.ID_CARDS, null)) },
                         onSettings = { push(Route.Settings) },
                     )
                 }
@@ -599,6 +611,7 @@ private fun AlbumShell(link: MutableStateFlow<AlbumLink?>) {
                             report = { page = it },
                             albumActions = albumActions,
                             onPlay = { title, eyebrow, items -> play(title, eyebrow, items) },
+                            moveToSafe = moveToSafe,
                         )
                     }
                     is Route.Group -> AlbumGroupScreen(
@@ -617,8 +630,12 @@ private fun AlbumShell(link: MutableStateFlow<AlbumLink?>) {
                     // Clean up and Storage get every item: WhatsApp may live in folders hidden from the Library
                     is Route.Clean -> CleanupScreen(media, onBack = pop, onOpen = open, category = route.category, onStorage = { if (stack.getOrNull(stack.lastIndex - 1) == Route.Storage) pop() else push(Route.Storage) }, report = { page = PageInfo(route.key, it, null, null) })
                     Route.Storage -> StorageScreen(media, onBack = pop, onOpenCategory = { push(Route.Clean(it)) }, onOpen = open, report = { page = PageInfo(route.key, it, null, null) })
-                    Route.PrivateSafe -> SafeScreen(onBack = pop)
+                    Route.PrivateSafe -> SafeScreen(photos, media, albums, collections, moveToSafe, onBack = pop)
                     Route.IdCardsPage -> IdCardsScreen(onBack = pop)
+                    is Route.Protect -> ProtectReviewScreen(
+                        if (route.ids == null) photos else media, route.ids, route.bucket, moveToIdCards, moveToSafe,
+                        onBack = pop, onOpen = open, report = { page = PageInfo(route.key, it, null, null) },
+                    )
                     Route.People -> PeopleScreen(peopleGrid, onBack = pop, onOpenPerson = openId, onReviewPeople = { push(Route.PeopleReview) })
                     Route.PeopleReview -> PeopleReviewScreen(onBack = pop)
                     Route.Trash -> TrashScreen(trash, photosColumns, onBack = pop)
@@ -836,6 +853,10 @@ private fun AlbumShell(link: MutableStateFlow<AlbumLink?>) {
                     libraryMenu = false
                     push(Route.SettingsSub(SettingsSection.Library))
                 },
+                onPrivacy = {
+                    libraryMenu = false
+                    push(Route.SettingsSub(SettingsSection.Privacy))
+                },
                 onSettings = {
                     libraryMenu = false
                     push(Route.Settings)
@@ -847,8 +868,8 @@ private fun AlbumShell(link: MutableStateFlow<AlbumLink?>) {
                 MenuRow(Sym.DriveFileMove, "Move to album", { albumMenu = null; albumActions.moveOrCopy(items, Transfer.Move) }, sub = "The files move to that folder")
                 MenuRow(Sym.ContentCopy, "Copy to album", { albumMenu = null; albumActions.moveOrCopy(items, Transfer.Copy) }, sub = "A copy goes to that folder")
                 MenuRow(Sym.LibraryAdd, "Add to collection", { albumMenu = null; addingToCollection = items.map { it.id } }, sub = "No copies: one photo can be in many collections")
-                MenuRow(Sym.Lock, "Private safe", { albumMenu = null; moveToSafe(items) }, sub = "Encrypted, opens with your fingerprint")
-                MenuRow(Sym.IdCard, "ID cards", { albumMenu = null; moveToIdCards(items) }, sub = "Encrypted, opens with your screen lock")
+                MenuRow(Sym.Lock, "Private safe", { albumMenu = null; push(Route.Protect(SafeItem.SAFE, items.map { it.id })) }, sub = PRIVATE_SAFE_SUB)
+                MenuRow(Sym.IdCard, "ID cards", { albumMenu = null; push(Route.Protect(SafeItem.ID_CARDS, items.map { it.id })) }, sub = "Encrypted, opens with your screen lock")
             }
         }
         moreMenu?.let { items ->
@@ -868,7 +889,7 @@ private fun AlbumShell(link: MutableStateFlow<AlbumLink?>) {
         // A recreated activity (rotation, dark mode, split screen) restores viewerId before the open album or search has
         // reported its photos; waiting for them keeps the viewer from closing itself on an empty list
         val shownReady = when (top) {
-            is Route.Open, is Route.Clean, Route.Storage -> page?.key == top.key
+            is Route.Open, is Route.Clean, is Route.Protect, Route.Storage -> page?.key == top.key
             Route.Search -> searchState?.result != null
             else -> loaded != null
         }
@@ -881,13 +902,19 @@ private fun AlbumShell(link: MutableStateFlow<AlbumLink?>) {
                 onMoveToSafe = { m -> moveToSafe(listOf(m)) },
                 openFrom = openedFrom,
                 closeTo = cellOnScreen,
-                onEditDate = { m -> albumActions.editDate(listOf(m)) },
-                onEditPlace = { m -> albumActions.editPlace(listOf(m)) },
+                onEditDate = { m -> albumActions.editDetails(listOf(m)) }, // Edit details: date, time and place
                 onShowOnMap = { f ->
                     viewerId = null // the map opens on its own, not under the viewer
                     push(Route.Map(f))
                 },
                 onAddToCollection = { m -> addingToCollection = listOf(m.id) },
+                onKeep = if (top is Route.Clean) { m ->
+                    Cleanup.keep(listOf(m.id))
+                    scope.launch {
+                        val undo = snackbar.showSnackbar("Kept ${itemCount(1)}", "Undo", duration = SnackbarDuration.Long)
+                        if (undo == SnackbarResult.ActionPerformed) Cleanup.keep(listOf(m.id), keep = false)
+                    }
+                } else null,
             )
             // The main snackbar sits under the viewer, so the viewer gets its own host for Undo
             AlbumSnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = viewerSnackbarGap), overViewer = true)
@@ -1317,6 +1344,7 @@ private fun AlbumPage(
     report: (PageInfo) -> Unit,
     albumActions: AlbumActions,
     onPlay: (title: String, eyebrow: String, items: List<Media>) -> Unit,
+    moveToSafe: MoveToSafe,
 ) {
     val id = route.id
     val album = albums.find { it.id == id }
@@ -1341,7 +1369,7 @@ private fun AlbumPage(
             onBack()
         }
     }
-    val subtitle = album?.let { systemPath(it.name, it.cover.path) } ?: countOf(items.size, "item")
+    val subtitle = countOf(items.size, "item")
     var options by rememberSaveable { mutableStateOf(false) }
     if (options) AlbumOptionsSheet(id, albums, collections, media, albumActions) { options = false }
     // Stories play photos, oldest first, as a group's Play as a memory does
@@ -1365,7 +1393,7 @@ private fun AlbumPage(
             items, columns, grid, selected, onOpen, onSelect, padding, gridPosition,
             selectMode = selectMode,
             header = {
-                if (person != null) PersonHeader(person, onBack, onOpenPerson)
+                if (person != null) PersonHeader(person, onBack, onOpenPerson, moveToSafe)
                 else LargeTopBar(title, subtitle = subtitle, onBack = onBack, actions = actions)
             },
             bar = {
@@ -1411,7 +1439,7 @@ private fun SelectionActions(
         add(act("Favourite", Sym.Favorite) { onFavourite(items()) })
         if (person != null) add(act("Not them", Sym.PersonRemove) { onNotPerson(person, items().map { it.id }) })
         if (collection == null) add(act("Delete", Sym.Delete, danger = true) { onTrash(items()) })
-        add(act("More", Sym.MoreHoriz) { onMore(items()) }) // Share as ZIP, Edit date and time, Edit place
+        add(act("More", Sym.MoreHoriz) { onMore(items()) }) // Share as ZIP, Edit details
     }
     SelectionBar(
         selected.size, actions, onClear,
@@ -1420,14 +1448,24 @@ private fun SelectionActions(
     )
 }
 
+/** The Library's ⋮ sheet: Jump to a date, then shortcuts to Settings pages and Settings itself. */
 @Composable
-private fun LibraryMenu(columns: Int, onDismiss: () -> Unit, onCalendar: () -> Unit, onAppearance: () -> Unit, onGallery: () -> Unit, onSettings: () -> Unit) {
+private fun LibraryMenu(
+    columns: Int,
+    onDismiss: () -> Unit,
+    onCalendar: () -> Unit,
+    onAppearance: () -> Unit,
+    onGallery: () -> Unit,
+    onPrivacy: () -> Unit,
+    onSettings: () -> Unit,
+) {
     val a = AlbumTheme.spec.appearance
     Sheet(onDismiss = onDismiss, title = "Library") {
         MenuRow(Sym.CalendarMonth, "Jump to a date", onCalendar, sub = "Calendar with your photos on each day")
         MenuRow(Sym.GridView, "Gallery style", onGallery, sub = "${a.gallery.label} · $columns columns")
         MenuRow(Sym.Palette, "Appearance", onAppearance, sub = "${a.theme.label} · ${a.accent.label}")
-        MenuRow(Sym.Settings, "Settings", onSettings)
+        MenuRow(Sym.Shield, SettingsSection.Privacy.title, onPrivacy, sub = "Private safe, Hidden items, ID cards and your PIN")
+        MenuRow(Sym.Settings, "Settings", onSettings, sub = SETTINGS_SUB)
     }
 }
 

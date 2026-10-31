@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayInputStream
 import java.io.File
@@ -143,6 +144,33 @@ class SafeTest {
         assertEquals("Moved 3 items back to the Library", movedOutMessage(3, 0))
         assertEquals("Couldn't move 2 items out. They stay in Private safe.", movedOutMessage(0, 2))
         assertEquals("Moved 3 items back to the Library. 1 couldn't be moved and stays in Private safe.", movedOutMessage(3, 1))
+    }
+
+    /**
+     * A move in while locked, as Safe.add does it: a key of the item's own encrypts the file and is sealed to the public half
+     * of the safe's key pair, with no safe key at hand. Once unlocked, the safe key opens the private half, that the item's
+     * key, and that the file. Neither the safe key nor another safe's opens the item directly.
+     */
+    @Test fun aSealedMoveInOpensOnlyThroughTheSafeKey() {
+        val pair = Escrow.lock(Escrow.newPair(), key) // made at an unlock: the public half in the clear
+        val plain = Random(9).nextBytes(100)
+        val own = Random(10).nextBytes(32)
+        val file = sealed(plain, k = own)
+        val record = Escrow.seal(own, Escrow.publicOf(pair)) // locked: only the public half
+        val opened = Escrow.open(record, Escrow.privateOf(pair, key))
+        assertArrayEquals(own, opened)
+        assertArrayEquals(plain, open(file, opened))
+        assertThrows(IOException::class.java) { open(file, key) } // the safe key isn't the item's key
+        assertThrows(Exception::class.java) { Escrow.privateOf(pair, Random(11).nextBytes(32)) }
+        assertFalse(record.contentEquals(Escrow.seal(own, Escrow.publicOf(pair)))) // a fresh seal every time
+    }
+
+    @Test fun movesInWithoutUnlockingOnlyOnceThereIsAKeyPairForAPinsSafe() {
+        assertTrue(canSealLocked(pin = true, setUp = true, keyPair = true))
+        assertFalse(canSealLocked(pin = true, setUp = true, keyPair = false)) // not opened since the update: the PIN, once
+        assertFalse(canSealLocked(pin = false, setUp = true, keyPair = true)) // a v1.0 safe with no PIN yet
+        assertFalse(canSealLocked(pin = true, setUp = false, keyPair = true)) // no safe key: a pair left over is stale
+        assertFalse(canSealLocked(pin = false, setUp = false, keyPair = false)) // nothing set up: the PIN's setup first
     }
 
     @Test fun hexIsLowerCaseAndPadded() {

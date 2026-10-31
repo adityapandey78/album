@@ -14,10 +14,8 @@ import android.view.Window
 import android.view.WindowManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -175,13 +173,13 @@ sealed interface PinCheck {
  * Album's privacy lock: its own PIN, apart from the phone's screen lock, for Private safe, Hidden items and hiding or
  * unhiding anything. Unlocking opens the safe key (see [Safe]); while it's open, privacy is unlocked.
  *
- * One unlock lasts while a private page is on screen, and [WINDOW_MS] after the last private action or page, so hiding a
- * few people, then checking Hidden items, asks once. It ends at once when Album leaves the screen (home, another app,
- * screen off), on Lock now, and when you leave Private safe, which locks as it always did.
+ * One unlock lasts only while a private page (Private safe, Hidden items, ID cards, a hidden album or person) is on
+ * screen. Leaving it, by Back or for a screen opened over it, locks at once, and so do Album leaving the screen (home,
+ * another app, screen off) and Lock now. What opens over the page without replacing it (the viewer, a sheet, Android's
+ * prompts and pop-ups) isn't leaving it. An unlock for one action away from those pages (hiding a person from their
+ * page, say) locks again as soon as the action has run. Moving photos into the safe never unlocks it ([Safe.moveIn]).
  */
 object PrivacyLock {
-    /** How long an unlock lasts after the last private action: long enough to tidy several things, short enough that a phone left on a table doesn't stay open. */
-    const val WINDOW_MS = 2 * 60_000L
     private const val PIN_ALIAS = "album_pin"
     private const val FINGERPRINT = "fingerprint"
     private const val FAILS = "fails"
@@ -193,7 +191,6 @@ object PrivacyLock {
     private val pinFile by lazy { AtomicFile(File(Safe.dir, "pin")) }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var holders = 0
-    private var expiry: Job? = null
 
     private val setUpNow = MutableStateFlow(false)
 
@@ -249,37 +246,35 @@ object PrivacyLock {
     internal fun open(key: ByteArray) {
         IdCards.keepCopyWith(key) // the escrow that lets the PIN keep a copy of ID cards' key; never opens them
         if (Safe.key.value == null) Safe.open(key) else key.fill(0)
-        touch()
+        lockUnlessHeld()
     }
 
     /**
      * A private page is on screen in [window]: privacy stays unlocked while it is, and screenshots and the recents preview
-     * are blocked. Pair each with [release]. Counted, so two private pages crossing in a transition never unblock each other.
+     * are blocked. Pair each with [release]. Counted, so two private pages crossing in a transition never lock each other.
      */
     fun hold(window: Window?) {
         if (holders++ == 0) window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        expiry?.cancel()
     }
 
-    fun release(window: Window?) {
+    /** A private page left the screen. [leaving]: it was closed, not just rebuilt for a turned phone; then the last one locks. */
+    fun release(window: Window?, leaving: Boolean) {
         holders = (holders - 1).coerceAtLeast(0)
-        if (holders == 0) window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        touch()
+        if (holders > 0) return
+        window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        if (leaving) lock()
     }
 
-    /** A private action: privacy stays unlocked for [WINDOW_MS] more, or for as long as a private page is on screen. */
-    fun touch() {
-        expiry?.cancel()
-        expiry = if (holders == 0 && isOpen) scope.launch {
-            delay(WINDOW_MS)
-            lock()
-        } else null
+    /**
+     * After a private action: with no private page on screen, privacy locks again, as soon as the code that asked for the
+     * unlock has run (it may still need the key), rather than staying open behind the person's back.
+     */
+    fun lockUnlessHeld() {
+        if (holders == 0 && isOpen) scope.launch(Dispatchers.Main) { if (holders == 0) lock() } // posted: after the caller
     }
 
     /** Locks privacy: the safe key and its decrypted thumbnails leave memory, and private pages show their lock. */
     fun lock() {
-        expiry?.cancel()
-        expiry = null
         Safe.lock()
         locks.value++
     }

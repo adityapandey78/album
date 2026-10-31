@@ -123,11 +123,15 @@ fun <T> sections(media: List<T>, byMonth: Boolean, today: Long = LocalDate.now()
         }
     }
     val out = ArrayList<Section<T>>()
+    if (media.isEmpty()) return out
     var start = 0
+    var startKey = keyOf(media[0])
     for (i in 1..media.size) {
-        if (i == media.size || keyOf(media[i]) != keyOf(media[start])) {
-            out += Section(keyOf(media[start]), labelOf(media[start]), media.subList(start, i))
+        val key = if (i == media.size) null else keyOf(media[i]) // once per item: the safe's dayOf converts time zones
+        if (key != startKey) {
+            out += Section(startKey, labelOf(media[start]), media.subList(start, i))
             start = i
+            if (key != null) startKey = key
         }
     }
     return out

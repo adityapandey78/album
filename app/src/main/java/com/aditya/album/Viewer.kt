@@ -38,7 +38,6 @@ import androidx.compose.foundation.gestures.calculateRotation
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -85,7 +84,6 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -179,6 +177,7 @@ fun Viewer(
     onEditPlace: ((Media) -> Unit)? = null,
     onShowOnMap: ((MapFocus) -> Unit)? = null, // the Places map, from the details sheet
     onAddToCollection: ((Media) -> Unit)? = null, // the shell's collection picker; no More row for it without one
+    onKeep: ((Media) -> Unit)? = null, // Clean up's Keep, opened from there: stops suggesting the photo
 ) {
     if (items.isEmpty()) {
         LaunchedEffect(Unit) { onClose() } // last photo was deleted
@@ -196,7 +195,6 @@ fun Viewer(
     var chrome by remember { mutableStateOf(true) }
     var details by remember { mutableStateOf(false) } // the details sheet, the photo moved up above it
     var showMore by remember { mutableStateOf(false) }
-    var comparing by remember { mutableStateOf(false) } // More > Compare with next photo
     val confirm = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {}
     val current = items[pager.currentPage.coerceAtMost(items.lastIndex)]
     val scope = rememberCoroutineScope()
@@ -504,7 +502,6 @@ fun Viewer(
 
     BackHandler(onBack = close)
     BackHandler(enabled = details) { details = false }
-    BackHandler(enabled = comparing) { comparing = false }
     BackHandler(enabled = lensOn) { lensOn = false }
     // Leaves rotate mode without saving; while saving, Back waits for it
     BackHandler(enabled = rotating != null) { if (rotating?.saving == false) leaveRotate() }
@@ -694,7 +691,7 @@ fun Viewer(
 
         // The top bar and the dock fade in as the photo starts flying in, and out as it flies back. A pull down hides them at
         // once; Details keeps the top bar and sends the dock away.
-        val bars = chrome && !closing && lens == null && rotating == null && !lookingAround && scan == null && !comparing && !pulling
+        val bars = chrome && !closing && lens == null && rotating == null && !lookingAround && scan == null && !pulling
         val topShown = remember { MutableTransitionState(false) }.apply { targetState = bars }
         val dockShown = remember { MutableTransitionState(false) }.apply { targetState = bars && !details }
         val barIn = if (still) EnterTransition.None else fadeIn(tween(200))
@@ -782,6 +779,12 @@ fun Viewer(
                 }
                 AlbumIconButton(Sym.Tune, "Edit", { edit(current) })
                 if (!external) {
+                    onKeep?.let { keep ->
+                        AlbumIconButton(Sym.Check, "Keep", {
+                            CrashLog.note("cleanup keep 1")
+                            keep(current)
+                        })
+                    }
                     onTrash?.let { trash ->
                         AlbumIconButton(Sym.Delete, "Move to trash", {
                             CrashLog.note("trash 1")
@@ -842,8 +845,6 @@ fun Viewer(
             )
         }
 
-        if (comparing) items.getOrNull(pager.currentPage + 1)?.let { next -> CompareView(current, next, onClose = { comparing = false }) }
-
         if (lens != null) {
             TextLensBar(onClose = { lensOn = false }, Modifier.align(Alignment.TopCenter))
             TextLensPanel(lens, onCopied = { say("Copied") }, onLink = { showCodes = listOf(it) }, Modifier.align(Alignment.BottomCenter).onSizeChanged { lensPanel = it.height })
@@ -870,14 +871,6 @@ fun Viewer(
             onDetails = {
                 CrashLog.note("details")
                 details = true
-            },
-            // the next photo along, when both are photos
-            onCompare = items.getOrNull(pager.currentPage + 1)?.takeIf { !it.isVideo && !m.isVideo && !external }?.let {
-                {
-                    CrashLog.note("compare")
-                    chrome = true // its bar sits under the status bar
-                    comparing = true
-                }
             },
             onText = {
                 CrashLog.note("text lens")
@@ -915,9 +908,8 @@ fun Viewer(
 }
 
 /**
- * The viewer's More sheet, in the design's order: Details, Add to collection, Rotate, Compare with next photo ([onCompare],
- * when the next one is a photo too), Move to Private safe and Copy text from photo; then what only Album has. Rotate,
- * Compare, Copy text and Use as are for photos in Album only; a file from another app ([external]) has Details alone.
+ * The viewer's More sheet, in the design's order: Details, Add to collection, Rotate, Move to Private safe and Copy text
+ * from photo; then what only Album has. Rotate, Copy text and Use as are for photos in Album only; a file from another app ([external]) has Details alone.
  * Straighten document only shows for what may be a page (see mayBePage).
  */
 @Composable
@@ -926,7 +918,6 @@ private fun MoreSheet(
     title: String,
     external: Boolean,
     onDetails: () -> Unit,
-    onCompare: (() -> Unit)?,
     onAddToCollection: (() -> Unit)?,
     onText: () -> Unit,
     onRotate: () -> Unit,
@@ -946,18 +937,17 @@ private fun MoreSheet(
         }
         MenuRow(Sym.Info, "Details", closing(onDetails), sub = "Date, place, camera and file")
         if (!external) {
-            onAddToCollection?.let { MenuRow(Sym.Add, "Add to collection", closing(it)) }
+            onAddToCollection?.let { MenuRow(Sym.Add, "Add to collection", closing(it), sub = "No copies: one photo can be in many collections") }
         }
         val photo = !m.isVideo && !external
         if (photo) {
             // In place where the file can say how it's turned (no quality lost), otherwise a copy
             MenuRow(Sym.RotateRight, "Rotate", closing(onRotate), sub = "Lossless where possible")
-            onCompare?.let { MenuRow(Sym.Compare, "Compare with next photo", closing(it)) }
         }
-        onMoveToSafe?.let { MenuRow(Sym.Lock, "Move to Private safe", closing(it)) }
+        onMoveToSafe?.let { MenuRow(Sym.Lock, "Move to Private safe", closing(it), sub = PRIVATE_SAFE_SUB) }
         if (photo) {
             // Read on the phone, offline: nothing leaves it
-            MenuRow(Sym.ContentCopy, "Copy text from photo", closing(onText))
+            MenuRow(Sym.ContentCopy, "Copy text from photo", closing(onText), sub = "Read on this phone, nothing is uploaded")
             if (page) MenuRow(Sym.Description, "Straighten document", closing(onStraighten), sub = "A flat copy of just the page")
             MenuRow(Sym.Wallpaper, "Use as", closing {
                 CrashLog.note("use as")
@@ -970,45 +960,7 @@ private fun MoreSheet(
             }, sub = "Wallpaper, contact photo")
         }
         if (!external) {
-            onEditDate?.let { MenuRow(Sym.Schedule, "Edit date and time", closing(it), sub = "For a photo saved with the wrong date") }
-            onEditPlace?.let { MenuRow(Sym.LocationOn, "Edit place", closing(it), sub = "Set where it was taken, or remove it") }
-        }
-    }
-}
-
-/**
- * Compare with next photo: this one above the next (side by side when the screen is wider than tall), each fitted to its
- * half and zooming on its own, under a bar with Back.
- */
-@Composable
-private fun CompareView(a: Media, b: Media, onClose: () -> Unit) {
-    val c = AlbumTheme.colors
-    val context = LocalContext.current
-    @Composable
-    fun Half(m: Media, modifier: Modifier) {
-        val request = remember(m.uri, editVersion(m.uri)) { fullPhoto(context, m) }
-        ZoomableAsyncImage(request, m.name, modifier.fillMaxSize().clipToBounds(), state = rememberZoomableImageState(), contentScale = ContentScale.Fit)
-    }
-    BoxWithConstraints(Modifier.fillMaxSize().background(c.void).pointerInput(Unit) {}) {
-        val halves = Modifier.fillMaxSize().statusBarsPadding().padding(top = Space.target + Space.s2).navigationBarsPadding()
-        if (maxWidth > maxHeight) {
-            Row(halves, horizontalArrangement = Arrangement.spacedBy(Space.s1)) {
-                Half(a, Modifier.weight(1f))
-                Half(b, Modifier.weight(1f))
-            }
-        } else {
-            Column(halves, verticalArrangement = Arrangement.spacedBy(Space.s1)) {
-                Half(a, Modifier.weight(1f))
-                Half(b, Modifier.weight(1f))
-            }
-        }
-        Row(
-            Modifier.fillMaxWidth().statusBarsPadding().padding(start = Space.s2, end = Space.s2, top = Space.s1),
-            horizontalArrangement = Arrangement.spacedBy(Space.s2),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            AlbumIconButton(Sym.ArrowBack, "Back", onClose, variant = IconButtonVariant.Photo)
-            Text("Compare with next photo", style = AlbumTheme.type.label, color = c.onPhoto)
+            onEditDate?.let { MenuRow(Sym.Edit, "Edit details", closing(it), sub = "Date, time and place") }
         }
     }
 }
@@ -1208,7 +1160,7 @@ internal fun ImmersiveBars(visible: Boolean) {
 
 /**
  * Details, inside the viewer: a panel at the bottom (60% of the screen at most, scrolling inside) that the photo moves up
- * above rather than being covered. The day and time with the file's name (and Fix date, [onFixDate], beside them), then
+ * above rather than being covered. The day and time with the file's name (and Edit details, [onFixDate], beside them), then
  * the camera and its settings with the size underneath, where it was taken (Show on map, [onShowOnMap]), the file's
  * folder, size and type, and Remove location when sharing.
  */
@@ -1250,7 +1202,7 @@ private fun InfoSheet(m: Media, place: Place?, onShowOnMap: ((MapFocus) -> Unit)
                 }
             }
             // Its words line up with the sheet's edge, as in the design
-            onFixDate?.let { AlbumButton("Fix date", it, Modifier.offset(x = Space.s3), ButtonVariant.Quiet, Sym.Edit) }
+            onFixDate?.let { AlbumButton("Edit details", it, Modifier.offset(x = Space.s3), ButtonVariant.Quiet, Sym.Edit) }
         }
         InfoRow(Sym.PhotoCamera) {
             // blank until the file is read, so the row doesn't jump from "No camera details" to the camera
@@ -1289,8 +1241,7 @@ private fun InfoSheet(m: Media, place: Place?, onShowOnMap: ((MapFocus) -> Unit)
             }
         }
         InfoRow(Sym.Folder) {
-            // The real path, in full. Files from other apps have none, only a name.
-            Text(m.path + m.name, style = type.meta, color = c.ink)
+            Text(m.name, style = type.meta, color = c.ink)
             val bytes = m.size.takeIf { it > 0 }?.let { Formatter.formatShortFileSize(context, it) } // KB / MB / GB as fits
             val caption = listOfNotNull(bytes, file?.format).joinToString(" · ")
             if (caption.isNotEmpty()) Text(caption, style = type.caption, color = c.inkMuted)

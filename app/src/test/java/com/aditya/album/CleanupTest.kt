@@ -397,6 +397,13 @@ class CleanupTest {
         assertEquals(listOf(6L), r.candidates(CleanupKind.Similar)) // neither the best shot nor the original
     }
 
+    @Test fun viewerPagesThroughSuggestionsOnly() {
+        val tiles = listOf(1L, 2L, 3L, 5L, 6L) // 1 and 3 stay
+        val offered = setOf(2L, 5L, 6L)
+        assertEquals(listOf(2L, 5L, 6L), viewerTiles(tiles, offered, 5L) { it }) // grid order, the ones that stay left out
+        assertEquals(listOf(3L), viewerTiles(tiles, offered, 3L) { it }) // an original opens on its own
+    }
+
     @Test fun allPreviewsTheFirstSetOrTheFirstRow() {
         val r = result(copies = listOf(ShotGroup(1, listOf(1L, 2L)), ShotGroup(3, listOf(3L, 4L))), blurry = (10L..16L).toList())
         val (copies, blurry) = cleanupSections(r, CleanupKind.entries) { it }.map(::previewOf)

@@ -466,8 +466,7 @@ class AlbumActions internal constructor(private val context: Context, private va
         class ConfirmMove(val items: List<Media>, val path: String, val album: String) : Step
         /** Share as ZIP's sheet, for [parts] in a ZIP called [name]. */
         class Zip(val name: String, val parts: List<ZipPart>) : Step
-        class EditDate(val items: List<Media>) : Step
-        class EditPlace(val items: List<Media>) : Step
+        class EditDetails(val items: List<Media>) : Step
     }
 
     internal var step by mutableStateOf<Step?>(null)
@@ -495,26 +494,15 @@ class AlbumActions internal constructor(private val context: Context, private va
         Zips.start(context.applicationContext, zip.name, zip.parts, keepLocation, target)
     }
 
-    /** Edit date and time for [items]: one from the viewer, or a selection of up to [MAX_REQUEST]. */
-    fun editDate(items: List<Media>) {
-        if (context.canSend(items.size, MAX_REQUEST, "change")) step = Step.EditDate(items)
+    /** Edit details (date, time and place) for [items]: one from the viewer, or a selection of up to [MAX_REQUEST]. */
+    fun editDetails(items: List<Media>) {
+        if (context.canSend(items.size, MAX_REQUEST, "change")) step = Step.EditDetails(items)
     }
 
-    /** Edit place for [items]: one from the viewer, or a selection of up to [MAX_REQUEST]. */
-    fun editPlace(items: List<Media>) {
-        if (context.canSend(items.size, MAX_REQUEST, "change")) step = Step.EditPlace(items)
-    }
-
-    internal fun fixDates(items: List<Media>, shift: Long) {
+    internal fun fixDetails(items: List<Media>, shift: Long, place: PlaceFix?) {
         step = null
         onStart()
-        FixDetails.dates(context.applicationContext, items, shift)
-    }
-
-    internal fun fixPlaces(items: List<Media>, to: Place?) {
-        step = null
-        onStart()
-        FixDetails.places(context.applicationContext, items, to)
+        FixDetails.edit(context.applicationContext, items, shift, place)
     }
 
     /** Selection bar: pick an album (or make one), then move or copy [items] into it. */
@@ -692,8 +680,7 @@ fun AlbumActionsHost(actions: AlbumActions, media: List<Media>, albums: List<Alb
                 actions.startZip(step, keepLocation, ZipTarget.Share(Zips.newFile(context, step.name)))
             }
         }
-        is AlbumActions.Step.EditDate -> EditDateSheet(step.items, close) { shift -> actions.fixDates(step.items, shift) }
-        is AlbumActions.Step.EditPlace -> EditPlaceSheet(step.items, close) { place -> actions.fixPlaces(step.items, place) }
+        is AlbumActions.Step.EditDetails -> EditDetailsSheet(step.items, close) { shift, place -> actions.fixDetails(step.items, shift, place) }
     }
 
     AlbumOps.progress.collectAsState().value?.let { p ->
@@ -711,7 +698,7 @@ fun AlbumActionsHost(actions: AlbumActions, media: List<Media>, albums: List<Alb
 private fun AlbumPicker(pick: AlbumActions.Step.Pick, albums: List<Album>, coverOf: (Album) -> Media, nameOf: (Album) -> String, onDismiss: () -> Unit, onNew: () -> Unit, onPick: (Album) -> Unit) {
     Sheet(onDismiss, "${pick.transfer.name} ${itemCount(pick.items.size)} to") {
         LazyColumn {
-            item(key = "new") { MenuRow(Sym.AddPhotoAlternate, "New album", onNew, trailing = null) }
+            item(key = "new") { MenuRow(Sym.AddPhotoAlternate, "New album", onNew, sub = "Name a new folder for them", trailing = null) }
             items(albums, key = { it.id }) { a ->
                 CoverRow(nameOf(a), itemCount(a.count), { onPick(a) }) { Thumbnail(coverOf(a), Modifier.matchParentSize()) }
             }
@@ -816,7 +803,6 @@ fun SelectionMoreSheet(items: List<Media>, title: String?, actions: AlbumActions
     }
     Sheet(onDismiss, itemCount(items.size)) {
         MenuRow(Sym.Share, "Share as ZIP", closing { actions.shareZip(title, items) }, sub = "One file, with the photos as they are", trailing = null)
-        MenuRow(Sym.Schedule, "Edit date and time", closing { actions.editDate(items) }, sub = "For photos saved with the wrong date", trailing = null)
-        MenuRow(Sym.LocationOn, "Edit place", closing { actions.editPlace(items) }, sub = "Set where they were taken, or remove it", trailing = null)
+        MenuRow(Sym.Edit, "Edit details", closing { actions.editDetails(items) }, sub = "Date, time and place", trailing = null)
     }
 }

@@ -81,6 +81,7 @@ import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -175,38 +176,53 @@ fun FrontPin(onDone: () -> Unit, onCancel: () -> Unit) {
 }
 
 /**
- * Call from a page that shows private things (Private safe, Hidden items, a hidden album or person): screenshots and the
- * recents preview are blocked while it's on screen, and privacy stays unlocked while it is. [lockOnLeave]: leaving the
- * page locks privacy at once (Private safe), rather than [PrivacyLock.WINDOW_MS] later.
+ * Call from a page that shows private things (Private safe, Hidden items, ID cards, a hidden album or person):
+ * screenshots and the recents preview are blocked while it's on screen, privacy stays unlocked while it is, and leaving
+ * it locks privacy at once, unless another private page took its place.
  */
 @Composable
-fun PrivatePage(lockOnLeave: Boolean = false) {
+fun PrivatePage() {
     val activity = LocalActivity.current
     DisposableEffect(activity) {
         PrivacyLock.hold(activity?.window)
-        onDispose {
-            PrivacyLock.release(activity?.window)
-            // Turning the phone only rebuilds the screen, so the page stays open
-            if (lockOnLeave && activity?.isChangingConfigurations != true) PrivacyLock.lock()
-        }
+        // Turning the phone only rebuilds the screen, so the page stays open
+        onDispose { PrivacyLock.release(activity?.window, leaving = activity?.isChangingConfigurations != true) }
     }
 }
 
-/** Runs private actions: see [run]. Get one with [rememberPrivacyAsk]. */
+/** Runs private actions: see [run] and [forMoveIn]. Get one with [rememberPrivacyAsk]. */
 @Stable
 class PrivacyAsk internal constructor() {
-    internal var pending by mutableStateOf<Pair<String, () -> Unit>?>(null)
+    /** A sheet's [title] and what runs after it: [action] with privacy unlocked, or [onKey] with the safe key instead. */
+    internal class Pending(val title: String, val action: () -> Unit, val onKey: ((ByteArray) -> Unit)? = null)
+
+    internal var pending by mutableStateOf<Pending?>(null)
 
     /**
      * Runs [action] now while privacy is unlocked, else after the PIN or fingerprint in a sheet titled [title] ("Hide
-     * Asha"), which sets up a PIN first if there's none.
+     * Asha"), which sets up a PIN first if there's none. Away from a private page, privacy locks again once it has run.
      */
     fun run(title: String, action: () -> Unit) {
         if (PrivacyLock.isOpen) {
-            PrivacyLock.touch()
+            PrivacyLock.lockUnlessHeld()
             action()
         } else {
-            pending = title to action
+            pending = Pending(title, action)
+        }
+    }
+
+    /**
+     * Gives [move] what a move into Private safe encrypts with, which it takes: null, at once and asking nothing, when the
+     * safe can seal to its public key ([Safe.canSeal]); else a copy of the open safe key; else, for a safe not opened
+     * since it got that key (or one with no PIN yet), the safe key from the PIN in a sheet titled [title]. That unlock
+     * makes the public key, so it's asked once, and privacy stays locked throughout.
+     */
+    fun forMoveIn(title: String, move: (ByteArray?) -> Unit) {
+        if (Safe.canSeal()) return move(null)
+        Safe.key.value?.copyOf()?.let { return move(it) }
+        pending = Pending(title, {}) { key ->
+            IdCards.keepCopyWith(key) // makes the key pair, so the next move asks nothing
+            move(key)
         }
     }
 }
@@ -216,11 +232,16 @@ fun rememberPrivacyAsk(): PrivacyAsk {
     val context = LocalContext.current
     remember { PrivacyLock.init(context) }
     val ask = remember { PrivacyAsk() }
-    ask.pending?.let { (title, action) ->
-        PrivacySheet(title, onDone = {
+    ask.pending?.let { p ->
+        PrivacySheet(p.title, onDone = {
             ask.pending = null
-            action()
-        }, onDismiss = { ask.pending = null })
+            p.action()
+        }, onDismiss = { ask.pending = null }, onKey = p.onKey?.let { onKey ->
+            { key: ByteArray ->
+                ask.pending = null
+                onKey(key)
+            }
+        })
     }
     return ask
 }
@@ -239,13 +260,26 @@ fun PrivacyHost(snackbar: SnackbarHostState) {
             val undo = n.undo
             if (undo == null) {
                 snackbar.showSnackbar(n.text)
-            } else if (snackbar.showSnackbar(n.text, "Undo", duration = SnackbarDuration.Long) == SnackbarResult.ActionPerformed && PrivacyLock.isOpen) {
+                continue
+            }
+            // Undo of a hide shows things again, so it lasts only until privacy next locks (Album leaving the screen, say),
+            // which also takes the message away. A hide away from a private page has locked already, before this.
+            val locks = PrivacyLock.lockCount.value
+            val watch = launch {
+                PrivacyLock.lockCount.first { it != locks }
+                snackbar.currentSnackbarData?.takeIf { it.visuals.message == n.text }?.dismiss()
+            }
+            val result = snackbar.showSnackbar(n.text, "Undo", duration = SnackbarDuration.Long)
+            watch.cancel()
+            if (result == SnackbarResult.ActionPerformed && PrivacyLock.lockCount.value == locks) {
                 CrashLog.note("undo hide")
-                undo() // only while privacy is still unlocked: Undo of a hide shows things again
+                undo()
             }
         }
     }
-    if (PrivacyLock.rearmOffer.collectAsState().value) {
+    // Re-arming wraps the open safe key, so the offer waits until privacy is open (an unlock for one action relocks at once)
+    val open = Safe.key.collectAsState().value != null
+    if (PrivacyLock.rearmOffer.collectAsState().value && open) {
         ConfirmBar(
             title = "Turn Forgot PIN back on?",
             body = "Your screen lock was off for a while, so Forgot PIN and fingerprint unlock switched off. Confirm with your " +

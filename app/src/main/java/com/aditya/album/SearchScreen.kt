@@ -1,5 +1,6 @@
 package com.aditya.album
 
+import androidx.compose.foundation.horizontalScroll
 import android.content.Context
 import android.content.SharedPreferences
 import android.os.SystemClock
@@ -313,7 +314,7 @@ fun SearchPage(
                     gridModifier,
                     header = {
                         Column {
-                            Notes(listOfNotNull(leftOut(result.ignored), note))
+                            MatchLine(result, note)
                             TopMatches(result, columns.intValue, selected, selecting, open, onSelect)
                         }
                     },
@@ -454,6 +455,30 @@ private fun Chips(texts: List<String>, icon: Sym, onPick: (String) -> Unit) {
     }
 }
 
+/** "[Riya] [Arjun] [Goa]   42 results": what the query was read as, so a surprising result explains itself. */
+@Composable
+private fun MatchLine(result: SearchResult, note: String?) {
+    val c = AlbumTheme.colors
+    val shown = result.terms.filter { it !in result.ignored }
+    if (shown.isNotEmpty()) Row(Modifier.padding(start = Space.s4, end = Space.s4, top = Space.s2), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), Arrangement.spacedBy(Space.s2)) {
+            shown.forEach { term ->
+                Row(
+                    Modifier.background(c.flashSoft, CircleShape).padding(start = Space.s2, end = Space.s3, top = 6.dp, bottom = 6.dp)
+                        .semantics(mergeDescendants = true) {}, // read as "Person, Riya"
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(term.kind.sym, term.kind.name, size = 16.dp, tint = c.flashInk)
+                    Text(term.label, color = c.ink, style = AlbumTheme.type.label)
+                }
+            }
+        }
+        Text(countOf(result.items.size, "result"), Modifier.padding(start = Space.s3), color = c.inkMuted, style = AlbumTheme.type.meta)
+    }
+    Notes(listOfNotNull(leftOut(result.ignored), note))
+}
+
 /** Captions above the results, when there's something to say: words left out, the index still going. */
 @Composable
 private fun Notes(notes: List<String>) {
@@ -546,3 +571,15 @@ fun namesOf(names: List<String>): String = if (names.size < 2) names.joinToStrin
 /** Why results may be missing photos: the smart index is still going. Null once it's done. */
 private fun indexingNote(p: IndexProgress) =
     if (p.done >= p.total) null else "Album is still going through your photos (%,d of %,d), so some can't be found yet.".format(p.done, p.total)
+
+/** The icon a search term shows in its chip. */
+private val MatchKind.sym
+    get() = when (this) {
+        MatchKind.Thing -> Sym.Category
+        MatchKind.Place -> Sym.LocationOn
+        MatchKind.Date -> Sym.Event
+        MatchKind.Album -> Sym.PhotoAlbum
+        MatchKind.Type -> Sym.Image
+        MatchKind.Text -> Sym.TextFields
+        MatchKind.Person -> Sym.Person
+    }

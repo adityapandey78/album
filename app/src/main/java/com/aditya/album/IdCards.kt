@@ -71,7 +71,7 @@ fun idGate(screenLock: Boolean, pin: Boolean, setUp: Boolean, wrapped: Boolean, 
     else -> IdGate.NoLock
 }
 
-/** What For you's confirmation says about where ID photos go, for a phone with or without a [screenLock]. */
+/** What the review page ([ProtectReviewScreen]) says about where ID photos go, for a phone with or without a [screenLock]. */
 fun idMoveNote(screenLock: Boolean) =
     "They leave the Library and search, and open with your ${if (screenLock) "screen lock" else "privacy PIN"}."
 
@@ -104,6 +104,7 @@ class WrappedKey(val alias: String, val iv: ByteArray, val wrapped: ByteArray) {
  * made for each seal, HMAC-SHA256 of the shared secret (keyed by that key's public half) as the AES-256-GCM key. ID cards
  * seal their key to the escrow whenever they're open; only the safe key, which the privacy PIN opens, unseals the escrow's
  * private half ([lock], [privateOf]). So the PIN keeps a way in without ever being typed while ID cards are open.
+ * Private safe seals the own keys of photos moved in while it's locked to the same escrow, its key pair ([Safe.moveIn]).
  */
 object Escrow {
     fun newPair(): KeyPair = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair()
@@ -182,12 +183,15 @@ object Escrow {
 object IdCards {
     /** The PIN's copy of the key, in Safe.idDir. Private safe's reset deletes it along with the escrow it's sealed to. */
     const val PIN_COPY = "pin"
+
+    /** The escrow, in Safe.dir: the safe key's key pair. Private safe's reset deletes it first. */
+    const val ESCROW = "escrow"
     private const val ALIAS = "album_id"
     private const val TRY_AGAIN = "Couldn't check it's you. Try again."
     private const val HOUR = 60 * 60 * 1000L
     private val keyFile by lazy { AtomicFile(File(Safe.idDir, "key")) }
     private val copyFile by lazy { AtomicFile(File(Safe.idDir, PIN_COPY)) }
-    private val escrowFile by lazy { AtomicFile(File(Safe.dir, "escrow")) } // with the safe key's files: its reset deletes it
+    private val escrowFile by lazy { AtomicFile(File(Safe.dir, ESCROW)) } // with the safe key's files: its reset deletes it
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var started = false
 
@@ -362,6 +366,15 @@ object IdCards {
         CrashLog.note("id cards escrow made")
         return pair
     }
+
+    /** Whether the escrow is there yet, so Private safe can seal moves in to it ([Safe.canSeal]). */
+    internal fun hasEscrow() = escrowFile.baseFile.exists()
+
+    /** The escrow's public half, for Private safe's sealed moves in; null until an unlock made the escrow. */
+    internal fun escrowPublic(): PublicKey? = if (hasEscrow()) Escrow.publicOf(escrowFile.readFully()) else null
+
+    /** The escrow's private half, opened with [safeKey] (left as it is), for Private safe's sealed items. Throws without one. */
+    internal fun escrowPrivate(safeKey: ByteArray): PrivateKey = Escrow.privateOf(escrowFile.readFully(), safeKey)
 
     /**
      * With [safeKey] from the privacy PIN (a copy is taken; privacy opening, or the open page's "Keep a copy for your PIN"):
